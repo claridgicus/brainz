@@ -73,6 +73,8 @@ export const vault = sqliteTable(
     slug: text("slug").notNull(),
     name: text("name").notNull(),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    /** Set when the onboard flow completes; mirrored in the vault's DO meta. */
+    onboardedAt: integer("onboarded_at", { mode: "timestamp_ms" }),
   },
   (t) => [uniqueIndex("vault_owner_slug_unique").on(t.ownerId, t.slug)],
 );

@@ -47,6 +47,7 @@ export const POST = guarded(async (event) => {
     slug,
     name: body.name,
     createdAt: new Date(),
+    onboardedAt: null,
   };
   await db.insert(schema.vault).values(vault);
   return json(toWire(vault), { status: 201 });

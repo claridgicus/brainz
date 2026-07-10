@@ -2,12 +2,20 @@
 
 A product-knowledge graph with an MCP server, built for **agent orchestration**.
 
-Product concepts — features, decisions, constraints, patterns, glossary terms — live as
-markdown notes wired into a graph by wiki-links and typed relations. The primary consumer
-is not a human but an **orchestrator agent**: before delegating a coding task, the
-orchestrator calls `get_context` over MCP and injects the returned markdown bundle into the
-subagent's prompt. Coding agents get precise, curated product knowledge; the orchestrator's
-own context stays clean.
+Product concepts — domains, features, stories, specs, workflows, decisions, constraints,
+patterns, glossary terms — live as markdown notes wired into a graph by wiki-links and
+typed relations. The primary consumer is not a human but an **orchestrator agent**: before
+delegating a coding task, the orchestrator calls `get_context` over MCP and injects the
+returned markdown bundle into the subagent's prompt. Coding agents get precise, curated
+product knowledge; the orchestrator's own context stays clean.
+
+Getting the knowledge in is agent-driven too: the `onboard` MCP tool (or `brainz onboard`)
+hands the calling agent a playbook for indexing an existing codebase into the vault —
+domains first, then the features `part_of` them, the stories they're `realized_by`, the
+specs that `govern` them, and the workflows across them, every concept carrying
+`code_areas` (rough paths/globs) that tell the next agent where in the codebase the
+knowledge applies. Until onboarding completes, search and context responses carry a
+one-line nudge to run it.
 
 `SPEC.md` is the product contract. `examples/demo-vault/` is a seeded vault for a fictional
 SaaS product (Acme CRM).
@@ -77,10 +85,12 @@ Notes are markdown with YAML frontmatter, inline `[[wiki-links]]`, and typed rel
 ---
 id: auth-session-model        # slug; defaults to filename-without-ext; unique per vault
 title: Auth Session Model
-type: concept                 # concept | feature | decision | constraint | pattern | glossary
+type: concept                 # concept | domain | feature | story | spec | workflow | decision | constraint | pattern | glossary
 product: acme-app             # optional grouping key
 tags: [auth, backend]
 status: active                # active | draft | deprecated
+code_areas:                   # optional: rough codebase paths/globs this knowledge lives in
+  - src/auth/session.ts
 relations:                    # typed edges (in addition to inline wiki-links)
   depends_on: [jwt-tokens]
   part_of: [auth-system]
@@ -102,16 +112,22 @@ errors) in `brainz validate`.
 | `get_concept` | `{id}` | full markdown + meta + direct neighbors list |
 | `get_related` | `{id, depth?, limit?, relations?}` | related nodes w/ distance & path relations |
 | `get_context` | `{query?, ids?, product?, depth?, tokenBudget?}` | **the flagship**: assembled markdown bundle for injection into a coding agent's prompt |
-| `upsert_concept` | `{id?, title, body, type?, product?, tags?, relations?}` | saved concept meta |
+| `upsert_concept` | `{id?, title, body, type?, product?, tags?, codeAreas?, relations?}` | saved concept meta |
 | `link_concepts` | `{from, to, relation?}` | ok |
 | `list_concepts` | `{product?, type?, tag?}` | metas |
-| `vault_stats` | `{}` | VaultStats |
+| `vault_stats` | `{}` | VaultStats (incl. `onboarded`) |
+| `onboard` | `{action: start\|complete\|status, productName?, repoHint?, summary?}` | the onboarding playbook / status / completion |
+
+Relations are free-form strings; the documented conventions are `part_of`, `realized_by`,
+`governs`, `depends_on`, `constrains`, `supersedes`, `related_to` (a story is `part_of` its
+domain and `realized_by` features; a spec `governs` what it constrains).
 
 ## CLI
 
 ```
 brainz init [dir]                      # scaffold vault + config + sample note
-brainz add <title> [--type --product --tags --body|--stdin]
+brainz onboard [--status | --complete --summary "..."]   # onboarding playbook / progress / completion
+brainz add <title> [--type --product --tags --code-areas --body|--stdin]
 brainz search <query> [--mode --product --limit]
 brainz show <id>
 brainz related <id> [--depth]

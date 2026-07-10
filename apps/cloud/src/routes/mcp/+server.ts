@@ -3,7 +3,7 @@
  *
  * Auth split:
  * - `Authorization: Bearer bz_...` (valid) → SHA-256 → D1 api_key lookup →
- *   that key's vault DO, serving the 8 authenticated vault tools.
+ *   that key's vault DO, serving the 9 authenticated vault tools.
  * - Authorization header present but invalid/revoked → 401, exactly as before.
  * - NO Authorization header → the PUBLIC MCP server: exactly one tool,
  *   `signup` (agent-driven account provisioning; see PUBLIC_MCP_TOOLS in
@@ -22,9 +22,10 @@
 import type { RequestHandler } from "@sveltejs/kit";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
+import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { apiError, requirePlatform } from "$lib/server/api-util";
-import { createDb } from "$lib/server/db";
+import { createDb, schema } from "$lib/server/db";
 import { resolveApiKey } from "$lib/server/vault-access";
 import { buildMcpServer } from "$lib/server/mcp";
 import { buildPublicMcpServer, signupDepsFromDb } from "$lib/server/public-mcp";
@@ -56,7 +57,16 @@ const handleMcp: RequestHandler = async (event) => {
         },
       });
     }
-    server = buildMcpServer(vaultClient(platform.env.VAULT_DO, resolved.vault.id));
+    const vaultId = resolved.vault.id;
+    server = buildMcpServer(vaultClient(platform.env.VAULT_DO, vaultId), {
+      // Mirror onboard completion into the D1 control-plane column.
+      onOnboarded: async (onboardedAt) => {
+        await createDb(platform.env.DB)
+          .update(schema.vault)
+          .set({ onboardedAt })
+          .where(eq(schema.vault.id, vaultId));
+      },
+    });
   }
 
   const transport = new StreamableHTTPTransport();

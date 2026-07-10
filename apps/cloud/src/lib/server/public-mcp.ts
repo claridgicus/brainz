@@ -111,7 +111,14 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
         createdAt: now,
         updatedAt: now,
       },
-      vault: { id: vaultId, ownerId: userId, slug: vaultSlug, name: vaultName, createdAt: now },
+      vault: {
+        id: vaultId,
+        ownerId: userId,
+        slug: vaultSlug,
+        name: vaultName,
+        createdAt: now,
+        onboardedAt: null,
+      },
       apiKey: {
         id: crypto.randomUUID(),
         vaultId,

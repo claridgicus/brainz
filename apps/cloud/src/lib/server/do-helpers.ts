@@ -22,6 +22,7 @@ export function compactMeta(meta: ConceptMeta): ToolConceptMeta {
     status: meta.status,
     ...(meta.product !== undefined ? { product: meta.product } : {}),
     tags: meta.tags,
+    ...(meta.codeAreas !== undefined ? { codeAreas: meta.codeAreas } : {}),
   };
 }
 

@@ -15,4 +15,10 @@ export type {
 } from "@brainz/engine";
 
 export { Vault } from "./vault.js";
-export { slugify } from "@brainz/engine";
+export {
+  ONBOARDING_NUDGE,
+  ONBOARDING_SUMMARY_ID,
+  onboardingPlaybook,
+  slugify,
+} from "@brainz/engine";
+export type { OnboardingPlaybookOptions } from "@brainz/engine";

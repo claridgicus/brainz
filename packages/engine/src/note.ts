@@ -4,7 +4,11 @@ import type { ConceptMeta, ConceptStatus, ConceptType } from "./types.js";
 
 const CONCEPT_TYPES: readonly ConceptType[] = [
   "concept",
+  "domain",
   "feature",
+  "story",
+  "spec",
+  "workflow",
   "decision",
   "constraint",
   "pattern",
@@ -81,6 +85,8 @@ export function parseNote(markdown: string, opts: ParseNoteOptions): ParsedNote 
 
   const body = content.replace(/^\r?\n/, "");
 
+  const codeAreas = asStringArray(fm.code_areas);
+
   const meta: NoteMeta = {
     id,
     title,
@@ -88,6 +94,7 @@ export function parseNote(markdown: string, opts: ParseNoteOptions): ParsedNote 
     status,
     product,
     tags: asStringArray(fm.tags),
+    ...(codeAreas.length > 0 ? { codeAreas } : {}),
     createdAt: asIso(fm.createdAt),
     updatedAt: asIso(fm.updatedAt),
   };

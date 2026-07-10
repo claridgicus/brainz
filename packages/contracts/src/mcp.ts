@@ -1,5 +1,5 @@
 /**
- * MCP tool registry — THE source of truth for the 8 Brainz tools.
+ * MCP tool registry — THE source of truth for the 9 Brainz tools.
  *
  * Names, titles, descriptions (the orchestrator-facing UX text), input schemas,
  * and defaults live here, NOT in the servers. `@brainz/mcp-server` (stdio) and
@@ -31,6 +31,7 @@ export const toolConceptMetaSchema = z
     status: conceptStatusSchema,
     product: z.string().optional(),
     tags: z.array(z.string()),
+    codeAreas: z.array(z.string()).optional(),
   })
   .strict();
 
@@ -85,10 +86,18 @@ export const upsertConceptInputSchema = z.object({
   status: z.enum(CONCEPT_STATUSES).optional().describe("Lifecycle status (default \"active\")."),
   product: z.string().optional().describe("Product grouping key."),
   tags: z.array(z.string()).optional().describe("Tags for filtering."),
+  codeAreas: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Rough codebase paths/globs where this knowledge lives, e.g. [\"packages/core/src/vault.ts\", \"apps/web/src/routes/**\"] — lets agents briefed by get_context know where to apply it.",
+    ),
   relations: z
     .record(z.string(), z.array(z.string()))
     .optional()
-    .describe("Typed edges, e.g. {\"depends_on\": [\"auth-system\"]}."),
+    .describe(
+      "Typed edges, e.g. {\"depends_on\": [\"auth-system\"]}. Conventions: part_of (feature/story → domain), realized_by (story → features), governs (spec → what it constrains), depends_on, constrains, supersedes, related_to.",
+    ),
 });
 
 export const linkConceptsInputSchema = z.object({
@@ -97,7 +106,9 @@ export const linkConceptsInputSchema = z.object({
   relation: z
     .string()
     .default("related_to")
-    .describe("Edge type, e.g. depends_on | part_of | constrains | supersedes | related_to (default)."),
+    .describe(
+      "Edge type, e.g. part_of | realized_by | governs | depends_on | constrains | supersedes | related_to (default).",
+    ),
 });
 
 export const listConceptsInputSchema = z.object({
@@ -108,10 +119,34 @@ export const listConceptsInputSchema = z.object({
 
 export const vaultStatsInputSchema = z.object({});
 
+export const onboardInputSchema = z.object({
+  action: z
+    .enum(["start", "complete", "status"])
+    .describe(
+      '"start" returns the onboarding playbook, "complete" marks the vault onboarded (requires `summary`), "status" reports onboarded state and concept counts.',
+    ),
+  productName: z
+    .string()
+    .optional()
+    .describe("With \"start\": the product's name, echoed into the playbook heading."),
+  repoHint: z
+    .string()
+    .optional()
+    .describe("With \"start\": where the codebase lives (path or URL), echoed into the playbook."),
+  summary: z
+    .string()
+    .optional()
+    .describe(
+      'Required with "complete": 2–5 sentences on what was indexed and any notable gaps — stored as the product-onboarding-summary concept.',
+    ),
+});
+
 // ------------------------------------------------------------ output schemas
 
 export const searchConceptsOutputSchema = z
   .object({
+    /** Present only while the vault is un-onboarded: the one-line onboarding nudge. */
+    notice: z.string().optional(),
     hits: z.array(
       z
         .object({
@@ -159,7 +194,8 @@ export const getRelatedOutputSchema = z
  *   2. a single-line JSON footer that parses with get_context's outputSchema:
  *      { included, truncated, approxTokens }
  * Every other tool responds with ONE text block whose JSON parses with its
- * outputSchema.
+ * outputSchema — except onboard {action: "start"}, which responds with one
+ * markdown text block (see ONBOARD_START_CONTENT).
  */
 export const GET_CONTEXT_CONTENT_BLOCKS = ["markdown", "json-footer"] as const;
 
@@ -194,6 +230,35 @@ export const listConceptsOutputSchema = z
 export const vaultStatsOutputSchema = vaultStatsSchema.extend({
   embeddings: embeddingStatusSchema,
 });
+
+/**
+ * ONBOARD OUTPUT CONVENTION — `onboard {action: "start"}` responds with ONE
+ * markdown text block: the playbook itself (the point is to read it, not
+ * parse it). "status" and "complete" respond with one JSON text block that
+ * parses with the schemas below (encoded together in onboardOutputSchema).
+ */
+export const ONBOARD_START_CONTENT = "markdown-playbook" as const;
+
+export const onboardStatusOutputSchema = z
+  .object({
+    onboarded: z.boolean(),
+    conceptCount: z.number().int(),
+    byType: z.record(z.string(), z.number()),
+  })
+  .strict();
+
+export const onboardCompleteOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    onboarded: z.literal(true),
+    summaryConceptId: z.string(),
+  })
+  .strict();
+
+export const onboardOutputSchema = z.union([
+  onboardCompleteOutputSchema,
+  onboardStatusOutputSchema,
+]);
 
 // ----------------------------------------------------------------- registry
 
@@ -288,6 +353,21 @@ export const MCP_TOOLS = [
     inputSchema: vaultStatsInputSchema,
     outputSchema: vaultStatsOutputSchema,
   },
+  {
+    name: "onboard",
+    title: "Onboard this vault",
+    description:
+      "Step 1 on any new vault: onboarding turns an existing product's codebase into the knowledge graph " +
+      "your whole agent fleet shares. Call {action: \"start\"} to receive the onboarding playbook — " +
+      "instructions for fanning subagents out over the codebase and distilling product knowledge " +
+      "(domains, features, stories, specs, workflows, decisions, constraints) into concepts via " +
+      "upsert_concept, each anchored to the code with codeAreas. When the graph is written, call " +
+      "{action: \"complete\", summary} to mark the vault onboarded and store the summary. " +
+      "{action: \"status\"} reports onboarded state and concept counts. Until onboarding completes, " +
+      "search_concepts and get_context results carry a reminder to run it.",
+    inputSchema: onboardInputSchema,
+    outputSchema: onboardOutputSchema,
+  },
 ] as const;
 
 // ------------------------------------------------- public (unauthenticated)
@@ -318,7 +398,7 @@ export const signupOutputSchema = z
  * PUBLIC_MCP_TOOLS — the toolset an UNAUTHENTICATED /mcp connection sees on
  * Brainz Cloud: exactly one tool, `signup`. It is deliberately NOT part of
  * MCP_TOOLS (the local stdio server has no accounts, and the authenticated
- * remote surface stays the 8 vault tools).
+ * remote surface stays the 9 vault tools).
  */
 export const PUBLIC_MCP_TOOLS = [
   {
@@ -327,7 +407,7 @@ export const PUBLIC_MCP_TOOLS = [
     description:
       "Provision a Brainz Cloud account for your human: creates the account, a first knowledge vault, " +
       "and a working API key, plus a single-use claim link. Keep the returned apiKey yourself — send it " +
-      "as `Authorization: Bearer <apiKey>` to this same /mcp endpoint and the 8 vault tools unlock " +
+      "as `Authorization: Bearer <apiKey>` to this same /mcp endpoint and the 9 vault tools unlock " +
       "immediately, no human action required. Deliver the claimUrl to your human: opening it lets them " +
       "set a password and take ownership of the account in the dashboard (the link is single-use and " +
       "expires in 7 days; the API key keeps working either way). Call this once per email — if the " +

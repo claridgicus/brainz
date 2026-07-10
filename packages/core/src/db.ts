@@ -11,6 +11,7 @@ export function openDb(path: string): Database.Database {
       status     TEXT NOT NULL,
       product    TEXT,
       tags       TEXT NOT NULL DEFAULT '[]',
+      code_areas TEXT NOT NULL DEFAULT '[]',
       file_path  TEXT NOT NULL,
       created_at TEXT,
       updated_at TEXT,
@@ -34,5 +35,12 @@ export function openDb(path: string): Database.Database {
       hash   TEXT NOT NULL
     );
   `);
+  // Additive migration for .brainz dbs created before code_areas existed.
+  // (.brainz is derived state — worst case it can be deleted and rebuilt.)
+  try {
+    db.exec(`ALTER TABLE concepts ADD COLUMN code_areas TEXT NOT NULL DEFAULT '[]'`);
+  } catch {
+    /* column already exists */
+  }
   return db;
 }

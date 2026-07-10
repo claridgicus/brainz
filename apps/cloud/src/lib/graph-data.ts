@@ -6,7 +6,11 @@ import type { Edge, GraphNode, GraphPayload } from "@brainz/contracts";
 /** Node fill palette by concept type — shared with packages/web's graph view. */
 export const TYPE_COLORS: Record<string, string> = {
   concept: "#4f9cf9",
+  domain: "#f472b6",
   feature: "#34d399",
+  story: "#a3e635",
+  spec: "#2dd4bf",
+  workflow: "#fb923c",
   decision: "#fbbf24",
   constraint: "#f87171",
   pattern: "#a78bfa",

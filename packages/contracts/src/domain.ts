@@ -33,12 +33,32 @@ export type {
 
 export const CONCEPT_TYPES = [
   "concept",
+  "domain",
   "feature",
+  "story",
+  "spec",
+  "workflow",
   "decision",
   "constraint",
   "pattern",
   "glossary",
 ] as const satisfies readonly ConceptType[];
+
+/**
+ * Canonical relation names — documented conventions, not an enum: relations
+ * stay free-form strings on the wire. `part_of` hangs features/stories/
+ * workflows off domains, `realized_by` maps a story to the features that
+ * deliver it, and `governs` points a spec at what it constrains.
+ */
+export const CANONICAL_RELATIONS = [
+  "part_of",
+  "realized_by",
+  "governs",
+  "depends_on",
+  "constrains",
+  "supersedes",
+  "related_to",
+] as const;
 
 export const CONCEPT_STATUSES = [
   "active",
@@ -76,6 +96,7 @@ export const conceptMetaSchema = z
     status: conceptStatusSchema,
     product: z.string().optional(),
     tags: z.array(z.string()),
+    codeAreas: z.array(z.string()).optional(),
     filePath: z.string(),
     createdAt: z.string().optional(),
     updatedAt: z.string().optional(),
@@ -116,6 +137,7 @@ export const vaultStatsSchema = z
     products: z.array(z.string()),
     tags: z.array(z.string()),
     byType: z.record(z.string(), z.number()),
+    onboarded: z.boolean(),
   })
   .strict();
 

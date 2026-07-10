@@ -50,7 +50,7 @@ import {
   tokenize,
 } from "./do-helpers";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
 
 /** Minimal Workers AI surface (avoids model-name generics from workers-types). */
@@ -70,6 +70,7 @@ interface ConceptRow {
   status: string;
   product: string | null;
   tags_json: string;
+  code_areas_json: string;
   relations_json: string;
   body: string;
   hash: string;
@@ -117,6 +118,7 @@ export class VaultDO {
         status TEXT NOT NULL,
         product TEXT,
         tags_json TEXT NOT NULL DEFAULT '[]',
+        code_areas_json TEXT NOT NULL DEFAULT '[]',
         relations_json TEXT NOT NULL DEFAULT '{}',
         body TEXT NOT NULL,
         hash TEXT NOT NULL,
@@ -135,9 +137,12 @@ export class VaultDO {
         vector BLOB NOT NULL,
         hash TEXT NOT NULL
       )`);
-      this.#metaSet("schema_version", String(SCHEMA_VERSION));
       if (this.#metaGet("embeddings") === null) this.#metaSet("embeddings", "ready");
+    } else if (version < 2) {
+      // v1 → v2: code_areas ships (additive column; v1 rows default to []).
+      this.#sql.exec(`ALTER TABLE concept ADD COLUMN code_areas_json TEXT NOT NULL DEFAULT '[]'`);
     }
+    if (version < SCHEMA_VERSION) this.#metaSet("schema_version", String(SCHEMA_VERSION));
     // FTS5 probe: try to create the virtual table; fall back to token/LIKE
     // keyword search when DO SQLite lacks the extension.
     const recorded = this.#metaGet("keyword_index");
@@ -206,6 +211,10 @@ export class VaultDO {
           return json(await this.context(args as ContextArgs));
         case "stats":
           return json(this.stats());
+        case "onboarding":
+          return json(this.onboarding());
+        case "setOnboardedAt":
+          return json(this.setOnboardedAt(String(args.onboardedAt ?? "")));
         case "link":
           return json(await this.link(args as { from: string; to: string; relation?: string }));
         case "destroy":
@@ -236,6 +245,12 @@ export class VaultDO {
       input.product !== undefined ? input.product : (existing?.product ?? undefined);
     const tags =
       input.tags !== undefined ? input.tags : existing ? (JSON.parse(existing.tags_json) as string[]) : [];
+    const codeAreas =
+      input.codeAreas !== undefined
+        ? input.codeAreas
+        : existing
+          ? (JSON.parse(existing.code_areas_json) as string[])
+          : [];
     const relations =
       input.relations !== undefined
         ? input.relations
@@ -247,11 +262,12 @@ export class VaultDO {
     const hash = await sha256Hex(`${title}\n\n${body}`);
 
     this.#sql.exec(
-      `INSERT INTO concept (id, title, type, status, product, tags_json, relations_json, body, hash, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO concept (id, title, type, status, product, tags_json, code_areas_json, relations_json, body, hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          title = excluded.title, type = excluded.type, status = excluded.status,
          product = excluded.product, tags_json = excluded.tags_json,
+         code_areas_json = excluded.code_areas_json,
          relations_json = excluded.relations_json, body = excluded.body,
          hash = excluded.hash, created_at = excluded.created_at, updated_at = excluded.updated_at`,
       id,
@@ -260,6 +276,7 @@ export class VaultDO {
       status,
       product ?? null,
       JSON.stringify(tags),
+      JSON.stringify(codeAreas),
       JSON.stringify(relations),
       body,
       hash,
@@ -635,12 +652,27 @@ export class VaultDO {
     };
   }
 
+  // -------------------------------------------------------------- onboarding
+
+  /** Onboarded state, mirrored from the D1 control-plane column into DO meta. */
+  onboarding(): { onboardedAt: string | null } {
+    return { onboardedAt: this.#metaGet("onboarded_at") };
+  }
+
+  /** Record onboarding completion (ISO timestamp) in DO meta. */
+  setOnboardedAt(onboardedAt: string): { ok: true; onboardedAt: string } {
+    if (!onboardedAt) throw new Error("setOnboardedAt requires an ISO timestamp");
+    this.#metaSet("onboarded_at", onboardedAt);
+    return { ok: true, onboardedAt };
+  }
+
   stats(): {
     concepts: number;
     edges: number;
     products: string[];
     tags: string[];
     byType: Record<string, number>;
+    onboarded: boolean;
     embeddings: "ready" | "unavailable";
     keywordIndex: "fts5" | "like";
   } {
@@ -672,6 +704,7 @@ export class VaultDO {
       products,
       tags: [...tagSet].sort(),
       byType,
+      onboarded: this.#metaGet("onboarded_at") !== null,
       embeddings: this.#metaGet("embeddings") === "ready" ? "ready" : "unavailable",
       keywordIndex: this.#fts ? "fts5" : "like",
     };
@@ -698,6 +731,8 @@ export class VaultDO {
       tags: JSON.parse(row.tags_json) as string[],
       filePath: syntheticFilePath(row.id), // engine types require it; wire shapes strip it
     };
+    const codeAreas = JSON.parse(row.code_areas_json ?? "[]") as string[];
+    if (codeAreas.length > 0) meta.codeAreas = codeAreas;
     if (row.product !== null) meta.product = row.product;
     if (row.created_at !== null) meta.createdAt = row.created_at;
     if (row.updated_at !== null) meta.updatedAt = row.updated_at;
@@ -733,6 +768,7 @@ export interface WireConcept {
   status: ConceptStatus;
   product?: string;
   tags: string[];
+  codeAreas?: string[];
   createdAt?: string;
   updatedAt?: string;
   body: string;
@@ -745,6 +781,7 @@ export interface WireNeighbor {
   status: ConceptStatus;
   product?: string;
   tags: string[];
+  codeAreas?: string[];
   relation: string;
   direction: "out" | "in";
 }
@@ -764,6 +801,7 @@ export interface WireRelated {
   status: ConceptStatus;
   product?: string;
   tags: string[];
+  codeAreas?: string[];
   distance: number;
   via: Edge[];
 }

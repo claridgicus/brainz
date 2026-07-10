@@ -25,7 +25,11 @@ import type {
 
 const TYPE_COLORS: Record<string, string> = {
   concept: "#4f9cf9",
+  domain: "#f472b6",
   feature: "#34d399",
+  story: "#a3e635",
+  spec: "#2dd4bf",
+  workflow: "#fb923c",
   decision: "#fbbf24",
   constraint: "#f87171",
   pattern: "#a78bfa",
@@ -406,6 +410,7 @@ async function selectNode(id: string): Promise<void> {
       detail.product ? badge(detail.product) : "",
       detail.status !== "active" ? badge(detail.status) : "",
       ...detail.tags.map((t) => badge(`#${t}`)),
+      ...(detail.codeAreas ?? []).map((a) => badge(a, "code-area")),
     ];
     $("panel-badges").innerHTML = badges.join("");
     $("panel-body").innerHTML = renderMarkdown(detail.body);

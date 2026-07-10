@@ -9,7 +9,12 @@ import {
   type McpToolInput,
   type McpToolName,
 } from "@brainz/contracts";
-import type { ConceptMeta, Vault } from "@brainz/core";
+import {
+  ONBOARDING_NUDGE,
+  onboardingPlaybook,
+  type ConceptMeta,
+  type Vault,
+} from "@brainz/core";
 
 export const SERVER_NAME = "brainz";
 export const SERVER_VERSION = "0.1.0";
@@ -70,6 +75,7 @@ function compactMeta(c: ConceptMeta) {
     status: c.status,
     ...(c.product !== undefined ? { product: c.product } : {}),
     tags: c.tags,
+    ...(c.codeAreas !== undefined ? { codeAreas: c.codeAreas } : {}),
   };
 }
 
@@ -96,6 +102,8 @@ export function createServer(vault: Vault): McpServer {
       guarded(async () => {
         const hits = await vault.search({ query, mode, product, tags, type, limit });
         return ok({
+          // Nudge, not a wall: un-onboarded vaults carry the onboarding notice.
+          ...(vault.onboardedAt === null ? { notice: ONBOARDING_NUDGE } : {}),
           hits: hits.map((h) => ({
             id: h.concept.id,
             title: h.concept.title,
@@ -158,6 +166,11 @@ export function createServer(vault: Vault): McpServer {
         const bundle = await vault.assembleContext({ query, ids, product, depth, tokenBudget });
         // Two-block convention (see GET_CONTEXT_CONTENT_BLOCKS in @brainz/contracts):
         // markdown briefing first, then the JSON footer that matches the outputSchema.
+        // Un-onboarded vaults get the one-line onboarding nudge atop the markdown.
+        const markdown =
+          vault.onboardedAt === null && bundle.markdown
+            ? `${ONBOARDING_NUDGE}\n\n${bundle.markdown}`
+            : bundle.markdown;
         const footer = JSON.stringify({
           included: bundle.included.map((c) => c.id),
           truncated: bundle.truncated,
@@ -165,13 +178,13 @@ export function createServer(vault: Vault): McpServer {
         });
         return {
           content: [
-            { type: "text", text: bundle.markdown },
+            { type: "text", text: markdown },
             { type: "text", text: footer },
           ],
         };
       }),
 
-    upsert_concept: async ({ id, title, body, type, status, product, tags, relations }) =>
+    upsert_concept: async ({ id, title, body, type, status, product, tags, codeAreas, relations }) =>
       guarded(async () => {
         const saved = await vault.upsertConcept({
           id,
@@ -181,6 +194,7 @@ export function createServer(vault: Vault): McpServer {
           status,
           product,
           tags,
+          codeAreas,
           relations,
         });
         return ok({ ...compactMeta(saved), filePath: saved.filePath });
@@ -202,6 +216,33 @@ export function createServer(vault: Vault): McpServer {
       guarded(() => {
         const stats = vault.stats();
         return ok({ ...stats, embeddings: vault.embeddingStatus });
+      }),
+
+    onboard: async ({ action, productName, repoHint, summary }) =>
+      guarded(async () => {
+        if (action === "start") {
+          // Onboard-start convention (ONBOARD_START_CONTENT in @brainz/contracts):
+          // one markdown text block — the playbook itself.
+          const playbook = onboardingPlaybook({
+            productName,
+            repoHint,
+            onboarded: vault.onboardedAt !== null,
+          });
+          return { content: [{ type: "text", text: playbook }] };
+        }
+        if (action === "complete") {
+          if (!summary?.trim()) {
+            return fail('onboard {action: "complete"} requires a non-empty `summary`');
+          }
+          const saved = await vault.completeOnboarding(summary);
+          return ok({ ok: true, onboarded: true, summaryConceptId: saved.id });
+        }
+        const stats = vault.stats();
+        return ok({
+          onboarded: stats.onboarded,
+          conceptCount: stats.concepts,
+          byType: stats.byType,
+        });
       }),
   };
 

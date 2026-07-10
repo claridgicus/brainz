@@ -30,7 +30,9 @@ export interface AssembleContextOptions {
  * The graph is expanded to `depth`; each layer is added in sorted-id order
  * (deterministic). Pending nodes are traversed but never included. Sections
  * (`## <title> (<id>)`) are emitted in rank order until the token budget
- * would be exceeded; `truncated` is set if anything was cut.
+ * would be exceeded; `truncated` is set if anything was cut. Sections whose
+ * concept carries `codeAreas` end with a "Code areas: …" line so the briefed
+ * agent knows both the knowledge AND where in the codebase to apply it.
  */
 export function assembleContext(
   seedIds: string[],
@@ -85,7 +87,11 @@ export function assembleContext(
   for (const conceptId of ordered) {
     const concept = source.getConcept(conceptId);
     if (!concept) continue;
-    const section = `## ${concept.title} (${concept.id})\n\n${concept.body.trim()}`;
+    const codeAreasLine =
+      concept.codeAreas && concept.codeAreas.length > 0
+        ? `\n\nCode areas: ${concept.codeAreas.map((a) => `\`${a}\``).join(", ")}`
+        : "";
+    const section = `## ${concept.title} (${concept.id})\n\n${concept.body.trim()}${codeAreasLine}`;
     const addChars = section.length + (sections.length > 0 ? 2 : 0); // "\n\n" separator
     if (Math.ceil((chars + addChars) / 4) > tokenBudget) {
       truncated = true;

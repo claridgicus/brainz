@@ -3,6 +3,7 @@ import {
   assembleContext,
   bfsRelated,
   cosineSim,
+  ONBOARDING_SUMMARY_ID,
   packVector,
   parseNote,
   readFrontmatter,
@@ -36,6 +37,8 @@ import { createEmbedder, type Embedder, type EmbeddingConfig } from "./embedding
 interface VaultConfig {
   name: string;
   embedding: EmbeddingConfig;
+  /** ISO timestamp set when the onboard flow completes; absent → un-onboarded. */
+  onboardedAt?: string;
   [key: string]: unknown;
 }
 
@@ -46,6 +49,7 @@ interface ConceptRow {
   status: string;
   product: string | null;
   tags: string;
+  code_areas: string;
   file_path: string;
   created_at: string | null;
   updated_at: string | null;
@@ -187,11 +191,12 @@ export class Vault {
 
     this.#db
       .prepare(
-        `INSERT INTO concepts (id, title, type, status, product, tags, file_path, created_at, updated_at, body, hash)
-         VALUES (@id, @title, @type, @status, @product, @tags, @file_path, @created_at, @updated_at, @body, @hash)
+        `INSERT INTO concepts (id, title, type, status, product, tags, code_areas, file_path, created_at, updated_at, body, hash)
+         VALUES (@id, @title, @type, @status, @product, @tags, @code_areas, @file_path, @created_at, @updated_at, @body, @hash)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title, type = excluded.type, status = excluded.status,
-           product = excluded.product, tags = excluded.tags, file_path = excluded.file_path,
+           product = excluded.product, tags = excluded.tags, code_areas = excluded.code_areas,
+           file_path = excluded.file_path,
            created_at = excluded.created_at, updated_at = excluded.updated_at,
            body = excluded.body, hash = excluded.hash`,
       )
@@ -202,6 +207,7 @@ export class Vault {
         status: concept.status,
         product: concept.product ?? null,
         tags: JSON.stringify(concept.tags),
+        code_areas: JSON.stringify(concept.codeAreas ?? []),
         file_path: filePath,
         created_at: concept.createdAt ?? null,
         updated_at: concept.updatedAt ?? null,
@@ -426,6 +432,8 @@ export class Vault {
       tags: JSON.parse(row.tags) as string[],
       filePath: row.file_path,
     };
+    const codeAreas = JSON.parse(row.code_areas ?? "[]") as string[];
+    if (codeAreas.length > 0) meta.codeAreas = codeAreas;
     if (row.product !== null) meta.product = row.product;
     if (row.created_at !== null) meta.createdAt = row.created_at;
     if (row.updated_at !== null) meta.updatedAt = row.updated_at;
@@ -512,6 +520,7 @@ export class Vault {
     else if (data.status === undefined) data.status = "active";
     if (input.product !== undefined) data.product = input.product;
     if (input.tags !== undefined) data.tags = input.tags;
+    if (input.codeAreas !== undefined) data.code_areas = input.codeAreas;
     if (input.relations !== undefined) data.relations = input.relations;
 
     const body = input.body.endsWith("\n") ? input.body : `${input.body}\n`;
@@ -620,7 +629,42 @@ export class Vault {
       products,
       tags: [...tagSet].sort(),
       byType,
+      onboarded: this.onboardedAt !== null,
     };
+  }
+
+  // -------------------------------------------------------------- onboarding
+
+  /** ISO timestamp of onboarding completion (brainz.config.json), or null. */
+  get onboardedAt(): string | null {
+    return typeof this.#config.onboardedAt === "string" && this.#config.onboardedAt
+      ? this.#config.onboardedAt
+      : null;
+  }
+
+  /** Persist (or clear, with null) the onboarded timestamp in brainz.config.json. */
+  async setOnboardedAt(iso: string | null): Promise<void> {
+    if (iso === null) delete this.#config.onboardedAt;
+    else this.#config.onboardedAt = iso;
+    const configPath = path.join(this.dir, "brainz.config.json");
+    await fsp.writeFile(configPath, `${JSON.stringify(this.#config, null, 2)}\n`);
+  }
+
+  /**
+   * Complete onboarding: store the summary as the spec-type
+   * `product-onboarding-summary` concept and mark the vault onboarded.
+   */
+  async completeOnboarding(summary: string): Promise<Concept> {
+    const text = summary.trim();
+    if (!text) throw new Error("completeOnboarding requires a non-empty summary");
+    const saved = await this.upsertConcept({
+      id: ONBOARDING_SUMMARY_ID,
+      title: "Product onboarding summary",
+      type: "spec",
+      body: text,
+    });
+    await this.setOnboardedAt(new Date().toISOString());
+    return saved;
   }
 
   close(): void {

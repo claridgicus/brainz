@@ -44,7 +44,7 @@ function text(result: Awaited<ReturnType<Client["callTool"]>>): string {
 }
 
 describe("public MCP server (unauthenticated surface)", () => {
-  it("registers exactly the PUBLIC_MCP_TOOLS — signup only, none of the 8 vault tools", async () => {
+  it("registers exactly the PUBLIC_MCP_TOOLS — signup only, none of the 9 vault tools", async () => {
     const client = await connect(fakeDeps().deps);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name)).toEqual([...PUBLIC_MCP_TOOL_NAMES]);

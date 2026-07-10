@@ -1,29 +1,37 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
+  CANONICAL_RELATIONS,
+  CONCEPT_TYPES,
   CONTRACTS_VERSION,
   MCP_TOOLS,
   MCP_TOOL_NAMES,
   cliValidateJsonSchema,
+  conceptMetaSchema,
   getContextOutputSchema,
   getMcpTool,
   graphResponseSchema,
+  onboardCompleteOutputSchema,
+  onboardInputSchema,
+  onboardStatusOutputSchema,
   PUBLIC_MCP_TOOLS,
   PUBLIC_MCP_TOOL_NAMES,
   searchConceptsOutputSchema,
   signupInputSchema,
   signupOutputSchema,
+  toolConceptMetaSchema,
+  upsertConceptInputSchema,
   vaultStatsOutputSchema,
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "2"', () => {
-    expect(CONTRACTS_VERSION).toBe("2");
+  it('is "3"', () => {
+    expect(CONTRACTS_VERSION).toBe("3");
   });
 });
 
 describe("MCP_TOOLS registry", () => {
-  it("declares the eight spec'd tools, in registration order", () => {
+  it("declares the nine spec'd tools, in registration order", () => {
     expect(MCP_TOOL_NAMES).toEqual([
       "search_concepts",
       "get_concept",
@@ -33,6 +41,7 @@ describe("MCP_TOOLS registry", () => {
       "link_concepts",
       "list_concepts",
       "vault_stats",
+      "onboard",
     ]);
   });
 
@@ -66,7 +75,7 @@ describe("PUBLIC_MCP_TOOLS registry (unauthenticated /mcp surface)", () => {
     expect(PUBLIC_MCP_TOOLS).toHaveLength(1);
   });
 
-  it("signup is NOT one of the 8 authenticated vault tools", () => {
+  it("signup is NOT one of the 9 authenticated vault tools", () => {
     expect(MCP_TOOL_NAMES).not.toContain("signup");
   });
 
@@ -124,16 +133,125 @@ describe("output schemas encode the shipped shapes", () => {
     expect(getContextOutputSchema.safeParse({ included: ["a"] }).success).toBe(false);
   });
 
-  it("vault_stats output uses the `embeddings` key", () => {
+  it("vault_stats output uses the `embeddings` key and reports onboarded", () => {
     const parsed = vaultStatsOutputSchema.safeParse({
       concepts: 13,
       edges: 54,
       products: ["acme-crm"],
       tags: ["auth"],
       byType: { decision: 3 },
+      onboarded: false,
       embeddings: "unavailable",
     });
     expect(parsed.success).toBe(true);
+    // onboarded is part of the v3 shape — its absence is a contract violation.
+    expect(
+      vaultStatsOutputSchema.safeParse({
+        concepts: 0,
+        edges: 0,
+        products: [],
+        tags: [],
+        byType: {},
+        embeddings: "ready",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("search_concepts allows the optional onboarding notice", () => {
+    expect(
+      searchConceptsOutputSchema.safeParse({ notice: "vault not onboarded", hits: [] }).success,
+    ).toBe(true);
+    expect(searchConceptsOutputSchema.safeParse({ hits: [] }).success).toBe(true);
+  });
+});
+
+describe("product ontology (v3)", () => {
+  it("has the 10 concept types, additive over the original 6", () => {
+    expect(CONCEPT_TYPES).toHaveLength(10);
+    for (const t of ["concept", "feature", "decision", "constraint", "pattern", "glossary"]) {
+      expect(CONCEPT_TYPES).toContain(t);
+    }
+    for (const t of ["domain", "story", "spec", "workflow"]) {
+      expect(CONCEPT_TYPES).toContain(t);
+    }
+  });
+
+  it("documents the canonical relations incl. realized_by and governs", () => {
+    expect(CANONICAL_RELATIONS).toContain("realized_by");
+    expect(CANONICAL_RELATIONS).toContain("governs");
+    expect(CANONICAL_RELATIONS).toContain("part_of");
+  });
+
+  it("concept metas round-trip codeAreas (optional, strict otherwise)", () => {
+    const meta = {
+      id: "session-refresh",
+      title: "Session Refresh",
+      type: "feature",
+      status: "active",
+      tags: [],
+      codeAreas: ["packages/auth/src/session.ts", "apps/web/src/hooks/**"],
+      filePath: "/v/concepts/session-refresh.md",
+    };
+    const parsed = conceptMetaSchema.safeParse(meta);
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.codeAreas).toEqual(meta.codeAreas);
+    // Compact tool meta carries them too; omission stays valid.
+    const { filePath: _fp, ...tool } = meta;
+    expect(toolConceptMetaSchema.safeParse(tool).success).toBe(true);
+    expect(toolConceptMetaSchema.safeParse({ ...tool, codeAreas: undefined }).success).toBe(true);
+  });
+
+  it("upsert_concept input accepts the new types and codeAreas", () => {
+    const parsed = upsertConceptInputSchema.safeParse({
+      title: "Billing domain",
+      body: "…",
+      type: "domain",
+      codeAreas: ["apps/billing/**"],
+      relations: { governs: ["invoicing"] },
+    });
+    expect(parsed.success).toBe(true);
+    expect(
+      upsertConceptInputSchema.safeParse({ title: "x", body: "", type: "banana" }).success,
+    ).toBe(false);
+  });
+});
+
+describe("onboard tool contract", () => {
+  it("is the 9th tool with an agent-facing description", () => {
+    const onboard = getMcpTool("onboard");
+    expect(onboard.description).toMatch(/playbook/i);
+    expect(onboard.description).toMatch(/upsert_concept/);
+  });
+
+  it("input takes start/complete/status actions", () => {
+    expect(onboardInputSchema.safeParse({ action: "start", productName: "Acme" }).success).toBe(
+      true,
+    );
+    expect(onboardInputSchema.safeParse({ action: "complete", summary: "done" }).success).toBe(
+      true,
+    );
+    expect(onboardInputSchema.safeParse({ action: "status" }).success).toBe(true);
+    expect(onboardInputSchema.safeParse({ action: "restart" }).success).toBe(false);
+  });
+
+  it("status/complete outputs are strict", () => {
+    expect(
+      onboardStatusOutputSchema.safeParse({
+        onboarded: false,
+        conceptCount: 3,
+        byType: { domain: 1, feature: 2 },
+      }).success,
+    ).toBe(true);
+    expect(
+      onboardCompleteOutputSchema.safeParse({
+        ok: true,
+        onboarded: true,
+        summaryConceptId: "product-onboarding-summary",
+      }).success,
+    ).toBe(true);
+    expect(
+      onboardCompleteOutputSchema.safeParse({ ok: true, onboarded: false }).success,
+    ).toBe(false);
   });
 });
 

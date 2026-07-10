@@ -73,6 +73,43 @@ describe("parseNote", () => {
     expect(relations).toEqual({ depends_on: ["solo-target"] });
   });
 
+  it("parses all 10 ontology types", () => {
+    for (const type of [
+      "concept",
+      "domain",
+      "feature",
+      "story",
+      "spec",
+      "workflow",
+      "decision",
+      "constraint",
+      "pattern",
+      "glossary",
+    ]) {
+      const { meta } = parseNote(`---\ntype: ${type}\n---\nx`, { fallbackId: "t" });
+      expect(meta.type).toBe(type);
+    }
+  });
+
+  it("reads code_areas frontmatter into codeAreas (absent when empty)", () => {
+    const raw = [
+      "---",
+      "id: session-refresh",
+      "code_areas:",
+      "  - src/auth/session.ts",
+      "  - apps/web/src/routes/**",
+      "---",
+      "Body.",
+    ].join("\n");
+    const { meta } = parseNote(raw, { fallbackId: "session-refresh" });
+    expect(meta.codeAreas).toEqual(["src/auth/session.ts", "apps/web/src/routes/**"]);
+    expect(parseNote("just a body", { fallbackId: "n" }).meta.codeAreas).toBeUndefined();
+    // scalar coerces to a one-element list, like tags
+    expect(
+      parseNote("---\ncode_areas: src/one.ts\n---\nx", { fallbackId: "n" }).meta.codeAreas,
+    ).toEqual(["src/one.ts"]);
+  });
+
   it("extracts wiki-links from the body (code excluded)", () => {
     const raw = [
       "---",
@@ -129,6 +166,15 @@ describe("serializeNote / readFrontmatter", () => {
     expect(meta.title).toBe("Round Trip");
     expect(meta.tags).toEqual(["a", "b"]);
     expect(body.trim()).toBe("Body with a [[link-target]].");
+  });
+
+  it("round-trips code_areas through serialize -> parse", () => {
+    const md = serializeNote(
+      { id: "rt", title: "RT", code_areas: ["src/a.ts", "packages/b/**"] },
+      "Body.\n",
+    );
+    const { meta } = parseNote(md, { fallbackId: "x" });
+    expect(meta.codeAreas).toEqual(["src/a.ts", "packages/b/**"]);
   });
 
   it("preserves unknown frontmatter keys via the passthrough map", () => {

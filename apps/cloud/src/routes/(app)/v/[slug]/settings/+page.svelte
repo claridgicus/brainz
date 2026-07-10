@@ -195,7 +195,9 @@
 		<h2>Connect your orchestrator (MCP)</h2>
 		<p class="muted">
 			Point any MCP-capable agent at this vault. Create a key above, then swap it in for
-			<code>{keyPlaceholder}</code>.
+			<code>{keyPlaceholder}</code>. Step 1 after connecting: have your agent call the
+			<code>onboard</code> tool — it returns a playbook for indexing your product's codebase into
+			this vault (domains, features, stories, specs, workflows — each anchored to code areas).
 		</p>
 
 		<div class="snippet">

@@ -7,7 +7,7 @@ import type {
   CliShowNeighbor,
 } from "@brainz/contracts";
 import type { Concept, ConceptType } from "@brainz/core";
-import { slugify, Vault } from "@brainz/core";
+import { onboardingPlaybook, slugify, Vault } from "@brainz/core";
 import { Command, CommanderError, InvalidArgumentError, Option } from "commander";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
@@ -18,7 +18,18 @@ import { resolvePackageBin, runBin } from "./spawn.js";
 import { validateVault } from "./validate.js";
 
 const CLI_VERSION = "0.1.0";
-const CONCEPT_TYPES = ["concept", "feature", "decision", "constraint", "pattern", "glossary"];
+const CONCEPT_TYPES = [
+  "concept",
+  "domain",
+  "feature",
+  "story",
+  "spec",
+  "workflow",
+  "decision",
+  "constraint",
+  "pattern",
+  "glossary",
+];
 const DEFAULT_WEB_PORT = 4680;
 
 /** I/O seams so tests can drive the CLI in-process. Writers receive raw text. */
@@ -139,12 +150,16 @@ status: active
 ---
 
 This vault stores product knowledge as small, linked markdown concepts —
-features, decisions, constraints, patterns, and glossary entries.
+domains, features, stories, specs, workflows, decisions, constraints,
+patterns, and glossary entries.
 
+- Index an existing product with \`brainz onboard\` (prints the playbook an
+  agent follows to map the codebase into concepts).
 - Add concepts with \`brainz add "Title" --body "..."\` or by dropping \`.md\`
   files into \`concepts/\`.
 - Link concepts with inline wiki-links (\`[[some-id]]\`) or typed
-  \`relations:\` in frontmatter.
+  \`relations:\` in frontmatter; \`code_areas:\` points at where the knowledge
+  lives in the codebase.
 - Retrieve knowledge with \`brainz search <query>\` or assemble an
   agent-ready bundle with \`brainz context --query <q>\`.
 `;
@@ -223,6 +238,11 @@ export function buildProgram(ctx: Ctx): Command {
     .addOption(new Option("--type <type>", "concept type").choices(CONCEPT_TYPES))
     .option("--product <product>", "product grouping key")
     .option("--tags <tags>", "comma-separated tags", parseList)
+    .option(
+      "--code-areas <paths>",
+      "comma-separated codebase paths/globs this knowledge lives in",
+      parseList,
+    )
     .option("--body <markdown>", "note body (markdown)")
     .addOption(new Option("--stdin", "read note body from stdin").conflicts("body"))
     .action(
@@ -232,6 +252,7 @@ export function buildProgram(ctx: Ctx): Command {
           type?: ConceptType;
           product?: string;
           tags?: string[];
+          codeAreas?: string[];
           body?: string;
           stdin?: boolean;
         },
@@ -247,6 +268,7 @@ export function buildProgram(ctx: Ctx): Command {
             type: opts.type,
             product: opts.product,
             tags: opts.tags,
+            codeAreas: opts.codeAreas,
           });
           if (g.json) {
             printJson(ctx, saved);
@@ -329,6 +351,9 @@ export function buildProgram(ctx: Ctx): Command {
       ];
       ctx.out(`${pc.dim(metaBits.join("   "))}\n`);
       if (concept.tags.length > 0) ctx.out(`${pc.dim(`tags: ${concept.tags.join(", ")}`)}\n`);
+      if (concept.codeAreas && concept.codeAreas.length > 0) {
+        ctx.out(`${pc.dim(`code areas: ${concept.codeAreas.join(", ")}`)}\n`);
+      }
       ctx.out(`${pc.dim(`file: ${concept.filePath}`)}\n`);
       ctx.out(`\n${concept.body.trim()}\n`);
       if (neighbors.length > 0) {
@@ -496,6 +521,88 @@ export function buildProgram(ctx: Ctx): Command {
     }
     if (!result.ok) ctx.exitCode = 1;
   });
+
+  // ---- onboard -----------------------------------------------------------
+  withGlobals(
+    program
+      .command("onboard")
+      .description(
+        "print the onboarding playbook (index your product into this vault); " +
+          "--status reports progress, --complete marks the vault onboarded",
+      ),
+  )
+    .option("--status", "report onboarded state and concept counts")
+    .addOption(
+      new Option("--complete", "mark the vault onboarded (requires --summary)").conflicts("status"),
+    )
+    .option("--summary <text>", "with --complete: what was indexed, notable gaps")
+    .option("--product-name <name>", "product name, echoed into the playbook")
+    .option("--repo-hint <path>", "where the codebase lives, echoed into the playbook")
+    .action(
+      async (
+        opts: {
+          status?: boolean;
+          complete?: boolean;
+          summary?: string;
+          productName?: string;
+          repoHint?: string;
+        },
+        cmd: Command,
+      ) => {
+        const g = getGlobals(cmd);
+        await withVault(g.vaultDir, async (vault) => {
+          if (opts.complete) {
+            if (!opts.summary?.trim()) {
+              throw new CliError("--complete requires --summary \"<what was indexed>\"");
+            }
+            const saved = await vault.completeOnboarding(opts.summary);
+            if (g.json) {
+              printJson(ctx, { ok: true, onboarded: true, summaryConceptId: saved.id });
+              return;
+            }
+            ctx.out(
+              `${pc.green("✓")} vault marked onboarded — summary stored as ${pc.cyan(saved.id)}\n`,
+            );
+            return;
+          }
+          if (opts.status) {
+            const stats = vault.stats();
+            const status = {
+              onboarded: stats.onboarded,
+              conceptCount: stats.concepts,
+              byType: stats.byType,
+            };
+            if (g.json) {
+              printJson(ctx, status);
+              return;
+            }
+            ctx.out(
+              status.onboarded
+                ? `${pc.green("✓")} onboarded — ${status.conceptCount} concepts\n`
+                : `${pc.yellow("○")} not onboarded — ${status.conceptCount} concepts so far\n`,
+            );
+            const byType = Object.entries(status.byType)
+              .map(([t, n]) => `${t} ${n}`)
+              .join(", ");
+            if (byType) ctx.out(pc.dim(`  by type: ${byType}\n`));
+            if (!status.onboarded) {
+              ctx.out(pc.dim("  run `brainz onboard` for the playbook\n"));
+            }
+            return;
+          }
+          const playbook = onboardingPlaybook({
+            productName: opts.productName,
+            repoHint: opts.repoHint,
+            onboarded: vault.onboardedAt !== null,
+          });
+          if (g.json) {
+            printJson(ctx, { onboarded: vault.onboardedAt !== null, playbook });
+            return;
+          }
+          ctx.out(playbook.endsWith("\n") ? playbook : `${playbook}\n`);
+        });
+      },
+    );
 
   // ---- mcp ---------------------------------------------------------------
   withGlobals(

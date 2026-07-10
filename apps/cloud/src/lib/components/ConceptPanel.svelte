@@ -84,6 +84,12 @@
 		{#each concept?.tags ?? [] as tag (tag)}<span class="badge">#{tag}</span>{/each}
 	</div>
 
+	{#if concept?.codeAreas && concept.codeAreas.length > 0}
+		<div class="code-areas" aria-label="Code areas">
+			{#each concept.codeAreas as area (area)}<span class="code-area">{area}</span>{/each}
+		</div>
+	{/if}
+
 	<div class="body">
 		{#if node.pending}
 			<p class="muted"><em>
@@ -161,6 +167,25 @@
 		flex-wrap: wrap;
 		gap: 6px;
 		margin: 10px 0 14px;
+	}
+	.code-areas {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin: -6px 0 14px;
+	}
+	.code-area {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--text);
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 2px 8px;
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 	.body {
 		flex: 1;

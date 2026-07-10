@@ -3,13 +3,15 @@
  * Brainz Cloud E2E journey against `wrangler dev` (the real workerd runtime:
  * SvelteKit worker + D1 + VaultDO, fresh state per run).
  *
- * Flow: signup → cookie → create vault → upsert 3 concepts (wiki-links +
- * typed relations) → search → related → context (budget respected) → graph
- * (pending node) → API key (plaintext once) → MCP over HTTP with the bearer
- * key (initialize, tools/list, get_context, upsert_concept) → verify via
- * REST → revoked key gets 401 → PUBLIC signup over unauthenticated MCP
- * (exactly one tool, provision account/vault/key, claim-link handoff,
- * duplicate-email + per-IP rate limit, invalid bearer still 401).
+ * Flow: signup → cookie → create vault → upsert concepts (wiki-links, typed
+ * relations, code_areas, new ontology types) → search → related → context
+ * (budget respected, Code areas line) → graph (pending node) → API key
+ * (plaintext once) → MCP over HTTP with the bearer key (initialize,
+ * tools/list = 9 tools, get_context, upsert_concept, onboarding nudge,
+ * onboard status/start/complete + nudge disappearing) → verify via REST →
+ * revoked key gets 401 → PUBLIC signup over unauthenticated MCP (exactly one
+ * tool, provision account/vault/key, claim-link handoff, duplicate-email +
+ * per-IP rate limit, invalid bearer still 401).
  *
  * Prereqs: repo deps installed and workspace packages built. The script
  * builds the app if needed, applies D1 migrations to a scratch state dir,
@@ -33,6 +35,8 @@ import {
   getMcpTool,
   graphResponseSchema,
   MCP_TOOL_NAMES,
+  onboardCompleteOutputSchema,
+  onboardStatusOutputSchema,
   relatedResponseSchema,
   searchResponseSchema,
   signupOutputSchema,
@@ -40,6 +44,7 @@ import {
   upsertConceptOutputSchema,
   vaultSchema,
 } from "@brainz/contracts";
+import { ONBOARDING_NUDGE, ONBOARDING_SUMMARY_ID } from "@brainz/engine";
 
 const appDir = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const PORT = Number(process.env.E2E_PORT ?? 8788);
@@ -199,6 +204,7 @@ async function main() {
         type: "feature",
         product: "crm",
         tags: ["crm"],
+        codeAreas: ["apps/crm/src/scoring/**", "packages/models/src/lead.ts"],
         body: "Scores leads by fit and intent. Reads [[user-model]] data; see also [[missing-concept]].",
         relations: { depends_on: ["auth-system"] },
       },
@@ -207,6 +213,20 @@ async function main() {
       const res = await api("POST", `/api/vaults/${vaultId}/concepts`, { body: c });
       step(`upsert concept ${c.id} → 201`, res.status === 201, `status ${res.status}`);
     }
+
+    // code_areas round-trips through REST
+    const leadScoring = await api("GET", `/api/vaults/${vaultId}/concepts/lead-scoring`);
+    step(
+      "REST GET concept returns codeAreas",
+      leadScoring.status === 200 &&
+        JSON.stringify(leadScoring.json?.codeAreas) ===
+          JSON.stringify(["apps/crm/src/scoring/**", "packages/models/src/lead.ts"]),
+      JSON.stringify(leadScoring.json?.codeAreas),
+    );
+    const domainRes = await api("POST", `/api/vaults/${vaultId}/concepts`, {
+      body: { id: "crm-domain", title: "CRM", type: "domain", body: "The CRM product area." },
+    });
+    step("new ontology type `domain` accepted", domainRes.status === 201, `status ${domainRes.status}`);
 
     // 4. search (keyword path; embeddings may be unavailable locally)
     const search = await api("GET", `/api/vaults/${vaultId}/search?q=lead%20scoring`);
@@ -220,8 +240,9 @@ async function main() {
 
     const stats = await api("GET", `/api/vaults/${vaultId}/stats`);
     assertParse(statsResponseSchema, stats.json, "stats parses with contract schema");
-    step("stats counts 3 concepts / 4 edges", stats.json?.concepts === 3 && stats.json?.edges === 4,
+    step("stats counts 4 concepts / 4 edges", stats.json?.concepts === 4 && stats.json?.edges === 4,
       `concepts=${stats.json?.concepts} edges=${stats.json?.edges}`);
+    step("stats reports onboarded: false pre-onboarding", stats.json?.onboarded === false);
     const keywordIndex = stats.headers.get("x-brainz-keyword-index");
     notes.push(`embeddings: ${stats.json?.embeddings} (Workers AI ${stats.json?.embeddings === "ready" ? "reachable" : "unavailable locally — graceful keyword-only degradation"})`);
     notes.push(`keyword index inside the DO: ${keywordIndex}`);
@@ -247,6 +268,10 @@ async function main() {
     step(
       "context bundle contains the lead-scoring section",
       typeof ctx.json?.markdown === "string" && ctx.json.markdown.includes("## Lead scoring (lead-scoring)"),
+    );
+    step(
+      "context section carries the Code areas line",
+      ctx.json?.markdown?.includes("Code areas: `apps/crm/src/scoring/**`, `packages/models/src/lead.ts`"),
     );
     const tiny = await api("POST", `/api/vaults/${vaultId}/context`, {
       body: { query: "lead scoring", depth: 1, tokenBudget: 30 },
@@ -301,8 +326,10 @@ async function main() {
     const tools = await mcp.listTools();
     const toolNames = tools.tools.map((t) => t.name).sort();
     step(
-      "MCP tools/list returns the 8 contract tools",
-      toolNames.length === 8 && JSON.stringify(toolNames) === JSON.stringify([...MCP_TOOL_NAMES].sort()),
+      "MCP tools/list returns the 9 contract tools (incl. onboard)",
+      toolNames.length === 9 &&
+        JSON.stringify(toolNames) === JSON.stringify([...MCP_TOOL_NAMES].sort()) &&
+        toolNames.includes("onboard"),
       toolNames.join(", "),
     );
 
@@ -317,6 +344,11 @@ async function main() {
     }
     step("MCP get_context footer parses with contract outputSchema", footerOk, blocks[1]);
     step("MCP get_context markdown includes lead-scoring", blocks[0]?.includes("lead-scoring"));
+    step(
+      "un-onboarded get_context markdown is prefixed with the onboarding nudge",
+      blocks[0]?.startsWith(ONBOARDING_NUDGE),
+      blocks[0]?.slice(0, 60),
+    );
 
     const upsert = await mcp.callTool({
       name: "upsert_concept",
@@ -324,6 +356,7 @@ async function main() {
         title: "MCP written note",
         body: "Captured via remote MCP during E2E. Links to [[lead-scoring]].",
         tags: ["e2e"],
+        codeAreas: ["scripts/e2e.mjs"],
       },
     });
     const upsertPayload = JSON.parse(upsert.content.find((c) => c.type === "text").text);
@@ -332,13 +365,98 @@ async function main() {
       upsertConceptOutputSchema.strict().safeParse(upsertPayload).success,
       JSON.stringify(upsertPayload),
     );
+    step(
+      "MCP upsert_concept echoes codeAreas",
+      JSON.stringify(upsertPayload?.codeAreas) === JSON.stringify(["scripts/e2e.mjs"]),
+    );
     const searchTool = await mcp.callTool({ name: "search_concepts", arguments: { query: "auth" } });
     const searchPayload = JSON.parse(searchTool.content.find((c) => c.type === "text").text);
     step(
       "MCP search_concepts output parses with contract outputSchema",
       getMcpTool("search_concepts").outputSchema.safeParse(searchPayload).success,
     );
+    step(
+      "un-onboarded search_concepts carries the notice",
+      searchPayload?.notice === ONBOARDING_NUDGE,
+      String(searchPayload?.notice).slice(0, 60),
+    );
+
+    // 9b. onboard flow: status → start (playbook) → complete → nudge gone
+    const statusBefore = await mcp.callTool({ name: "onboard", arguments: { action: "status" } });
+    const statusBeforePayload = JSON.parse(statusBefore.content.find((c) => c.type === "text").text);
+    step(
+      "onboard status pre-onboarding parses and reports onboarded: false",
+      onboardStatusOutputSchema.safeParse(statusBeforePayload).success &&
+        statusBeforePayload.onboarded === false &&
+        statusBeforePayload.conceptCount >= 4,
+      JSON.stringify(statusBeforePayload),
+    );
+
+    const start = await mcp.callTool({
+      name: "onboard",
+      arguments: { action: "start", productName: "E2E CRM", repoHint: "github.com/e2e/crm" },
+    });
+    const startBlocks = start.content.filter((c) => c.type === "text").map((c) => c.text);
+    step(
+      "onboard start returns the playbook as one markdown block",
+      start.isError !== true &&
+        startBlocks.length === 1 &&
+        startBlocks[0].includes("Onboarding playbook — E2E CRM") &&
+        startBlocks[0].includes("github.com/e2e/crm") &&
+        startBlocks[0].includes("20–60 concepts") &&
+        startBlocks[0].includes("realized_by") &&
+        startBlocks[0].includes("governs"),
+    );
+
+    const incomplete = await mcp.callTool({ name: "onboard", arguments: { action: "complete" } });
+    step("onboard complete without a summary is an isError", incomplete.isError === true);
+
+    const complete = await mcp.callTool({
+      name: "onboard",
+      arguments: { action: "complete", summary: "Indexed the E2E CRM: 1 domain, 2 features." },
+    });
+    const completePayload = JSON.parse(complete.content.find((c) => c.type === "text").text);
+    step(
+      "onboard complete parses and names the summary concept",
+      onboardCompleteOutputSchema.safeParse(completePayload).success &&
+        completePayload.summaryConceptId === ONBOARDING_SUMMARY_ID,
+      JSON.stringify(completePayload),
+    );
+
+    const statusAfter = await mcp.callTool({ name: "onboard", arguments: { action: "status" } });
+    const statusAfterPayload = JSON.parse(statusAfter.content.find((c) => c.type === "text").text);
+    step("onboard status flips to onboarded: true", statusAfterPayload.onboarded === true);
+
+    const statsTool = await mcp.callTool({ name: "vault_stats", arguments: {} });
+    const statsToolPayload = JSON.parse(statsTool.content.find((c) => c.type === "text").text);
+    step(
+      "vault_stats reports onboarded: true and parses strictly",
+      statsToolPayload.onboarded === true &&
+        getMcpTool("vault_stats").outputSchema.safeParse(statsToolPayload).success,
+    );
+
+    const searchAfter = await mcp.callTool({ name: "search_concepts", arguments: { query: "auth" } });
+    const searchAfterPayload = JSON.parse(searchAfter.content.find((c) => c.type === "text").text);
+    step("nudge disappears from search_concepts after complete", searchAfterPayload.notice === undefined);
+    const ctxAfter = await mcp.callTool({ name: "get_context", arguments: { query: "lead scoring" } });
+    const ctxAfterMarkdown = ctxAfter.content.filter((c) => c.type === "text")[0]?.text ?? "";
+    step(
+      "nudge disappears from get_context after complete",
+      !ctxAfterMarkdown.startsWith(ONBOARDING_NUDGE),
+    );
     await mcp.close();
+
+    // the onboarding summary is a spec concept readable via REST; D1 mirror feeds stats
+    const summaryRest = await api("GET", `/api/vaults/${vaultId}/concepts/${ONBOARDING_SUMMARY_ID}`);
+    step(
+      "onboarding summary readable via REST as a spec concept",
+      summaryRest.status === 200 &&
+        summaryRest.json?.type === "spec" &&
+        summaryRest.json?.body?.includes("Indexed the E2E CRM"),
+      `status ${summaryRest.status} type=${summaryRest.json?.type}`,
+    );
+    const statsAfterRest = await api("GET", `/api/vaults/${vaultId}/stats`);
+    step("REST stats reports onboarded: true post-onboarding", statsAfterRest.json?.onboarded === true);
 
     // 10. the MCP write is visible via REST
     const written = await api("GET", `/api/vaults/${vaultId}/concepts/mcp-written-note`);
@@ -367,7 +485,7 @@ async function main() {
     const pubTools = await pub.listTools();
     const pubNames = pubTools.tools.map((t) => t.name);
     step(
-      "unauthenticated tools/list is exactly [signup] — none of the 8 vault tools",
+      "unauthenticated tools/list is exactly [signup] — none of the 9 vault tools",
       JSON.stringify(pubNames) === JSON.stringify(["signup"]) &&
         !pubNames.some((n) => MCP_TOOL_NAMES.includes(n)),
       pubNames.join(", "),

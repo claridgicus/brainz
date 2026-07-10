@@ -38,10 +38,21 @@ export interface UpsertConceptBody {
   id?: string;
   title: string;
   body: string;
-  type?: "concept" | "feature" | "decision" | "constraint" | "pattern" | "glossary";
+  type?:
+    | "concept"
+    | "domain"
+    | "feature"
+    | "story"
+    | "spec"
+    | "workflow"
+    | "decision"
+    | "constraint"
+    | "pattern"
+    | "glossary";
   status?: "active" | "draft" | "deprecated";
   product?: string;
   tags?: string[];
+  codeAreas?: string[];
   relations?: Record<string, string[]>;
 }
 
@@ -51,6 +62,7 @@ export interface VaultStats {
   products: string[];
   tags: string[];
   byType: Record<string, number>;
+  onboarded: boolean;
   embeddings: "ready" | "unavailable";
   /** From the x-brainz-keyword-index response header. */
   keywordIndex: "fts5" | "like";

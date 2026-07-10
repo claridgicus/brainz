@@ -145,6 +145,39 @@ describe("brainz add / show", () => {
     expect(human.out).toContain("30 minutes");
   });
 
+  it("round-trips --code-areas and the new ontology types", async () => {
+    const dir = await makeDir();
+    await run(["init", dir]);
+    const add = await run([
+      "add",
+      "Session Refresh",
+      "--vault",
+      dir,
+      "--type",
+      "story",
+      "--code-areas",
+      "src/auth/session.ts,apps/web/src/routes/**",
+      "--body",
+      "As a user I stay signed in across visits.",
+    ]);
+    expect(add.code).toBe(0);
+
+    const show = await run(["show", "session-refresh", "--vault", dir, "--json"]);
+    const concept = JSON.parse(show.out);
+    expect(concept.type).toBe("story");
+    expect(concept.codeAreas).toEqual(["src/auth/session.ts", "apps/web/src/routes/**"]);
+
+    const human = await run(["show", "session-refresh", "--vault", dir]);
+    expect(human.out).toContain("code areas: src/auth/session.ts, apps/web/src/routes/**");
+
+    const raw = await readFile(path.join(dir, "concepts", "session-refresh.md"), "utf8");
+    expect(raw).toContain("code_areas:");
+
+    // rejects a type outside the 10-type ontology
+    const bad = await run(["add", "Nope", "--vault", dir, "--type", "banana", "--body", "x"]);
+    expect(bad.code).toBe(1);
+  });
+
   it("reads the body from stdin with --stdin", async () => {
     const dir = await makeDir();
     await run(["init", dir]);
@@ -353,6 +386,65 @@ describe("brainz validate", () => {
     expect(
       result.errors.some((e: { message: string }) => e.message.includes("unparseable frontmatter")),
     ).toBe(true);
+  });
+});
+
+describe("brainz onboard", () => {
+  it("prints the playbook (default) and a --json variant", async () => {
+    const dir = await copyDemoVault();
+    const res = await run(["onboard", "--vault", dir, "--product-name", "Acme CRM"]);
+    expect(res.code).toBe(0);
+    expect(res.out).toContain("Onboarding playbook — Acme CRM");
+    expect(res.out).toContain("20–60 concepts");
+    expect(res.out).toContain("`domain`");
+    expect(res.out).toContain("realized_by");
+
+    const json = await run(["onboard", "--vault", dir, "--json"]);
+    const parsed = JSON.parse(json.out);
+    expect(parsed.onboarded).toBe(false);
+    expect(parsed.playbook).toContain("# Onboarding playbook");
+  });
+
+  it("--status reports state; --complete stores the summary and flips it", async () => {
+    const dir = await copyDemoVault();
+    const before = await run(["onboard", "--status", "--vault", dir, "--json"]);
+    const status = JSON.parse(before.out);
+    expect(status.onboarded).toBe(false);
+    expect(status.conceptCount).toBeGreaterThanOrEqual(13);
+    expect(status.byType.decision).toBeGreaterThan(0);
+
+    const missingSummary = await run(["onboard", "--complete", "--vault", dir]);
+    expect(missingSummary.code).toBe(1);
+    expect(missingSummary.err).toContain("--summary");
+
+    const complete = await run([
+      "onboard",
+      "--complete",
+      "--summary",
+      "Indexed the demo product.",
+      "--vault",
+      dir,
+      "--json",
+    ]);
+    expect(complete.code).toBe(0);
+    expect(JSON.parse(complete.out)).toMatchObject({
+      ok: true,
+      onboarded: true,
+      summaryConceptId: "product-onboarding-summary",
+    });
+
+    const config = JSON.parse(await readFile(path.join(dir, "brainz.config.json"), "utf8"));
+    expect(typeof config.onboardedAt).toBe("string");
+
+    const after = await run(["onboard", "--status", "--vault", dir]);
+    expect(after.code).toBe(0);
+    expect(after.out).toContain("onboarded");
+    expect(after.out).not.toContain("not onboarded");
+
+    const summary = await run(["show", "product-onboarding-summary", "--vault", dir, "--json"]);
+    const concept = JSON.parse(summary.out);
+    expect(concept.type).toBe("spec");
+    expect(concept.body).toContain("Indexed the demo product.");
   });
 });
 

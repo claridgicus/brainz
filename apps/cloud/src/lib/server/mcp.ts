@@ -14,6 +14,7 @@ import {
   type McpToolInput,
   type McpToolName,
 } from "@brainz/contracts";
+import { ONBOARDING_NUDGE, ONBOARDING_SUMMARY_ID, onboardingPlaybook } from "@brainz/engine";
 import { syntheticFilePath } from "./do-helpers";
 import { VaultDoError, type VaultClient } from "./vault-client";
 
@@ -44,15 +45,31 @@ type ToolHandlers = {
   [N in McpToolName]: (args: McpToolInput<N>) => Promise<ToolResult>;
 };
 
+export interface McpServerHooks {
+  /**
+   * Called when `onboard {action: "complete"}` succeeds — mirrors the DO's
+   * onboarded state into the D1 control plane (vault.onboarded_at). Failures
+   * must not fail the tool call; the DO meta is the tool-facing source of truth.
+   */
+  onOnboarded?: (onboardedAt: Date) => Promise<void>;
+}
+
 /** Build the MCP server for one vault (stateless: one per request). */
-export function buildMcpServer(vault: VaultClient): McpServer {
+export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+
+  const isOnboarded = async (): Promise<boolean> =>
+    (await vault.onboarding()).onboardedAt !== null;
 
   const handlers: ToolHandlers = {
     search_concepts: async ({ query, mode, product, tags, type, limit }) =>
       guarded(async () => {
-        const { hits } = await vault.search({ query, mode, product, tags, type, limit });
-        return ok({ hits });
+        const [{ hits }, onboarded] = await Promise.all([
+          vault.search({ query, mode, product, tags, type, limit }),
+          isOnboarded(),
+        ]);
+        // Nudge, not a wall: un-onboarded vaults carry the onboarding notice.
+        return ok({ ...(onboarded ? {} : { notice: ONBOARDING_NUDGE }), hits });
       }),
 
     get_concept: async ({ id }) =>
@@ -90,9 +107,17 @@ export function buildMcpServer(vault: VaultClient): McpServer {
         if (!query && (!ids || ids.length === 0)) {
           return fail("get_context requires at least one of `query` or `ids`");
         }
-        const bundle = await vault.context({ query, ids, product, depth, tokenBudget });
+        const [bundle, onboarded] = await Promise.all([
+          vault.context({ query, ids, product, depth, tokenBudget }),
+          isOnboarded(),
+        ]);
         // Two-block convention (GET_CONTEXT_CONTENT_BLOCKS in @brainz/contracts):
-        // markdown briefing first, then the JSON footer.
+        // markdown briefing first, then the JSON footer. Un-onboarded vaults
+        // get the one-line onboarding nudge atop the markdown.
+        const markdown =
+          !onboarded && bundle.markdown
+            ? `${ONBOARDING_NUDGE}\n\n${bundle.markdown}`
+            : bundle.markdown;
         const footer = JSON.stringify({
           included: bundle.included.map((c) => c.id),
           truncated: bundle.truncated,
@@ -100,13 +125,13 @@ export function buildMcpServer(vault: VaultClient): McpServer {
         });
         return {
           content: [
-            { type: "text", text: bundle.markdown },
+            { type: "text", text: markdown },
             { type: "text", text: footer },
           ],
         };
       }),
 
-    upsert_concept: async ({ id, title, body, type, status, product, tags, relations }) =>
+    upsert_concept: async ({ id, title, body, type, status, product, tags, codeAreas, relations }) =>
       guarded(async () => {
         const { concept } = await vault.upsertConcept({
           id,
@@ -116,6 +141,7 @@ export function buildMcpServer(vault: VaultClient): McpServer {
           status,
           product,
           tags,
+          codeAreas,
           relations,
         });
         return ok({
@@ -125,6 +151,7 @@ export function buildMcpServer(vault: VaultClient): McpServer {
           status: concept.status,
           ...(concept.product !== undefined ? { product: concept.product } : {}),
           tags: concept.tags,
+          ...(concept.codeAreas !== undefined ? { codeAreas: concept.codeAreas } : {}),
           filePath: syntheticFilePath(concept.id),
         });
       }),
@@ -148,9 +175,42 @@ export function buildMcpServer(vault: VaultClient): McpServer {
 
     vault_stats: async () =>
       guarded(async () => {
-        const { concepts, edges, products, tags, byType, embeddings } = await vault.stats();
+        const { concepts, edges, products, tags, byType, onboarded, embeddings } =
+          await vault.stats();
         // keywordIndex is intentionally dropped: vault_stats' contract shape is strict.
-        return ok({ concepts, edges, products, tags, byType, embeddings });
+        return ok({ concepts, edges, products, tags, byType, onboarded, embeddings });
+      }),
+
+    onboard: async ({ action, productName, repoHint, summary }) =>
+      guarded(async () => {
+        if (action === "start") {
+          // Onboard-start convention (ONBOARD_START_CONTENT in @brainz/contracts):
+          // one markdown text block — the playbook itself.
+          const playbook = onboardingPlaybook({
+            productName,
+            repoHint,
+            onboarded: await isOnboarded(),
+          });
+          return { content: [{ type: "text", text: playbook }] };
+        }
+        if (action === "complete") {
+          if (!summary?.trim()) {
+            return fail('onboard {action: "complete"} requires a non-empty `summary`');
+          }
+          const { concept } = await vault.upsertConcept({
+            id: ONBOARDING_SUMMARY_ID,
+            title: "Product onboarding summary",
+            type: "spec",
+            body: summary.trim(),
+          });
+          const onboardedAt = new Date();
+          await vault.setOnboardedAt(onboardedAt.toISOString());
+          // Mirror into the D1 control plane; never fail the tool call on it.
+          await hooks.onOnboarded?.(onboardedAt).catch(() => {});
+          return ok({ ok: true, onboarded: true, summaryConceptId: concept.id });
+        }
+        const { concepts, byType, onboarded } = await vault.stats();
+        return ok({ onboarded, conceptCount: concepts, byType });
       }),
   };
 

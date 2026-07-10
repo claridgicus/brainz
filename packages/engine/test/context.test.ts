@@ -106,6 +106,27 @@ describe("assembleContext", () => {
     expect(bundle.included.map((m) => m.id)).toEqual(["x", "y"]);
   });
 
+  it("appends a Code areas line to sections whose concept carries codeAreas", () => {
+    const s = source(
+      [
+        concept("anchored", "Anchored body.", {
+          codeAreas: ["packages/core/src/vault.ts", "apps/cloud/src/routes/api/**"],
+        }),
+        concept("plain", "Plain body."),
+      ],
+      [{ from: "anchored", to: "plain", relation: "references" }],
+    );
+    const bundle = assembleContext(["anchored", "plain"], s, { depth: 0 });
+    expect(bundle.markdown).toContain(
+      "Anchored body.\n\nCode areas: `packages/core/src/vault.ts`, `apps/cloud/src/routes/api/**`",
+    );
+    // Sections without codeAreas get no line.
+    const plainSection = bundle.markdown.split("## Plain (plain)")[1];
+    expect(plainSection).not.toContain("Code areas:");
+    // The line counts toward the budget/approxTokens like any other content.
+    expect(bundle.approxTokens).toBe(Math.ceil(bundle.markdown.length / 4));
+  });
+
   it("returns an empty bundle for no usable seeds", () => {
     const bundle = assembleContext(["ghost"], GRAPH);
     expect(bundle).toEqual({ markdown: "", included: [], truncated: false, approxTokens: 0 });

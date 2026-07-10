@@ -226,6 +226,13 @@ main { position: relative; height: calc(100% - 52px); }
 }
 .badge .dot { width: 8px; height: 8px; border-radius: 50%; }
 .badge.type { color: var(--text); }
+.badge.code-area {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  border-radius: 6px;
+  background: var(--bg-overlay);
+  color: var(--text);
+}
 
 #panel-body {
   padding: 4px 16px 12px;

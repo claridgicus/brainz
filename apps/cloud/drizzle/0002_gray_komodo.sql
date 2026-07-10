@@ -1,0 +1,1 @@
+ALTER TABLE `vault` ADD `onboarded_at` integer;

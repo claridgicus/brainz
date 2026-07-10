@@ -66,7 +66,7 @@ afterAll(async () => {
 });
 
 describe("tool registration", () => {
-  it("exposes the eight spec'd tools", async () => {
+  it("exposes the nine spec'd tools", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([
@@ -75,6 +75,7 @@ describe("tool registration", () => {
       "get_related",
       "link_concepts",
       "list_concepts",
+      "onboard",
       "search_concepts",
       "upsert_concept",
       "vault_stats",
@@ -303,6 +304,93 @@ describe("resources", () => {
     const read = await client.readResource({ uri: "brainz://concept/mrr" });
     const text = (read.contents[0] as { text: string }).text;
     expect(text).toContain("MRR");
+  });
+});
+
+describe("code areas", () => {
+  it("upsert_concept round-trips codeAreas through get_concept and get_context", async () => {
+    const saved = await callJson("upsert_concept", {
+      title: "Session Refresh",
+      body: "Rotates session tokens.",
+      type: "feature",
+      codeAreas: ["src/auth/session.ts", "src/routes/api/**"],
+    });
+    expect(saved.codeAreas).toEqual(["src/auth/session.ts", "src/routes/api/**"]);
+
+    const fetched = await callJson("get_concept", { id: "session-refresh" });
+    expect(fetched.codeAreas).toEqual(["src/auth/session.ts", "src/routes/api/**"]);
+
+    // Frontmatter stores it as code_areas.
+    const raw = await (await import("node:fs/promises")).readFile(fetched.filePath, "utf8");
+    expect(raw).toContain("code_areas:");
+
+    // get_context sections carry the Code areas line.
+    const result = await callTool("get_context", { ids: ["session-refresh"], depth: 0 });
+    expect(result.content[0].text).toContain("Code areas: `src/auth/session.ts`, `src/routes/api/**`");
+  });
+});
+
+describe("onboarding (onboard tool + nudge)", () => {
+  it("un-onboarded: search_concepts carries the notice, get_context is prefixed", async () => {
+    const search = await callJson("search_concepts", { query: "lead scoring" });
+    expect(search.notice).toMatch(/not onboarded/);
+
+    const ctx = await callTool("get_context", { ids: ["mrr"], depth: 0 });
+    expect(ctx.content[0].text).toMatch(/^Note: this vault is not onboarded yet/);
+  });
+
+  it("start returns the playbook as one markdown block", async () => {
+    const result = await callTool("onboard", { action: "start", productName: "Acme CRM" });
+    expect(result.isError ?? false).toBe(false);
+    expect(result.content).toHaveLength(1);
+    const playbook = result.content[0].text;
+    expect(playbook).toContain("Onboarding playbook — Acme CRM");
+    expect(playbook).toContain("20–60 concepts");
+    expect(playbook).toContain("`domain`");
+    expect(playbook).toContain("realized_by");
+    expect(playbook).toContain("governs");
+    expect(playbook).toContain("node_modules");
+  });
+
+  it("status reports un-onboarded with counts", async () => {
+    const status = await callJson("onboard", { action: "status" });
+    expect(status.onboarded).toBe(false);
+    expect(status.conceptCount).toBeGreaterThanOrEqual(13);
+    expect(status.byType.decision).toBeGreaterThan(0);
+  });
+
+  it("complete requires a summary", async () => {
+    const result = await callTool("onboard", { action: "complete" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("summary");
+  });
+
+  it("complete stores the summary concept, persists config, and stops the nudge", async () => {
+    const done = await callJson("onboard", {
+      action: "complete",
+      summary: "Indexed the acme-crm demo product.",
+    });
+    expect(done).toMatchObject({ ok: true, onboarded: true, summaryConceptId: "product-onboarding-summary" });
+
+    const summary = await callJson("get_concept", { id: "product-onboarding-summary" });
+    expect(summary.type).toBe("spec");
+    expect(summary.body).toContain("acme-crm demo product");
+
+    // onboardedAt persisted in brainz.config.json
+    const fs = await import("node:fs/promises");
+    const config = JSON.parse(await fs.readFile(path.join(tmpVault, "brainz.config.json"), "utf8"));
+    expect(typeof config.onboardedAt).toBe("string");
+
+    // vault_stats reports onboarded; nudges are gone.
+    const stats = await callJson("vault_stats", {});
+    expect(stats.onboarded).toBe(true);
+    const search = await callJson("search_concepts", { query: "lead scoring" });
+    expect(search.notice).toBeUndefined();
+    const ctx = await callTool("get_context", { ids: ["mrr"], depth: 0 });
+    expect(ctx.content[0].text.startsWith("Note: this vault is not onboarded")).toBe(false);
+
+    const status = await callJson("onboard", { action: "status" });
+    expect(status.onboarded).toBe(true);
   });
 });
 

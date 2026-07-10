@@ -3,7 +3,7 @@
 
 	const title = "Docs — Get started with Brainz";
 	const description =
-		"Wire Brainz into your agents in minutes: hosted remote MCP at brain.brownmatter.ai or the local-first CLI over stdio. All eight MCP tools, documented.";
+		"Wire Brainz into your agents in minutes: hosted remote MCP at brain.brownmatter.ai or the local-first CLI over stdio. All nine MCP tools, documented.";
 
 	const remoteMcpSnippet = `{
   "mcpServers": {
@@ -130,6 +130,19 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 				"by concept type, and whether semantic search is available. Call once when connecting to an " +
 				"unfamiliar vault to calibrate how much knowledge is here and which product/tag filters exist.",
 		},
+		{
+			name: "onboard",
+			title: "Onboard this vault",
+			description:
+				"Step 1 on any new vault: onboarding turns an existing product's codebase into the knowledge graph " +
+				"your whole agent fleet shares. Call {action: \"start\"} to receive the onboarding playbook — " +
+				"instructions for fanning subagents out over the codebase and distilling product knowledge " +
+				"(domains, features, stories, specs, workflows, decisions, constraints) into concepts via " +
+				"upsert_concept, each anchored to the code with codeAreas. When the graph is written, call " +
+				"{action: \"complete\", summary} to mark the vault onboarded and store the summary. " +
+				"{action: \"status\"} reports onboarded state and concept counts. Until onboarding completes, " +
+				"search_concepts and get_context results carry a reminder to run it.",
+		},
 	];
 </script>
 
@@ -154,7 +167,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		<p class="lede">
 			Two ways to run the same brain: hosted at <code>brain.brownmatter.ai</code> (free, remote MCP
 			over HTTP) or local-first from a folder of markdown (open source CLI, MCP over stdio). Both
-			expose the identical eight tools, so your orchestrator doesn't care which one it's talking to.
+			expose the identical nine tools, so your orchestrator doesn't care which one it's talking to.
 		</p>
 	</header>
 
@@ -180,7 +193,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 	<p>
 		An orchestrator doesn't need a pre-made account. Point it at <code>{MCP_URL}</code>
 		<em>without</em> an <code>Authorization</code> header and it gets a public MCP server exposing a
-		single <code>signup</code> tool (the eight vault tools stay behind authentication):
+		single <code>signup</code> tool (the nine vault tools stay behind authentication):
 	</p>
 	<pre><code>{agentSignupSnippet}</code></pre>
 	<p>
@@ -191,6 +204,33 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		after <strong>7 days</strong>; an unclaimed account keeps working for the agent — only the claim
 		link expires. Password sign-in stays disabled until the account is claimed, and signups are
 		rate-limited to 5 per hour per IP.
+	</p>
+
+	<h2 id="onboard">Onboard your product</h2>
+	<p>
+		A fresh vault is an empty brain. The <code>onboard</code> tool fixes that without you writing a
+		single note: your orchestrator calls <code>onboard</code> with
+		<code>&lbrace;"action": "start"&rbrace;</code> and receives a playbook — fan subagents out over
+		the codebase, distill what they find into the product ontology, and write it back with
+		<code>upsert_concept</code>.
+	</p>
+	<p>
+		The ontology is ten concept types, and five of them carry the structure: <code>domain</code>
+		(high-level product areas — the top of the graph), <code>feature</code> (concrete capabilities,
+		<code>part_of</code> a domain), <code>story</code> (user stories, <code>realized_by</code> the
+		features that deliver them), <code>spec</code> (the rules that <code>govern</code> features and
+		stories), and <code>workflow</code> (multi-step journeys across features) — plus the classics:
+		<code>concept</code>, <code>decision</code>, <code>constraint</code>, <code>pattern</code>,
+		<code>glossary</code>. Every concept can carry <code>code_areas</code> — rough paths or globs
+		pointing at where that knowledge lives in the codebase — so a subagent briefed by
+		<code>get_context</code> learns the rules <em>and</em> where to apply them.
+	</p>
+	<p>
+		When the graph is written (20–60 concepts for a mid-size product), the agent calls
+		<code>onboard</code> with <code>&lbrace;"action": "complete", "summary"&rbrace;</code>. Until
+		then, <code>search_concepts</code> and <code>get_context</code> responses carry a one-line
+		reminder — a nudge, never a wall. Local vaults get the same flow via
+		<code>brainz onboard</code>.
 	</p>
 
 	<h2 id="local">Local-first: a vault is just a folder</h2>
@@ -208,7 +248,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		isn't configured or available, it degrades gracefully to keyword-only.
 	</p>
 
-	<h2 id="tools">The eight MCP tools</h2>
+	<h2 id="tools">The nine MCP tools</h2>
 	<p>
 		These names and descriptions are the exact text your orchestrator sees — lifted from the tool
 		registry that both the hosted and local servers register from, so they never drift.
@@ -248,8 +288,9 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 			to feel the <code>get_context</code> loop.
 		</li>
 		<li>
-			Seed it with your product's ten most load-bearing concepts: the features everyone touches,
-			the decisions nobody remembers making, the constraints that bite.
+			<a href="#onboard">Onboard your product</a>: point your orchestrator at the vault and have it
+			call the <code>onboard</code> tool — it maps your codebase into domains, features, stories,
+			specs, and workflows, each anchored to the code that implements it.
 		</li>
 		<li>
 			Tell your orchestrator (e.g. in <code>CLAUDE.md</code>) to call <code>get_context</code>

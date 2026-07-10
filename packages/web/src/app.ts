@@ -17,7 +17,18 @@ const CONTENT_TYPES: Record<string, string> = {
 };
 
 const MODES = new Set(["hybrid", "keyword", "semantic"]);
-const TYPES = new Set(["concept", "feature", "decision", "constraint", "pattern", "glossary"]);
+const TYPES = new Set([
+  "concept",
+  "domain",
+  "feature",
+  "story",
+  "spec",
+  "workflow",
+  "decision",
+  "constraint",
+  "pattern",
+  "glossary",
+]);
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);

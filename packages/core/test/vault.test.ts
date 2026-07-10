@@ -497,6 +497,49 @@ describe("upsertConcept", () => {
     expect(again.body.trim()).toBe("Body with a [[link-target]].");
   });
 
+  it("round-trips codeAreas as frontmatter code_areas (preserved when omitted)", async () => {
+    const vault = await makeVault();
+    const saved = await vault.upsertConcept({
+      title: "Session Refresh",
+      body: "Rotates tokens.",
+      type: "feature",
+      codeAreas: ["src/auth/session.ts", "apps/web/src/routes/**"],
+    });
+    expect(saved.codeAreas).toEqual(["src/auth/session.ts", "apps/web/src/routes/**"]);
+    const fm = matter(await readFile(saved.filePath, "utf8")).data;
+    expect(fm.code_areas).toEqual(["src/auth/session.ts", "apps/web/src/routes/**"]);
+
+    // Survives a full reindex (db round-trip).
+    await vault.reindex();
+    expect(vault.getConcept("session-refresh")?.codeAreas).toEqual([
+      "src/auth/session.ts",
+      "apps/web/src/routes/**",
+    ]);
+
+    // Update WITHOUT codeAreas: frontmatter (and meta) keep the old value.
+    const updated = await vault.upsertConcept({
+      id: "session-refresh",
+      title: "Session Refresh",
+      body: "Rotates tokens more often.",
+    });
+    expect(updated.codeAreas).toEqual(["src/auth/session.ts", "apps/web/src/routes/**"]);
+
+    // The context bundle carries the Code areas line.
+    const bundle = await vault.assembleContext({ ids: ["session-refresh"], depth: 0 });
+    expect(bundle.markdown).toContain(
+      "Code areas: `src/auth/session.ts`, `apps/web/src/routes/**`",
+    );
+  });
+
+  it("accepts the new ontology types", async () => {
+    const vault = await makeVault();
+    for (const type of ["domain", "story", "spec", "workflow"] as const) {
+      const saved = await vault.upsertConcept({ title: `A ${type}`, body: "x", type });
+      expect(saved.type).toBe(type);
+    }
+    expect(vault.listConcepts({ type: "domain" })).toHaveLength(1);
+  });
+
   it("updates an existing note, preserving unknown frontmatter keys", async () => {
     const vault = await makeVault({
       "keep.md": [
@@ -562,6 +605,46 @@ describe("listConcepts / stats", () => {
     expect(stats.edges).toBe(2);
     expect(stats.tags).toEqual(["x", "y"]);
     expect(stats.byType).toEqual({ concept: 1, feature: 1, decision: 1 });
+    expect(stats.onboarded).toBe(false);
+  });
+});
+
+describe("onboarding state", () => {
+  it("persists onboardedAt in brainz.config.json and reloads it", async () => {
+    const vault = await makeVault(GRAPH);
+    expect(vault.onboardedAt).toBeNull();
+
+    await vault.setOnboardedAt("2026-07-10T00:00:00.000Z");
+    expect(vault.onboardedAt).toBe("2026-07-10T00:00:00.000Z");
+    expect(vault.stats().onboarded).toBe(true);
+
+    const config = JSON.parse(
+      await readFile(path.join(vault.dir, "brainz.config.json"), "utf8"),
+    );
+    expect(config.onboardedAt).toBe("2026-07-10T00:00:00.000Z");
+    expect(config.name).toBe("test"); // other config keys untouched
+
+    // A fresh open sees the persisted state; clearing removes the key.
+    const reopened = await Vault.open(vault.dir);
+    cleanups.push(async () => reopened.close());
+    expect(reopened.onboardedAt).toBe("2026-07-10T00:00:00.000Z");
+    await reopened.setOnboardedAt(null);
+    expect(reopened.onboardedAt).toBeNull();
+    const cleared = JSON.parse(
+      await readFile(path.join(vault.dir, "brainz.config.json"), "utf8"),
+    );
+    expect("onboardedAt" in cleared).toBe(false);
+  });
+
+  it("completeOnboarding stores the spec summary concept and marks onboarded", async () => {
+    const vault = await makeVault(GRAPH);
+    const saved = await vault.completeOnboarding("Indexed 3 concepts across 1 domain.");
+    expect(saved.id).toBe("product-onboarding-summary");
+    expect(saved.type).toBe("spec");
+    expect(saved.body).toContain("Indexed 3 concepts");
+    expect(vault.onboardedAt).not.toBeNull();
+    expect(vault.stats().onboarded).toBe(true);
+    await expect(vault.completeOnboarding("   ")).rejects.toThrow(/summary/);
   });
 });
 

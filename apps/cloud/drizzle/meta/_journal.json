@@ -15,6 +15,13 @@
       "when": 1783689566334,
       "tag": "0001_dusty_the_fallen",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1783691665870,
+      "tag": "0002_gray_komodo",
+      "breakpoints": true
     }
   ]
 }

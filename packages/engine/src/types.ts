@@ -2,7 +2,11 @@
 
 export type ConceptType =
   | "concept"
+  | "domain"
   | "feature"
+  | "story"
+  | "spec"
+  | "workflow"
   | "decision"
   | "constraint"
   | "pattern"
@@ -17,6 +21,8 @@ export interface ConceptMeta {
   status: ConceptStatus;
   product?: string;
   tags: string[];
+  /** Rough paths/globs where this knowledge lives in the codebase (frontmatter `code_areas`). */
+  codeAreas?: string[];
   filePath: string; // absolute path
   createdAt?: string; // ISO dates from frontmatter if present
   updatedAt?: string;
@@ -82,6 +88,8 @@ export interface UpsertInput {
   status?: ConceptStatus;
   product?: string;
   tags?: string[];
+  /** Rough paths/globs where this knowledge lives in the codebase (written as frontmatter `code_areas`). */
+  codeAreas?: string[];
   relations?: Record<string, string[]>;
 }
 
@@ -91,4 +99,6 @@ export interface VaultStats {
   products: string[];
   tags: string[];
   byType: Record<string, number>;
+  /** Whether the vault has been onboarded (product knowledge indexed via the onboard flow). */
+  onboarded: boolean;
 }

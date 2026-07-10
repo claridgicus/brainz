@@ -28,6 +28,7 @@ export interface ConceptDetail {
   status: string;
   product?: string;
   tags: string[];
+  codeAreas?: string[];
   body: string;
   neighbors: { id: string; title: string; type: string; distance: number }[];
   edges: { outgoing: ApiEdge[]; incoming: ApiEdge[] };
@@ -41,6 +42,7 @@ export interface StatsPayload {
   products: string[];
   tags: string[];
   byType: Record<string, number>;
+  onboarded: boolean;
   embeddingStatus: "ready" | "unavailable";
 }
 

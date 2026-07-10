@@ -30,6 +30,7 @@ export interface VaultStatsResult {
   products: string[];
   tags: string[];
   byType: Record<string, number>;
+  onboarded: boolean;
   embeddings: "ready" | "unavailable";
   keywordIndex: "fts5" | "like";
 }
@@ -52,6 +53,8 @@ export interface VaultClient {
     approxTokens: number;
   }>;
   stats(): Promise<VaultStatsResult>;
+  onboarding(): Promise<{ onboardedAt: string | null }>;
+  setOnboardedAt(onboardedAt: string): Promise<{ ok: true; onboardedAt: string }>;
   link(args: { from: string; to: string; relation?: string }): Promise<{
     ok: true;
     from: string;
@@ -86,6 +89,8 @@ export function vaultClient(ns: DurableObjectNamespace, vaultId: string): VaultC
     graph: () => call("graph"),
     context: (args) => call("context", args),
     stats: () => call("stats"),
+    onboarding: () => call("onboarding"),
+    setOnboardedAt: (onboardedAt) => call("setOnboardedAt", { onboardedAt }),
     link: (args) => call("link", args),
     destroy: () => call("destroy"),
   };

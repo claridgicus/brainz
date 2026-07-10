@@ -102,7 +102,7 @@ Scores leads 0-100. Recomputed on every
 				<p>
 					Point any MCP client at your hosted vault — Claude Code, or anything that speaks
 					streamable HTTP. Create an API key in the dashboard, add one entry to
-					<code>.mcp.json</code>, and all eight tools are live.
+					<code>.mcp.json</code>, and all nine tools are live.
 				</p>
 				<pre><code>{mcpSnippet}</code></pre>
 			</div>
@@ -163,7 +163,7 @@ Scores leads 0-100. Recomputed on every
 				<h3>Wire the MCP</h3>
 				<p>
 					One entry in <code>.mcp.json</code>: hosted over HTTP with an API key, or local over
-					stdio. Your orchestrator sees eight tools — search, traversal, writes, and the flagship,
+					stdio. Your orchestrator sees nine tools — search, traversal, writes, and the flagship,
 					<code>get_context</code>.
 				</p>
 			</div>

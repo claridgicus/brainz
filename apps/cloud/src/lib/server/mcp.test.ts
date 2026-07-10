@@ -9,28 +9,48 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   getMcpTool,
   MCP_TOOL_NAMES,
+  onboardCompleteOutputSchema,
+  onboardStatusOutputSchema,
   upsertConceptOutputSchema,
   vaultStatsOutputSchema,
 } from "@brainz/contracts";
+import { ONBOARDING_NUDGE, ONBOARDING_SUMMARY_ID } from "@brainz/engine";
 import { beforeEach, describe, expect, it } from "vitest";
-import { buildMcpServer } from "./mcp";
+import { buildMcpServer, type McpServerHooks } from "./mcp";
 import type { VaultClient } from "./vault-client";
 
-function fakeVault(): VaultClient {
+interface FakeVault extends VaultClient {
+  /** Test seam: onboarded state + upserts recorded by the fake. */
+  state: { onboardedAt: string | null; upserts: unknown[] };
+}
+
+function fakeVault(): FakeVault {
+  const state: FakeVault["state"] = { onboardedAt: null, upserts: [] };
   const concept = {
     id: "lead-scoring",
     title: "Lead scoring",
     type: "feature" as const,
     status: "active" as const,
     tags: ["crm"],
+    codeAreas: ["apps/crm/src/scoring/**"],
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-02T00:00:00.000Z",
     body: "Scores leads. [[auth-system]]\n",
   };
   return {
-    upsertConcept: async (input) => ({
-      concept: { ...concept, id: input.id ?? "lead-scoring", title: input.title },
-    }),
+    state,
+    upsertConcept: async (input) => {
+      state.upserts.push(input);
+      return {
+        concept: {
+          ...concept,
+          id: input.id ?? "lead-scoring",
+          title: input.title,
+          ...(input.type !== undefined ? { type: input.type } : {}),
+          ...(input.codeAreas !== undefined ? { codeAreas: input.codeAreas } : {}),
+        },
+      };
+    },
     deleteConcept: async () => ({ ok: true, deleted: true }),
     getConcept: async (id) =>
       id === "lead-scoring"
@@ -89,16 +109,25 @@ function fakeVault(): VaultClient {
       products: [],
       tags: ["crm"],
       byType: { feature: 1 },
+      onboarded: state.onboardedAt !== null,
       embeddings: "unavailable",
       keywordIndex: "like",
     }),
+    onboarding: async () => ({ onboardedAt: state.onboardedAt }),
+    setOnboardedAt: async (onboardedAt) => {
+      state.onboardedAt = onboardedAt;
+      return { ok: true, onboardedAt };
+    },
     link: async (args) => ({ ok: true, from: args.from, to: args.to, relation: args.relation ?? "related_to" }),
     destroy: async () => ({ ok: true }),
   };
 }
 
-async function connect(): Promise<Client> {
-  const server = buildMcpServer(fakeVault());
+async function connect(
+  vault: VaultClient = fakeVault(),
+  hooks: McpServerHooks = {},
+): Promise<Client> {
+  const server = buildMcpServer(vault, hooks);
   const client = new Client({ name: "test-client", version: "0.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -118,10 +147,10 @@ describe("remote MCP server (contract registry)", () => {
     client = await connect();
   });
 
-  it("registers exactly the 8 contract tools", async () => {
+  it("registers exactly the 9 contract tools", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...MCP_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(8);
+    expect(tools).toHaveLength(9);
   });
 
   it("search_concepts output parses with the contract outputSchema", async () => {
@@ -187,5 +216,89 @@ describe("remote MCP server (contract registry)", () => {
     expect(
       getMcpTool("get_related").outputSchema.safeParse(JSON.parse(textBlocks(related)[0])).success,
     ).toBe(true);
+  });
+
+  it("get_concept carries codeAreas through to the wire", async () => {
+    const result = await client.callTool({ name: "get_concept", arguments: { id: "lead-scoring" } });
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(payload.codeAreas).toEqual(["apps/crm/src/scoring/**"]);
+    expect(getMcpTool("get_concept").outputSchema.safeParse(payload).success).toBe(true);
+  });
+});
+
+describe("onboard tool + nudge", () => {
+  let vault: FakeVault;
+  let client: Client;
+  let mirrored: Date | null;
+  beforeEach(async () => {
+    vault = fakeVault();
+    mirrored = null;
+    client = await connect(vault, {
+      onOnboarded: async (at) => {
+        mirrored = at;
+      },
+    });
+  });
+
+  it("un-onboarded: search carries the notice and get_context markdown is prefixed", async () => {
+    const search = await client.callTool({ name: "search_concepts", arguments: { query: "x" } });
+    const payload = JSON.parse(textBlocks(search)[0]);
+    expect(payload.notice).toBe(ONBOARDING_NUDGE);
+    expect(getMcpTool("search_concepts").outputSchema.safeParse(payload).success).toBe(true);
+
+    const ctx = await client.callTool({ name: "get_context", arguments: { query: "x" } });
+    expect(textBlocks(ctx)[0].startsWith(ONBOARDING_NUDGE)).toBe(true);
+  });
+
+  it("start returns the playbook as one markdown block", async () => {
+    const result = await client.callTool({
+      name: "onboard",
+      arguments: { action: "start", productName: "Acme CRM" },
+    });
+    const blocks = textBlocks(result);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toContain("Onboarding playbook — Acme CRM");
+    expect(blocks[0]).toContain("20–60 concepts");
+    expect(blocks[0]).toContain("`domain`");
+    expect(blocks[0]).toContain("realized_by");
+    expect(blocks[0]).toContain("governs");
+    expect(blocks[0]).toContain('{"action": "complete"');
+  });
+
+  it("status reports onboarded state + counts (contract shape)", async () => {
+    const result = await client.callTool({ name: "onboard", arguments: { action: "status" } });
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(onboardStatusOutputSchema.safeParse(payload).success).toBe(true);
+    expect(payload).toMatchObject({ onboarded: false, conceptCount: 1 });
+  });
+
+  it("complete requires a summary", async () => {
+    const result = await client.callTool({ name: "onboard", arguments: { action: "complete" } });
+    expect(result.isError).toBe(true);
+    expect(textBlocks(result)[0]).toContain("summary");
+  });
+
+  it("complete stores the summary concept, sets DO state, mirrors to D1, and stops the nudge", async () => {
+    const result = await client.callTool({
+      name: "onboard",
+      arguments: { action: "complete", summary: "Indexed 34 concepts across 5 domains." },
+    });
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(onboardCompleteOutputSchema.safeParse(payload).success).toBe(true);
+    expect(payload.summaryConceptId).toBe(ONBOARDING_SUMMARY_ID);
+    expect(vault.state.onboardedAt).not.toBeNull();
+    expect(mirrored).toBeInstanceOf(Date);
+    expect(vault.state.upserts).toContainEqual(
+      expect.objectContaining({ id: ONBOARDING_SUMMARY_ID, type: "spec" }),
+    );
+
+    // Nudge gone once onboarded.
+    const search = await client.callTool({ name: "search_concepts", arguments: { query: "x" } });
+    expect(JSON.parse(textBlocks(search)[0]).notice).toBeUndefined();
+    const ctx = await client.callTool({ name: "get_context", arguments: { query: "x" } });
+    expect(textBlocks(ctx)[0].startsWith(ONBOARDING_NUDGE)).toBe(false);
+
+    const status = await client.callTool({ name: "onboard", arguments: { action: "status" } });
+    expect(JSON.parse(textBlocks(status)[0]).onboarded).toBe(true);
   });
 });

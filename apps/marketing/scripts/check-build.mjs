@@ -73,6 +73,25 @@ for (const page of ["index.html", "docs.html"]) {
 	}
 }
 
+// --- 1c. onboarding is documented -------------------------------------------
+// Docs carry the "Onboard your product" section and list the onboard tool in
+// the nine-tool table.
+{
+	const docs = htmlFiles.find((f) => f.endsWith("/docs.html") || f.endsWith("\\docs.html"));
+	if (docs) {
+		const html = readFileSync(docs, "utf8");
+		if (!html.includes('id="onboard"')) {
+			errors.push("docs.html: missing the #onboard section");
+		}
+		if (!html.includes("Onboard this vault")) {
+			errors.push("docs.html: onboard tool missing from the tools table");
+		}
+		if (!html.includes("nine MCP tools")) {
+			errors.push("docs.html: tools section heading should say nine MCP tools");
+		}
+	}
+}
+
 // --- 2. no external assets --------------------------------------------------
 // HTML: any resource-loading tag whose src/href/srcset points off-origin.
 const RESOURCE_TAG =
