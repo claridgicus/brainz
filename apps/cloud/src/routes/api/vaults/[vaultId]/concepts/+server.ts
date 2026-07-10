@@ -1,18 +1,10 @@
 /** GET/POST /api/vaults/:vaultId/concepts — list (tool-compact metas) and create. */
 import { json } from "@sveltejs/kit";
-import { conceptTypeSchema, conceptUpsertRequestSchema } from "@brainz/contracts";
-import { z } from "zod";
+import { conceptUpsertRequestSchema } from "@brainz/contracts";
 import { guarded, parseBody, parseQuery, requirePlatform } from "$lib/server/api-util";
+import { listQuerySchema } from "$lib/server/concept-list-query";
 import { requireVaultAccess } from "$lib/server/vault-access";
 import { vaultClient } from "$lib/server/vault-client";
-
-const listQuerySchema = z.object({
-  product: z.string().optional(),
-  // Full 10-type ontology (domain/story/spec/workflow included) — matches
-  // upsert / MCP list_concepts / REST search, which all use conceptTypeSchema.
-  type: conceptTypeSchema.optional(),
-  tag: z.string().optional(),
-});
 
 export const GET = guarded(async (event) => {
   const { vault } = await requireVaultAccess(event, event.params.vaultId!);

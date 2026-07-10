@@ -10,6 +10,7 @@
     "preview": "wrangler dev",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "node scripts/check-build.mjs",
+    "predeploy": "node ../../scripts/test-all.mjs --scope marketing",
     "deploy": "npm run build && wrangler deploy"
   },
   "devDependencies": {

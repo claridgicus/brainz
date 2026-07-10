@@ -79,31 +79,32 @@ function assertParse(schema, data, name) {
 
 const jar = new Map();
 
-function storeCookies(res) {
+function storeCookies(res, target = jar) {
   for (const raw of res.headers.getSetCookie?.() ?? []) {
     const [pair] = raw.split(";");
     const eq = pair.indexOf("=");
-    if (eq > 0) jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+    if (eq > 0) target.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
   }
 }
 
-function cookieHeader() {
-  return [...jar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
+function cookieHeader(target = jar) {
+  return [...target.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
 }
 
-async function api(method, pathName, { body, cookie = true, bearer } = {}) {
+// `jar: <Map>` runs the request as a different browser (tenancy probes).
+async function api(method, pathName, { body, cookie = true, bearer, jar: cookieJar = jar } = {}) {
   // Node's fetch (undici) would otherwise send `Origin: null`, which Better
   // Auth rejects; send a real browser-like Origin instead.
   const headers = { origin: BASE };
   if (body !== undefined) headers["content-type"] = "application/json";
-  if (cookie && jar.size > 0) headers.cookie = cookieHeader();
+  if (cookie && cookieJar.size > 0) headers.cookie = cookieHeader(cookieJar);
   if (bearer) headers.authorization = `Bearer ${bearer}`;
   const res = await fetch(`${BASE}${pathName}`, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-  storeCookies(res);
+  storeCookies(res, cookieJar);
   const text = await res.text();
   let json = null;
   try {
@@ -209,6 +210,26 @@ async function main() {
       await new Promise((r) => setTimeout(r, 100));
     }
     return null;
+  }
+
+  // Establish a fresh authenticated session for `email` the passwordless way —
+  // request a magic link, capture it from the mailer, follow it — and store the
+  // resulting session cookie into `targetJar`. This is the only way to create a
+  // second user ("user B") now that email+password sign-up is gone; it reuses
+  // the exact request → capture → verify mechanism the primary flow above uses.
+  async function signInViaMagicLink(email, targetJar) {
+    const { res, marker } = await requestMagicLink(email);
+    if (res.status !== 200) return { ok: false, status: res.status, reason: "request" };
+    const url = await captureLink(email, marker);
+    if (!url) return { ok: false, status: res.status, reason: "capture" };
+    const u = new URL(url);
+    const verified = await fetch(`${BASE}${u.pathname}${u.search}`, {
+      method: "GET",
+      redirect: "manual",
+      headers: { origin: BASE },
+    });
+    storeCookies(verified, targetJar);
+    return { ok: targetJar.size > 0, status: res.status, reason: "" };
   }
 
   try {
@@ -726,8 +747,189 @@ async function main() {
     });
     step("malformed bearer on /mcp still → 401", malformedBearer.status === 401, `status ${malformedBearer.status}`);
 
-    // 16. magic-link REQUEST rate limit (D1-backed): 5/hour/email. A fresh
+    // ================================================================
+    // 16. TENANCY PROBES — the load-bearing isolation guarantees.
+    // A second user's session and user A's bearer key must never be able
+    // to read or mutate vault A beyond their grant; foreign vaults are
+    // indistinguishable from missing ones (404).
+    // ================================================================
+
+    // "User B" is minted passwordlessly — a fresh magic link followed into its
+    // own cookie jar. There is no sign-up/email endpoint any more; the link IS
+    // the account creation + sign-in for an as-yet-unknown address.
+    const jarB = new Map();
+    const bLogin = await signInViaMagicLink(`e2e-b-${Date.now()}@example.com`, jarB);
+    step(
+      "tenancy: second user signs in via magic link → own session cookie",
+      bLogin.ok && jarB.size > 0,
+      bLogin.ok ? [...jarB.keys()].join(", ") : `failed at ${bLogin.reason} (status ${bLogin.status})`,
+    );
+
+    const bVaults = await api("GET", "/api/vaults", { jar: jarB });
+    step(
+      "tenancy: user B's vault list is empty (no leakage of A's vaults)",
+      bVaults.status === 200 && bVaults.json?.vaults?.length === 0,
+      JSON.stringify(bVaults.json?.vaults?.map((v) => v.slug)),
+    );
+
+    // Every route class, both reads and writes, against A's vault as B → 404.
+    const tenancyProbes = [
+      ["GET", `/api/vaults/${vaultId}`, undefined],
+      ["PATCH", `/api/vaults/${vaultId}`, { name: "hijacked" }],
+      ["DELETE", `/api/vaults/${vaultId}`, undefined],
+      ["GET", `/api/vaults/${vaultId}/stats`, undefined],
+      ["GET", `/api/vaults/${vaultId}/graph`, undefined],
+      ["GET", `/api/vaults/${vaultId}/search?q=auth`, undefined],
+      ["GET", `/api/vaults/${vaultId}/related/auth-system`, undefined],
+      ["POST", `/api/vaults/${vaultId}/context`, { query: "auth" }],
+      ["GET", `/api/vaults/${vaultId}/concepts`, undefined],
+      ["POST", `/api/vaults/${vaultId}/concepts`, { title: "Injected", body: "planted by B" }],
+      ["GET", `/api/vaults/${vaultId}/concepts/auth-system`, undefined],
+      ["PUT", `/api/vaults/${vaultId}/concepts/auth-system`, { title: "Defaced", body: "overwritten by B" }],
+      ["DELETE", `/api/vaults/${vaultId}/concepts/auth-system`, undefined],
+      ["GET", `/api/vaults/${vaultId}/keys`, undefined],
+      ["POST", `/api/vaults/${vaultId}/keys`, { name: "stolen-key" }],
+    ];
+    for (const [method, probePath, body] of tenancyProbes) {
+      const res = await api(method, probePath, { body, jar: jarB });
+      step(
+        `tenancy: B ${method} ${probePath.replace(vaultId, ":vaultA")} → 404`,
+        res.status === 404,
+        `status ${res.status}`,
+      );
+    }
+
+    // The probes changed nothing: A still reads the original concept + vault name.
+    const untouched = await api("GET", `/api/vaults/${vaultId}/concepts/auth-system`);
+    step(
+      "tenancy: A's concept survives B's probes intact",
+      untouched.status === 200 && untouched.json?.title === "Auth system",
+      `status ${untouched.status} title=${untouched.json?.title}`,
+    );
+    const vaultStill = await api("GET", `/api/vaults/${vaultId}`);
+    step(
+      "tenancy: A's vault name/slug survive B's probes",
+      vaultStill.json?.name === "E2E Vault" && vaultStill.json?.slug === "e2e-vault",
+      `${vaultStill.json?.name} / ${vaultStill.json?.slug}`,
+    );
+
+    // B cannot revoke A's key: mint a fresh key for A, probe, verify it survives.
+    const keyA2 = await api("POST", `/api/vaults/${vaultId}/keys`, { body: { name: "post-revoke-key" } });
+    step("tenancy setup: A mints a fresh key → 201", keyA2.status === 201, `status ${keyA2.status}`);
+    const bRevokes = await api("DELETE", `/api/keys/${keyA2.json.id}`, { jar: jarB });
+    step("tenancy: B DELETE /api/keys/:aKeyId → 404", bRevokes.status === 404, `status ${bRevokes.status}`);
+    const aKeys = await api("GET", `/api/vaults/${vaultId}/keys`);
+    step(
+      "tenancy: A's key survives B's revoke attempt",
+      aKeys.json?.keys?.some((k) => k.id === keyA2.json.id),
+      JSON.stringify(aKeys.json?.keys?.map((k) => k.name)),
+    );
+
+    // Bearer keys are data-plane only (sessionOnly routes reject them)…
+    const bearerA2 = keyA2.json.key;
+    const bearerPatch = await api("PATCH", `/api/vaults/${vaultId}`, { cookie: false, bearer: bearerA2, body: { name: "renamed-by-key" } });
+    step("tenancy: bearer PATCH own vault → 401 (session-only)", bearerPatch.status === 401, `status ${bearerPatch.status}`);
+    const bearerDelete = await api("DELETE", `/api/vaults/${vaultId}`, { cookie: false, bearer: bearerA2 });
+    step("tenancy: bearer DELETE own vault → 401 (session-only)", bearerDelete.status === 401, `status ${bearerDelete.status}`);
+    const bearerKeyList = await api("GET", `/api/vaults/${vaultId}/keys`, { cookie: false, bearer: bearerA2 });
+    step("tenancy: bearer GET keys → 401 (session-only)", bearerKeyList.status === 401, `status ${bearerKeyList.status}`);
+    const bearerRevoke = await api("DELETE", `/api/keys/${keyA2.json.id}`, { cookie: false, bearer: bearerA2 });
+    step("tenancy: bearer DELETE /api/keys/:id → 401 (session-only)", bearerRevoke.status === 401, `status ${bearerRevoke.status}`);
+    // …and B's foreign vault stays 404 for writes through the key too.
+    const bearerForeignWrite = await api("POST", `/api/vaults/${other.json.id}/concepts`, {
+      cookie: false,
+      bearer: bearerA2,
+      body: { title: "Cross-vault write", body: "must not land" },
+    });
+    step("tenancy: A's key POST concepts to A's OTHER vault → 404 (key ≠ owner)", bearerForeignWrite.status === 404, `status ${bearerForeignWrite.status}`);
+
+    // Anonymous requests to the data plane are 401, not 404 (no auth at all).
+    for (const [method, probePath, body] of [
+      ["GET", `/api/vaults/${vaultId}/stats`, undefined],
+      ["POST", `/api/vaults/${vaultId}/concepts`, { title: "anon", body: "x" }],
+      ["POST", `/api/vaults/${vaultId}/context`, { query: "auth" }],
+    ]) {
+      const res = await api(method, probePath, { cookie: false, body });
+      step(`anon ${method} ${probePath.replace(vaultId, ":vaultA")} → 401`, res.status === 401, `status ${res.status}`);
+    }
+
+    // ================================================================
+    // 17. VALIDATION FAILURES — every parse boundary answers 400 with {error}.
+    // ================================================================
+
+    const badBodies = [
+      ["POST", "/api/vaults", {}, "vault create without name"],
+      ["POST", "/api/vaults", { name: "" }, "vault create with empty name"],
+      ["POST", `/api/vaults/${vaultId}/concepts`, { title: "No body here" }, "concept without body"],
+      ["POST", `/api/vaults/${vaultId}/concepts`, { title: "x", body: "y", type: "banana" }, "concept with unknown type"],
+      ["PUT", `/api/vaults/${vaultId}/concepts/auth-system`, { id: "different-id", title: "x", body: "y" }, "concept PUT with mismatched body id"],
+      ["POST", `/api/vaults/${vaultId}/context`, {}, "context without query or ids"],
+      ["POST", `/api/vaults/${vaultId}/keys`, {}, "key create without name"],
+      ["POST", `/api/vaults/${vaultId}/keys`, { name: "" }, "key create with empty name"],
+    ];
+    for (const [method, badPath, body, label] of badBodies) {
+      const res = await api(method, badPath, { body });
+      step(
+        `validation: ${label} → 400 {error}`,
+        res.status === 400 && typeof res.json?.error === "string",
+        `status ${res.status}`,
+      );
+    }
+
+    const badQueries = [
+      [`/api/vaults/${vaultId}/search`, "search without q"],
+      [`/api/vaults/${vaultId}/search?q=x&limit=999`, "search with limit over 50"],
+      [`/api/vaults/${vaultId}/search?q=x&mode=psychic`, "search with unknown mode"],
+      [`/api/vaults/${vaultId}/related/auth-system?depth=9`, "related with depth over 3"],
+    ];
+    for (const [badPath, label] of badQueries) {
+      const res = await api("GET", badPath);
+      step(
+        `validation: ${label} → 400 {error}`,
+        res.status === 400 && typeof res.json?.error === "string",
+        `status ${res.status}`,
+      );
+    }
+
+    const rawInvalid = await fetch(`${BASE}/api/vaults/${vaultId}/context`, {
+      method: "POST",
+      headers: { origin: BASE, "content-type": "application/json", cookie: cookieHeader() },
+      body: "this is not json",
+    });
+    step("validation: non-JSON body → 400", rawInvalid.status === 400, `status ${rawInvalid.status}`);
+
+    const dupVault = await api("POST", "/api/vaults", { body: { name: "E2E Vault" } });
+    step("validation: duplicate vault slug → 409", dupVault.status === 409, `status ${dupVault.status}`);
+
+    // ================================================================
+    // 18. VAULT LIFECYCLE — rename, slug clash, concept delete, vault delete.
+    // ================================================================
+
+    const renamed = await api("PATCH", `/api/vaults/${other.json.id}`, { body: { name: "Other Renamed" } });
+    step(
+      "PATCH vault renames but keeps the slug",
+      renamed.status === 200 && renamed.json?.name === "Other Renamed" && renamed.json?.slug === "other-vault",
+      `${renamed.status} ${renamed.json?.name}/${renamed.json?.slug}`,
+    );
+    const slugClash = await api("PATCH", `/api/vaults/${other.json.id}`, { body: { slug: "e2e-vault" } });
+    step("PATCH vault to a taken slug → 409", slugClash.status === 409, `status ${slugClash.status}`);
+
+    const delConcept = await api("DELETE", `/api/vaults/${vaultId}/concepts/mcp-written-note`);
+    step("DELETE concept → 204", delConcept.status === 204, `status ${delConcept.status}`);
+    const delConceptGone = await api("GET", `/api/vaults/${vaultId}/concepts/mcp-written-note`);
+    step("deleted concept GET → 404", delConceptGone.status === 404, `status ${delConceptGone.status}`);
+    const delConceptAgain = await api("DELETE", `/api/vaults/${vaultId}/concepts/mcp-written-note`);
+    step("DELETE of a missing concept → 404", delConceptAgain.status === 404, `status ${delConceptAgain.status}`);
+
+    const delVault = await api("DELETE", `/api/vaults/${other.json.id}`);
+    step("DELETE vault → 204", delVault.status === 204, `status ${delVault.status}`);
+    const delVaultGone = await api("GET", `/api/vaults/${other.json.id}`);
+    step("deleted vault GET → 404", delVaultGone.status === 404, `status ${delVaultGone.status}`);
+
+    // ================================================================
+    // 19. magic-link REQUEST rate limit (D1-backed): 5/hour/email. A fresh
     // address gets its 6th request throttled with a 429 that leaks nothing.
+    // ================================================================
     const rlEmail = `ratelimit-${Date.now()}@example.com`;
     let rlOk = true;
     for (let i = 1; i <= 5; i++) {
