@@ -6,7 +6,8 @@
 
 npm workspaces monorepo (Node >= 20, TypeScript ~5.5, ESM throughout):
 
-- `packages/core` — `@brainz/core`, vault engine (parse, SQLite/FTS5 index, search, graph, context assembly)
+- `packages/engine` — `@brainz/engine`, pure platform-agnostic logic (parse, slugify, RRF/cosine, BFS, context assembly, graph validation) — no fs/sqlite/node-only APIs, must stay Cloudflare Workers-compatible
+- `packages/core` — `@brainz/core`, vault engine over engine (SQLite/FTS5 index, file watching, embeddings); re-exports engine's public types + `slugify`
 - `packages/mcp-server` — `@brainz/mcp-server`, MCP stdio server over core (binary `brainz-mcp`)
 - `packages/cli` — `@brainz/cli`, the `brainz` command (binary `dist/bin.js`)
 - `packages/web` — `@brainz/web`, graph-view server + esbuild-bundled frontend (`frontend/` → `dist/public`)
@@ -29,7 +30,7 @@ any package builds its workspace dependencies first — build order does not mat
 ## Conventions
 
 - ESM + NodeNext: relative imports **must** use `.js` extensions (`./vault.js`, not `./vault`).
-- All ids are slugs (lowercase alnum + dashes); `slugify()` lives in core.
+- All ids are slugs (lowercase alnum + dashes); `slugify()` lives in engine (re-exported by core).
 - Never throw raw exceptions across the MCP boundary — return `isError` content.
 - Broken wiki-links are *pending* concepts: `validate` warnings, never errors.
 - `.brainz/` dirs are derived SQLite state — gitignored, safe to delete, rebuilt on `Vault.open`.

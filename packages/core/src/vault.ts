@@ -1,19 +1,16 @@
 import type DatabaseType from "better-sqlite3";
-import { watch as chokidarWatch } from "chokidar";
-import matter from "gray-matter";
-import { createHash } from "node:crypto";
-import * as fs from "node:fs";
-import * as fsp from "node:fs/promises";
-import * as path from "node:path";
-import { openDb } from "./db.js";
 import {
-  cosineSimilarity,
-  createEmbedder,
-  type Embedder,
-  type EmbeddingConfig,
-} from "./embeddings.js";
-import { extractWikiLinks, parseNote } from "./parse.js";
-import { slugify } from "./slugify.js";
+  assembleContext,
+  bfsRelated,
+  cosineSim,
+  packVector,
+  parseNote,
+  readFrontmatter,
+  rrfFuse,
+  serializeNote,
+  slugify,
+  unpackVector,
+} from "@brainz/engine";
 import type {
   Concept,
   ConceptMeta,
@@ -27,7 +24,14 @@ import type {
   SearchOptions,
   UpsertInput,
   VaultStats,
-} from "./types.js";
+} from "@brainz/engine";
+import { watch as chokidarWatch } from "chokidar";
+import { createHash } from "node:crypto";
+import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
+import * as path from "node:path";
+import { openDb } from "./db.js";
+import { createEmbedder, type Embedder, type EmbeddingConfig } from "./embeddings.js";
 
 interface VaultConfig {
   name: string;
@@ -54,8 +58,6 @@ interface PendingEmbedding {
   text: string;
   hash: string;
 }
-
-const RRF_K = 60;
 
 function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
@@ -167,7 +169,9 @@ export class Vault {
       .get(filePath) as { id: string; hash: string } | undefined;
     if (existing && existing.hash === hash) return; // unchanged: skip
 
-    const { concept, relations } = parseNote(filePath, raw);
+    const fallbackId = path.basename(filePath).replace(/\.md$/i, "");
+    const { meta, body, wikiLinks, relations } = parseNote(raw, { fallbackId });
+    const concept: Concept = { ...meta, filePath, body };
     if (existing && existing.id !== concept.id) this.#removeConcept(existing.id);
 
     this.#db
@@ -210,7 +214,7 @@ export class Vault {
     for (const [relation, targets] of Object.entries(relations)) {
       for (const to of targets) insertEdge.run(concept.id, to, relation);
     }
-    for (const to of extractWikiLinks(concept.body)) {
+    for (const to of wikiLinks) {
       if (to !== concept.id) insertEdge.run(concept.id, to, "references");
     }
 
@@ -279,8 +283,9 @@ export class Vault {
         const batch = pending.slice(i, i + BATCH);
         const vectors = await embedder.embed(batch.map((p) => p.text));
         batch.forEach((p, j) => {
-          const vec = vectors[j];
-          insert.run(p.id, Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength), p.hash);
+          const packed = packVector(vectors[j]);
+          // better-sqlite3 requires Buffer for BLOBs; this is a no-copy view.
+          insert.run(p.id, Buffer.from(packed.buffer, packed.byteOffset, packed.byteLength), p.hash);
         });
       }
     } catch {
@@ -369,12 +374,7 @@ export class Vault {
       .all() as { id: string; vector: Buffer }[];
     const scored: { id: string; score: number }[] = [];
     for (const row of rows) {
-      const vec = new Float32Array(
-        row.vector.buffer,
-        row.vector.byteOffset,
-        row.vector.byteLength / 4,
-      );
-      scored.push({ id: row.id, score: cosineSimilarity(queryVec, vec) });
+      scored.push({ id: row.id, score: cosineSim(queryVec, unpackVector(row.vector)) });
     }
     scored.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
     const hits: SearchHit[] = [];
@@ -389,18 +389,7 @@ export class Vault {
 
   /** Reciprocal rank fusion (k = 60) of two ranked hit lists. */
   #fuse(a: SearchHit[], b: SearchHit[]): SearchHit[] {
-    const fused = new Map<string, { hit: SearchHit; score: number }>();
-    for (const list of [a, b]) {
-      list.forEach((hit, i) => {
-        const id = hit.concept.id;
-        const entry = fused.get(id) ?? { hit, score: 0 };
-        entry.score += 1 / (RRF_K + i + 1);
-        fused.set(id, entry);
-      });
-    }
-    return [...fused.values()]
-      .sort((x, y) => y.score - x.score || x.hit.concept.id.localeCompare(y.hit.concept.id))
-      .map((e) => ({ ...e.hit, score: e.score }));
+    return rrfFuse(a, b, (hit) => hit.concept.id).map((e) => ({ ...e.item, score: e.score }));
   }
 
   // ------------------------------------------------------------------- reads
@@ -459,46 +448,7 @@ export class Vault {
   // ------------------------------------------------------------------- graph
 
   related(id: string, opts: RelatedOptions = {}): RelatedNode[] {
-    const depth = Math.min(Math.max(opts.depth ?? 1, 1), 3);
-    if (!this.#getMeta(id)) return [];
-
-    const allowed = opts.relations ? new Set(opts.relations) : null;
-    const allEdges = this.edges().filter((e) => !allowed || allowed.has(e.relation));
-
-    // BFS over edges in both directions.
-    const visited = new Map<string, { distance: number; via: Edge[] }>();
-    visited.set(id, { distance: 0, via: [] });
-    let frontier = [id];
-    for (let d = 1; d <= depth && frontier.length > 0; d++) {
-      const next: string[] = [];
-      for (const cur of frontier) {
-        const curInfo = visited.get(cur)!;
-        const neighbors: { node: string; edge: Edge }[] = [];
-        for (const e of allEdges) {
-          if (e.from === cur) neighbors.push({ node: e.to, edge: e });
-          if (e.to === cur) neighbors.push({ node: e.from, edge: e });
-        }
-        neighbors.sort(
-          (x, y) => x.node.localeCompare(y.node) || x.edge.relation.localeCompare(y.edge.relation),
-        );
-        for (const { node, edge } of neighbors) {
-          if (visited.has(node)) continue;
-          visited.set(node, { distance: d, via: [...curInfo.via, edge] });
-          next.push(node);
-        }
-      }
-      frontier = next;
-    }
-
-    const out: RelatedNode[] = [];
-    for (const [nodeId, info] of visited) {
-      if (nodeId === id) continue;
-      const meta = this.#getMeta(nodeId);
-      if (!meta) continue; // pending concept (broken link target)
-      out.push({ concept: meta, distance: info.distance, via: info.via });
-    }
-    out.sort((x, y) => x.distance - y.distance || x.concept.id.localeCompare(y.concept.id));
-    return opts.limit !== undefined ? out.slice(0, opts.limit) : out;
+    return bfsRelated(this.edges(), id, opts, (nodeId) => this.#getMeta(nodeId));
   }
 
   // ---------------------------------------------------------------- context
@@ -507,77 +457,23 @@ export class Vault {
     if (!opts.query && (!opts.ids || opts.ids.length === 0)) {
       throw new Error("assembleContext requires at least one of `query` or `ids`");
     }
-    const depth = Math.max(opts.depth ?? 1, 0);
-    const tokenBudget = opts.tokenBudget ?? 4000;
 
     // Seeds: explicit ids first (given order), then search hits ranked by score.
-    const ordered: string[] = [];
-    const seen = new Set<string>();
-    const push = (candidateId: string): void => {
-      if (!seen.has(candidateId)) {
-        seen.add(candidateId);
-        ordered.push(candidateId);
-      }
-    };
-    for (const seedId of opts.ids ?? []) {
-      if (this.#getMeta(seedId)) push(seedId);
-    }
+    const seedIds = [...(opts.ids ?? [])];
     if (opts.query) {
       const hits = await this.search({ query: opts.query, product: opts.product, limit: 10 });
-      for (const hit of hits) push(hit.concept.id);
+      seedIds.push(...hits.map((hit) => hit.concept.id));
     }
 
-    // Expand to depth: neighbors ranked by distance, then id (deterministic).
-    const allEdges = this.edges();
-    const visited = new Set(ordered);
-    let frontier = [...ordered];
-    for (let d = 1; d <= depth && frontier.length > 0; d++) {
-      const layer = new Set<string>();
-      for (const cur of frontier) {
-        for (const e of allEdges) {
-          if (e.from === cur) layer.add(e.to);
-          if (e.to === cur) layer.add(e.from);
-        }
-      }
-      const fresh = [...layer].filter((x) => !visited.has(x)).sort();
-      frontier = [];
-      for (const nodeId of fresh) {
-        visited.add(nodeId);
-        frontier.push(nodeId);
-        const meta = this.#getMeta(nodeId);
-        if (!meta) continue; // pending concept
-        if (opts.product && meta.product !== opts.product) continue;
-        push(nodeId);
-      }
-    }
-
-    // Emit sections until the budget would be exceeded.
-    const included: ConceptMeta[] = [];
-    const sections: string[] = [];
-    let truncated = false;
-    let chars = 0;
-    for (const conceptId of ordered) {
-      const concept = this.getConcept(conceptId);
-      if (!concept) continue;
-      const section = `## ${concept.title} (${concept.id})\n\n${concept.body.trim()}`;
-      const addChars = section.length + (sections.length > 0 ? 2 : 0); // "\n\n" separator
-      if (Math.ceil((chars + addChars) / 4) > tokenBudget) {
-        truncated = true;
-        break;
-      }
-      sections.push(section);
-      chars += addChars;
-      const { body: _body, ...meta } = concept;
-      included.push(meta);
-    }
-
-    const markdown = sections.join("\n\n");
-    return {
-      markdown,
-      included,
-      truncated,
-      approxTokens: Math.ceil(markdown.length / 4),
-    };
+    return assembleContext(
+      seedIds,
+      {
+        edges: this.edges(),
+        getMeta: (id) => this.#getMeta(id),
+        getConcept: (id) => this.getConcept(id),
+      },
+      { depth: opts.depth, tokenBudget: opts.tokenBudget, product: opts.product },
+    );
   }
 
   // ----------------------------------------------------------------- writes
@@ -594,7 +490,7 @@ export class Vault {
     if (existing) {
       filePath = existing.filePath;
       const raw = await fsp.readFile(filePath, "utf8");
-      data = { ...(matter(raw).data as Record<string, unknown>) }; // preserve unknown keys
+      data = readFrontmatter(raw).frontmatter; // preserve unknown keys
     } else {
       filePath = path.join(this.dir, "concepts", `${id}.md`);
       data = {};
@@ -612,7 +508,7 @@ export class Vault {
 
     const body = input.body.endsWith("\n") ? input.body : `${input.body}\n`;
     await fsp.mkdir(path.dirname(filePath), { recursive: true });
-    await fsp.writeFile(filePath, matter.stringify(body, data));
+    await fsp.writeFile(filePath, serializeNote(data, body));
     await this.#reindexFile(filePath);
 
     const saved = this.getConcept(id);
@@ -625,8 +521,8 @@ export class Vault {
     if (!source) throw new Error(`unknown concept: ${from}`);
 
     const raw = await fsp.readFile(source.filePath, "utf8");
-    const parsed = matter(raw);
-    const data = { ...(parsed.data as Record<string, unknown>) };
+    const parsed = readFrontmatter(raw);
+    const data = parsed.frontmatter;
     const relations =
       data.relations && typeof data.relations === "object" && !Array.isArray(data.relations)
         ? { ...(data.relations as Record<string, unknown>) }
@@ -641,7 +537,7 @@ export class Vault {
     relations[relation] = list;
     data.relations = relations;
 
-    await fsp.writeFile(source.filePath, matter.stringify(parsed.content, data));
+    await fsp.writeFile(source.filePath, serializeNote(data, parsed.content));
     await this.#reindexFile(source.filePath);
   }
 

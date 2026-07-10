@@ -24,13 +24,14 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
+    "@brainz/engine": "*",
     "better-sqlite3": "^11.10.0",
-    "chokidar": "^4.0.3",
-    "gray-matter": "^4.0.3"
+    "chokidar": "^4.0.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.17.0",
+    "gray-matter": "^4.0.3",
     "typescript": "~5.5.4",
     "vitest": "^2.1.9"
   }

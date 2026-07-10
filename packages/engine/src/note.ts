@@ -1,7 +1,6 @@
 import matter from "gray-matter";
-import { basename } from "node:path";
 import { slugify } from "./slugify.js";
-import type { Concept, ConceptStatus, ConceptType } from "./types.js";
+import type { ConceptMeta, ConceptStatus, ConceptType } from "./types.js";
 
 const CONCEPT_TYPES: readonly ConceptType[] = [
   "concept",
@@ -14,8 +13,23 @@ const CONCEPT_TYPES: readonly ConceptType[] = [
 
 const CONCEPT_STATUSES: readonly ConceptStatus[] = ["active", "draft", "deprecated"];
 
+/** Concept metadata derivable from a note's markdown alone (no file path). */
+export type NoteMeta = Omit<ConceptMeta, "filePath">;
+
+export interface ParseNoteOptions {
+  /**
+   * Id used when frontmatter has no `id` — typically the filename without
+   * extension. It is slugified; a frontmatter `id` is used as-is.
+   */
+  fallbackId: string;
+}
+
 export interface ParsedNote {
-  concept: Concept;
+  meta: NoteMeta;
+  /** Markdown body sans frontmatter (leading blank line stripped). */
+  body: string;
+  /** Wiki-link targets in the body, deduped, in order of first appearance. */
+  wikiLinks: string[];
   /** Typed edges declared in frontmatter `relations:` (relation -> target ids). */
   relations: Record<string, string[]>;
   /** Raw frontmatter data (for callers that need unknown-key preservation). */
@@ -36,14 +50,13 @@ function asStringArray(value: unknown): string[] {
   return [];
 }
 
-/** Parse a markdown note (frontmatter + body) into a Concept plus typed relations. */
-export function parseNote(filePath: string, raw: string): ParsedNote {
-  const { data, content } = matter(raw);
+/** Parse a markdown note (frontmatter + body) into meta, body, wiki-links and typed relations. */
+export function parseNote(markdown: string, opts: ParseNoteOptions): ParsedNote {
+  const { data, content } = matter(markdown);
   const fm = data as Record<string, unknown>;
 
-  const fallbackId = slugify(basename(filePath).replace(/\.md$/i, ""));
   const rawId = typeof fm.id === "string" ? fm.id.trim() : "";
-  const id = rawId || fallbackId;
+  const id = rawId || slugify(opts.fallbackId);
 
   const rawTitle = typeof fm.title === "string" ? fm.title.trim() : "";
   const title = rawTitle || id;
@@ -66,20 +79,41 @@ export function parseNote(filePath: string, raw: string): ParsedNote {
     }
   }
 
-  const concept: Concept = {
+  const body = content.replace(/^\r?\n/, "");
+
+  const meta: NoteMeta = {
     id,
     title,
     type,
     status,
     product,
     tags: asStringArray(fm.tags),
-    filePath,
     createdAt: asIso(fm.createdAt),
     updatedAt: asIso(fm.updatedAt),
-    body: content.replace(/^\r?\n/, ""),
   };
 
-  return { concept, relations, frontmatter: fm };
+  return { meta, body, wikiLinks: extractWikiLinks(body), relations, frontmatter: fm };
+}
+
+/**
+ * Split a note into its frontmatter map (shallow copy) and raw content
+ * (leading newline preserved) — for read-modify-write flows that must keep
+ * unknown frontmatter keys and byte-identical bodies.
+ */
+export function readFrontmatter(markdown: string): {
+  frontmatter: Record<string, unknown>;
+  content: string;
+} {
+  const parsed = matter(markdown);
+  return { frontmatter: { ...(parsed.data as Record<string, unknown>) }, content: parsed.content };
+}
+
+/**
+ * Serialize a note back to markdown: YAML frontmatter (unknown keys pass
+ * through untouched) followed by the body.
+ */
+export function serializeNote(frontmatter: Record<string, unknown>, body: string): string {
+  return matter.stringify(body, frontmatter);
 }
 
 /**

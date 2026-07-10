@@ -12,7 +12,7 @@ export type {
   ContextBundle,
   UpsertInput,
   VaultStats,
-} from "./types.js";
+} from "@brainz/engine";
 
 export { Vault } from "./vault.js";
-export { slugify } from "./slugify.js";
+export { slugify } from "@brainz/engine";
