@@ -219,6 +219,63 @@ async function main() {
     // 8. unknown slug 404s
     const missing = await page("/v/never-created");
     step("/v/<unknown-slug> → 404", missing.status === 404, `status ${missing.status}`);
+
+    // 9. settings never leaks the plaintext key into SSR (prefix only), and
+    // teaches onboarding.
+    step(
+      "settings SSR never contains the plaintext bz_ key",
+      !settings.html.includes(keyRes.json.key),
+      `key prefix shown: ${keyRes.json.keyPrefix}`,
+    );
+    step(
+      "settings SSR mentions the onboard tool",
+      settings.html.includes("onboard"),
+    );
+
+    // 10. anon auth pages: signup SSR + claim page with a bogus token.
+    const signupPage = await page("/signup", { cookie: false });
+    step(
+      "anon /signup → 200 with the signup form",
+      signupPage.status === 200 && signupPage.html.includes("Sign up"),
+      `status ${signupPage.status}`,
+    );
+    const bogusClaim = await page("/claim/not-a-real-token", { cookie: false });
+    step(
+      "claim page with a bogus token → 200 explains the link is not valid",
+      bogusClaim.status === 200 && bogusClaim.html.includes("Claim link not valid"),
+      `status ${bogusClaim.status}`,
+    );
+
+    // 11. UI tenancy: a second user's session gets a 404 for user A's
+    // workspace slug — same as a slug that never existed.
+    const jarB = new Map();
+    const signupB = await fetch(`${BASE}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: { origin: BASE, "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "UI E2E B",
+        email: `e2e-ui-b-${Date.now()}@example.com`,
+        password: "correct-horse-battery",
+      }),
+    });
+    for (const raw of signupB.headers.getSetCookie?.() ?? []) {
+      const [pair] = raw.split(";");
+      const eq = pair.indexOf("=");
+      if (eq > 0) jarB.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+    }
+    step("second user signs up → 200 + cookie", signupB.status === 200 && jarB.size > 0, `status ${signupB.status}`);
+    const cookieB = [...jarB.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
+    const crossWorkspace = await fetch(`${BASE}/v/ui-vault`, { headers: { cookie: cookieB }, redirect: "manual" });
+    step("user B's session on A's /v/ui-vault → 404", crossWorkspace.status === 404, `status ${crossWorkspace.status}`);
+    const crossSettings = await fetch(`${BASE}/v/ui-vault/settings`, { headers: { cookie: cookieB }, redirect: "manual" });
+    step("user B's session on A's settings page → 404", crossSettings.status === 404, `status ${crossSettings.status}`);
+    const dashB = await fetch(`${BASE}/dashboard`, { headers: { cookie: cookieB } });
+    const dashBHtml = await dashB.text();
+    step(
+      "user B's dashboard never lists A's vault",
+      dashB.status === 200 && !dashBHtml.includes("UI Vault"),
+      `status ${dashB.status}`,
+    );
   } catch (err) {
     step("journey completed without exceptions", false, err instanceof Error ? err.message : String(err));
     if (devLog) console.error("\n---- wrangler dev log (tail) ----\n" + devLog.slice(-4000));

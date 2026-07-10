@@ -10,6 +10,7 @@
     "build": "vite build && node scripts/patch-worker.mjs",
     "preview": "npm run build && wrangler dev",
     "preview:local": "npm run build && wrangler dev --local",
+    "predeploy": "node ../../scripts/test-all.mjs",
     "deploy": "npm run build && wrangler deploy",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",

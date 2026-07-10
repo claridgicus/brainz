@@ -42,13 +42,21 @@ npm run dev            # vite dev (HMR) + a sidecar wrangler dev hosting VaultDO
 npm run build          # vite build + append the VaultDO export to _worker.js
 npm run preview        # build + wrangler dev (real workerd; needs `wrangler login` for Workers AI)
 npm run preview:local  # same but --local: no login needed, AI unavailable (keyword-only)
-npm run deploy         # build + wrangler deploy
+npm run deploy         # GATED: predeploy runs the repo-root test:all first, then build + wrangler deploy
 npm run db:generate    # drizzle-kit generate (SQL into ./drizzle)
 npm run db:migrate:local   # apply D1 migrations to local dev state
 npm run db:migrate:remote  # apply D1 migrations to the real D1 database
 npm test               # vitest (pure server helpers + MCP handler map)
 npm run e2e            # scripted journey against wrangler dev (see below)
 ```
+
+### Deploy is gated
+
+`npm run deploy` cannot proceed unless the monorepo's full test gate passes:
+the `predeploy` hook runs `node ../../scripts/test-all.mjs` (same as
+`npm run test:all` at the repo root) — typecheck, every unit suite,
+svelte-check, all builds, the backend E2E journey, and the UI E2E journey.
+Any red step aborts the deploy. See `TESTING.md` at the repo root.
 
 ### Local dev notes
 

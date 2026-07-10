@@ -1,0 +1,21 @@
+# CI: run the full pre-deploy gate on every push/PR.
+# The same command developers (and deploys, via each app's `predeploy` hook)
+# run locally: typecheck → unit tests → svelte-check → build → E2E suites.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-all:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run test:all
