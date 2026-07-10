@@ -47,7 +47,7 @@ Stack: Svelte 5 (runes), SvelteKit, `@sveltejs/adapter-cloudflare`, wrangler.jso
 `apps/cloud/wrangler.jsonc`, complete and deploy-ready except account-specific ids:
 - `name: "brainz-cloud"`, `main` per adapter-cloudflare output, `compatibility_date` (recent), `compatibility_flags: ["nodejs_compat"]` (required: gray-matter touches Buffer/fs-stubs — verified in the engine wave)
 - Bindings: `DB` (d1_databases — `database_id: "<REPLACE>"` placeholder + comment with the `wrangler d1 create brainz` command), `VAULT_DO` (durable_objects binding to class `VaultDO` + `migrations: [{ tag: "v1", new_sqlite_classes: ["VaultDO"] }]`), `AI` (Workers AI)
-- `routes: [{ pattern: "brain.brownmatter.ai", custom_domain: true }]`
+- `routes: [{ pattern: "brainz.brownmatter.ai", custom_domain: true }]`
 - Assets/static config as adapter-cloudflare requires; `.dev.vars.example` (BETTER_AUTH_SECRET, BETTER_AUTH_URL=http://localhost:5173, GITHUB_CLIENT_ID/SECRET optional); `.dev.vars` gitignored
 - npm scripts: `dev` (vite dev with platformProxy), `build`, `preview` (wrangler dev on built output), `deploy` (build + wrangler deploy), `db:generate` (drizzle-kit), `db:migrate:local` / `db:migrate:remote` (wrangler d1 migrations apply)
 - README-CLOUD deploy runbook (user-side, in order): wrangler login → `wrangler d1 create brainz` → paste id → `db:migrate:remote` → `wrangler secret put BETTER_AUTH_SECRET` (+ BETTER_AUTH_URL) → DNS for brownmatter.ai on the Cloudflare account → `npm run deploy` → verify `/mcp` with a bearer key
@@ -77,7 +77,7 @@ Concept writes parse the submitted markdown body with engine's `parseNote` (wiki
 
 - better-auth with drizzle adapter (sqlite/D1), email+password enabled; GitHub OAuth enabled only when `GITHUB_CLIENT_ID/SECRET` present.
 - SvelteKit integration per Better Auth docs: mount handler in `src/hooks.server.ts`, expose session in `locals`. Client: better-auth/svelte client for the UI.
-- **Production domain: `https://brain.brownmatter.ai`** — the user-facing dashboard AND the MCP/API host. `BETTER_AUTH_URL=https://brain.brownmatter.ai` in production (localhost in `.dev.vars`), Better Auth `trustedOrigins` includes it, and wrangler.jsonc declares the custom domain route (`routes: [{ pattern: "brain.brownmatter.ai", custom_domain: true }]`). MCP setup snippets/docs use `https://brain.brownmatter.ai/mcp`.
+- **Production domain: `https://brainz.brownmatter.ai`** — the user-facing dashboard AND the MCP/API host. `BETTER_AUTH_URL=https://brainz.brownmatter.ai` in production (localhost in `.dev.vars`), Better Auth `trustedOrigins` includes it, and wrangler.jsonc declares the custom domain route (`routes: [{ pattern: "brainz.brownmatter.ai", custom_domain: true }]`). MCP setup snippets/docs use `https://brainz.brownmatter.ai/mcp`.
 - Secrets via wrangler: `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`. Provide `.dev.vars.example`.
 - API keys: either Better Auth's apiKey plugin or the custom `api_key` table above — agent's call, but requirements hold: per-vault scope, hashed at rest, shown once, revocable from UI, `last_used_at` updated on use.
 
@@ -105,7 +105,7 @@ Concept writes parse the submitted markdown body with engine's `parseNote` (wiki
 An orchestrator agent must be able to provision an account for its human straight from the MCP endpoint:
 
 - **Unauthenticated `/mcp` connections** no longer 401: they get a PUBLIC MCP server exposing exactly one tool, `signup` `{email, vaultName?}`. (Invalid/revoked bearer still 401s — only *absent* auth gets the public server.)
-- `signup` creates: a Better Auth user (email, NO password — credential set later by the human), a first vault (name default "My vault"), an API key, and a single-use **claim token** (`account_claims` table: id, user_id, token_hash SHA-256, created_at, expires_at +7d, claimed_at). Returns `{ apiKey: "bz_…", claimUrl: "https://brain.brownmatter.ai/claim/<token>", vaultSlug, email }` — with tool-description text telling the agent to deliver the claim URL to its human and keep the key for MCP access.
+- `signup` creates: a Better Auth user (email, NO password — credential set later by the human), a first vault (name default "My vault"), an API key, and a single-use **claim token** (`account_claims` table: id, user_id, token_hash SHA-256, created_at, expires_at +7d, claimed_at). Returns `{ apiKey: "bz_…", claimUrl: "https://brainz.brownmatter.ai/claim/<token>", vaultSlug, email }` — with tool-description text telling the agent to deliver the claim URL to its human and keep the key for MCP access.
 - Duplicate email → isError with a "this email already has an account — sign in at /login" message (no info leak beyond existence; acceptable for v1).
 - **Rate limiting**: per-IP (CF-Connecting-IP) counter, max 5 signups/hour — D1 or a small DO counter; 429-style isError beyond it. Email format validated.
 - `/claim/[token]` page (UI): validates token (unexpired, unclaimed), shows the account email, lets the human set a password (Better Auth credential creation using the existing PBKDF2 hasher), signs them in, marks claim used, redirects to /dashboard. Expired/used → clear error page with a "sign up again" path.
@@ -161,9 +161,17 @@ The tenant unit becomes the **project** — human-readable name, many users ↔ 
 - **UI**: project picker in the (app) header (current project name + dropdown: switch, create, invite chip showing pending count); dashboard groups by membership; settings gains Members (list, roles, remove) + Invites (create w/ role, copy URL, revoke) sections; rename stays; create-project flow asks for a human-readable name (slug auto).
 - **Contracts**: project/member/invite schemas + updated key schemas in api.ts; CONTRACTS_VERSION bump. REST routes move to `/api/projects/...` with `/api/vaults` kept as deprecated aliases until the UI/e2e migrate (delete aliases in the same wave if all callers are updated — preferred).
 
+### Brand model
+
+- **Brownmatter** = the company / parent brand. The marketing site at `brownmatter.ai` presents Brownmatter.
+- **Brainz** = the product (the app, dashboard, graph, MCP server, CLI). Lives at `brainz.brownmatter.ai`.
+- The marketing site markets Brainz-the-product under the Brownmatter-the-company banner (e.g. footer "Brainz is a Brownmatter product").
+- The app moved from the retired `brain.brownmatter.ai` to `brainz.brownmatter.ai` — `brain.*` is replaced entirely (no redirect kept).
+- Infra names (npm `@brainz/*`, worker `brainz-cloud`/`brainz-marketing`, D1 `brainz`, CLI `brainz`, `bz_` keys, `BRAINZ_VAULT`) are unchanged — they already say "brainz", which matches the product name.
+
 ### Branding
 
-Logo mark: the 💩 (pile of poo) emoji — the Brownmatter brand joke, played straight against a polished dark UI. Wordmark: "💩 Brainz". Favicon: 💩 as an inline-SVG data-URI. Marketing site lives at brownmatter.ai; the app at brain.brownmatter.ai.
+Logo mark: the 💩 (pile of poo) emoji — the Brownmatter brand joke, played straight against a polished dark UI. Wordmark: "💩 Brainz". Favicon: 💩 as an inline-SVG data-URI. Marketing site lives at brownmatter.ai; the app at brainz.brownmatter.ai.
 
 ### UI (Svelte 5, `src/routes/(marketing)` + `(app)`)
 
