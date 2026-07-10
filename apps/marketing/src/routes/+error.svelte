@@ -18,8 +18,11 @@
 		text-align: center;
 	}
 	h1 {
-		font-size: 64px;
-		color: var(--accent);
+		font-size: clamp(80px, 14vw, 140px);
+		letter-spacing: -0.05em;
+		line-height: 1;
+		color: var(--text);
+		margin-bottom: 12px;
 	}
 	p {
 		color: var(--text-dim);

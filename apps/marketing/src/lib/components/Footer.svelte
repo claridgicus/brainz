@@ -35,10 +35,9 @@
 
 <style>
 	footer {
-		border-top: 1px solid var(--border);
-		background: var(--bg-raised);
-		padding: 56px 0 32px;
-		margin-top: 40px;
+		border-top: 1px solid var(--rule);
+		background: var(--bg-card);
+		padding: 64px 0 36px;
 	}
 	.inner {
 		display: flex;
@@ -62,15 +61,19 @@
 		gap: 9px;
 	}
 	.col h4 {
-		font-size: 12px;
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		color: var(--text-dim);
-		margin-bottom: 4px;
+		font-size: 15px;
+		font-weight: 600;
+		letter-spacing: -0.01em;
+		color: var(--text);
+		margin-bottom: 6px;
 	}
 	.col a {
-		color: var(--text);
+		color: var(--text-dim);
 		font-size: 14.5px;
+		text-decoration: none;
+	}
+	.col a:hover {
+		color: var(--accent);
 	}
 	.legal {
 		display: flex;

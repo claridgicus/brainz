@@ -20,7 +20,7 @@
 		position: sticky;
 		top: 0;
 		z-index: 20;
-		background: rgb(15 18 24 / 0.85);
+		background: rgb(239 237 233 / 0.88);
 		backdrop-filter: blur(10px);
 		border-bottom: 1px solid var(--border);
 	}
@@ -28,27 +28,28 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		height: 64px;
+		height: 68px;
 	}
-	.home:hover {
+	.home {
 		text-decoration: none;
 	}
 	nav {
 		display: flex;
 		align-items: center;
-		gap: 22px;
+		gap: 24px;
 	}
 	.navlink {
-		color: var(--text-dim);
+		color: var(--text);
 		font-size: 15px;
 		font-weight: 500;
+		text-decoration: none;
 	}
 	.navlink:hover {
-		color: var(--text);
+		color: var(--accent);
 		text-decoration: none;
 	}
 	nav .btn {
-		padding: 8px 16px;
+		padding: 9px 18px;
 		font-size: 14px;
 	}
 	@media (max-width: 560px) {
