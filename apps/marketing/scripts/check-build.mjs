@@ -50,6 +50,29 @@ for (const page of ["index.html", "docs.html"]) {
 	if (!html.includes(LOGIN)) errors.push(`${page}: missing login URL ${LOGIN}`);
 }
 
+// --- 1b. agent-driven signup is visible ------------------------------------
+// Landing page carries the self-provisioning feature card; docs carry the
+// agent-signup section (anchor target of the landing-page link).
+{
+	const index = htmlFiles.find((f) => f.endsWith("/index.html") || f.endsWith("\\index.html"));
+	const docs = htmlFiles.find((f) => f.endsWith("/docs.html") || f.endsWith("\\docs.html"));
+	if (index) {
+		const html = readFileSync(index, "utf8");
+		if (!html.includes("No signup form required")) {
+			errors.push("index.html: missing the agent self-provisioning feature card");
+		}
+		if (!/tools\/call signup/.test(html)) {
+			errors.push("index.html: missing the signup tool transcript snippet");
+		}
+	}
+	if (docs) {
+		const html = readFileSync(docs, "utf8");
+		if (!html.includes('id="agent-signup"')) {
+			errors.push("docs.html: missing the #agent-signup section");
+		}
+	}
+}
+
 // --- 2. no external assets --------------------------------------------------
 // HTML: any resource-loading tag whose src/href/srcset points off-origin.
 const RESOURCE_TAG =

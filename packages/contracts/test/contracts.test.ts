@@ -8,13 +8,17 @@ import {
   getContextOutputSchema,
   getMcpTool,
   graphResponseSchema,
+  PUBLIC_MCP_TOOLS,
+  PUBLIC_MCP_TOOL_NAMES,
   searchConceptsOutputSchema,
+  signupInputSchema,
+  signupOutputSchema,
   vaultStatsOutputSchema,
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "1"', () => {
-    expect(CONTRACTS_VERSION).toBe("1");
+  it('is "2"', () => {
+    expect(CONTRACTS_VERSION).toBe("2");
   });
 });
 
@@ -53,6 +57,50 @@ describe("MCP_TOOLS registry", () => {
     expect(context).toMatchObject({ depth: 1, tokenBudget: 4000 });
     const link = getMcpTool("link_concepts").inputSchema.parse({ from: "a", to: "b" });
     expect(link.relation).toBe("related_to");
+  });
+});
+
+describe("PUBLIC_MCP_TOOLS registry (unauthenticated /mcp surface)", () => {
+  it("declares exactly one tool: signup", () => {
+    expect(PUBLIC_MCP_TOOL_NAMES).toEqual(["signup"]);
+    expect(PUBLIC_MCP_TOOLS).toHaveLength(1);
+  });
+
+  it("signup is NOT one of the 8 authenticated vault tools", () => {
+    expect(MCP_TOOL_NAMES).not.toContain("signup");
+  });
+
+  it("signup carries a title, an orchestrator-facing description, and zod schemas", () => {
+    const [signup] = PUBLIC_MCP_TOOLS;
+    expect(signup.title.length).toBeGreaterThan(0);
+    expect(signup.description.length).toBeGreaterThan(50);
+    // The description must tell the agent what to do with each credential.
+    expect(signup.description).toMatch(/claimUrl/);
+    expect(signup.description).toMatch(/apiKey/i);
+    expect(signup.inputSchema).toBeInstanceOf(z.ZodObject);
+    expect(signup.outputSchema).toBeInstanceOf(z.ZodType);
+  });
+
+  it("signup input requires a valid email; vaultName is optional", () => {
+    expect(signupInputSchema.safeParse({ email: "human@example.com" }).success).toBe(true);
+    expect(
+      signupInputSchema.safeParse({ email: "human@example.com", vaultName: "Acme brain" }).success,
+    ).toBe(true);
+    expect(signupInputSchema.safeParse({ email: "not-an-email" }).success).toBe(false);
+    expect(signupInputSchema.safeParse({}).success).toBe(false);
+  });
+
+  it("signup output round-trips and is strict", () => {
+    const payload = {
+      apiKey: "bz_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      claimUrl: "https://brain.brownmatter.ai/claim/abc123",
+      vaultSlug: "my-vault",
+      email: "human@example.com",
+    };
+    const parsed = signupOutputSchema.safeParse(payload);
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data).toEqual(payload);
+    expect(signupOutputSchema.safeParse({ ...payload, claimToken: "leak" }).success).toBe(false);
   });
 });
 

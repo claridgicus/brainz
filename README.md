@@ -143,6 +143,13 @@ examples/
 Brainz Cloud's dashboard (sign-up, vaults, graph workspace, API keys) ships at
 https://brain.brownmatter.ai — free hosted vaults over the same engine.
 
+Agents can even provision their own account: connecting to
+`https://brain.brownmatter.ai/mcp` **without** an `Authorization` header exposes a single
+public `signup` tool. One call creates a user, a first vault, and a working API key, and
+returns a single-use claim URL (valid 7 days) that the agent hands to its human, who sets
+a password there to take ownership of the dashboard. The API key works immediately —
+password sign-in stays disabled until the account is claimed.
+
 ## Embeddings
 
 Configured per vault in `brainz.config.json` → `embedding.provider`:

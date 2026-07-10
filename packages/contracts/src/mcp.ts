@@ -290,6 +290,62 @@ export const MCP_TOOLS = [
   },
 ] as const;
 
+// ------------------------------------------------- public (unauthenticated)
+
+export const signupInputSchema = z.object({
+  email: z
+    .string()
+    .email()
+    .describe("Your human's email address — the account is created for them."),
+  vaultName: z
+    .string()
+    .min(1)
+    .max(120)
+    .optional()
+    .describe('Name for the first vault (default "My vault").'),
+});
+
+export const signupOutputSchema = z
+  .object({
+    apiKey: z.string(),
+    claimUrl: z.string(),
+    vaultSlug: z.string(),
+    email: z.string(),
+  })
+  .strict();
+
+/**
+ * PUBLIC_MCP_TOOLS — the toolset an UNAUTHENTICATED /mcp connection sees on
+ * Brainz Cloud: exactly one tool, `signup`. It is deliberately NOT part of
+ * MCP_TOOLS (the local stdio server has no accounts, and the authenticated
+ * remote surface stays the 8 vault tools).
+ */
+export const PUBLIC_MCP_TOOLS = [
+  {
+    name: "signup",
+    title: "Sign up (provision an account for your human)",
+    description:
+      "Provision a Brainz Cloud account for your human: creates the account, a first knowledge vault, " +
+      "and a working API key, plus a single-use claim link. Keep the returned apiKey yourself — send it " +
+      "as `Authorization: Bearer <apiKey>` to this same /mcp endpoint and the 8 vault tools unlock " +
+      "immediately, no human action required. Deliver the claimUrl to your human: opening it lets them " +
+      "set a password and take ownership of the account in the dashboard (the link is single-use and " +
+      "expires in 7 days; the API key keeps working either way). Call this once per email — if the " +
+      "email already has an account, you'll get an error telling your human to sign in instead.",
+    inputSchema: signupInputSchema,
+    outputSchema: signupOutputSchema,
+  },
+] as const;
+
+export type PublicMcpTool = (typeof PUBLIC_MCP_TOOLS)[number];
+export type PublicMcpToolName = PublicMcpTool["name"];
+export type SignupInput = z.infer<typeof signupInputSchema>;
+export type SignupOutput = z.infer<typeof signupOutputSchema>;
+
+export const PUBLIC_MCP_TOOL_NAMES = PUBLIC_MCP_TOOLS.map(
+  (t) => t.name,
+) as readonly PublicMcpToolName[];
+
 export type McpTool = (typeof MCP_TOOLS)[number];
 export type McpToolName = McpTool["name"];
 
@@ -321,3 +377,15 @@ export interface McpToolDef {
 // Compile-time guard: every registry entry satisfies the widened shape.
 const _mcpToolDefs: readonly McpToolDef[] = MCP_TOOLS;
 void _mcpToolDefs;
+
+/** Widened view of a public-registry entry (same shape, public tool names). */
+export interface PublicMcpToolDef {
+  readonly name: PublicMcpToolName;
+  readonly title: string;
+  readonly description: string;
+  readonly inputSchema: z.AnyZodObject;
+  readonly outputSchema: z.ZodTypeAny;
+}
+
+const _publicMcpToolDefs: readonly PublicMcpToolDef[] = PUBLIC_MCP_TOOLS;
+void _publicMcpToolDefs;

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { MCP_URL, SIGNUP_URL, SITE_URL } from "$lib/links";
+	import { APP_URL, MCP_URL, SIGNUP_URL, SITE_URL } from "$lib/links";
 
 	const title = "Docs — Get started with Brainz";
 	const description =
@@ -17,6 +17,20 @@
 
 	const claudeMcpAdd = `claude mcp add --transport http brainz ${MCP_URL} \\
   --header "Authorization: Bearer bz_..."`;
+
+	const agentSignupSnippet = `# 1. connect UNAUTHENTICATED — no Authorization header
+#    initialize → tools/list shows exactly one tool: signup
+
+# 2. call it with your human's email
+→ tools/call signup { "email": "you@company.com", "vaultName": "Acme brain" }
+
+# 3. the result is everything the agent needs
+← {
+    "apiKey":    "bz_…",                                  // keep this — works immediately
+    "claimUrl":  "${APP_URL}/claim/…",  // deliver this to your human
+    "vaultSlug": "acme-brain",
+    "email":     "you@company.com"
+  }`;
 
 	const localInit = `# scaffold a vault (config + concepts/ + a sample note)
 npx brainz init my-vault
@@ -160,6 +174,23 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		That's the whole integration. Your orchestrator can now call <code>vault_stats</code> to orient
 		itself, <code>search_concepts</code> to explore, and <code>get_context</code> to brief
 		subagents.
+	</p>
+
+	<h3 id="agent-signup">Agent-driven signup: no human in the loop</h3>
+	<p>
+		An orchestrator doesn't need a pre-made account. Point it at <code>{MCP_URL}</code>
+		<em>without</em> an <code>Authorization</code> header and it gets a public MCP server exposing a
+		single <code>signup</code> tool (the eight vault tools stay behind authentication):
+	</p>
+	<pre><code>{agentSignupSnippet}</code></pre>
+	<p>
+		The <code>apiKey</code> works immediately — the agent reconnects to the same endpoint with
+		<code>Authorization: Bearer bz_…</code> and can start seeding the vault right away. The
+		<code>claimUrl</code> is for the human: opening it shows the account email and a set-password
+		form, then signs them into the dashboard. Claim links are <strong>single-use</strong> and expire
+		after <strong>7 days</strong>; an unclaimed account keeps working for the agent — only the claim
+		link expires. Password sign-in stays disabled until the account is claimed, and signups are
+		rate-limited to 5 per hour per IP.
 	</p>
 
 	<h2 id="local">Local-first: a vault is just a folder</h2>

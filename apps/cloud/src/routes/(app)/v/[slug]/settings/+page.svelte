@@ -213,6 +213,13 @@
 			</div>
 			<pre>{mcpCli(keyPlaceholder)}</pre>
 		</div>
+
+		<p class="muted note">
+			Agents can also self-provision: connecting to <code>{MCP_URL}</code> with no
+			<code>Authorization</code> header exposes a public <code>signup</code> tool that creates an
+			account, a vault, and a working API key — and returns a claim link for the human to take
+			ownership later.
+		</p>
 	</section>
 
 	<!-- -------------------------------------------------------- danger zone -->

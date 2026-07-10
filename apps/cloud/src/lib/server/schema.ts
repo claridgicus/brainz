@@ -6,7 +6,7 @@
  * The Better Auth tables follow the core schema from the Better Auth docs
  * (user / session / account / verification) for the drizzle sqlite adapter.
  */
-import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 // ------------------------------------------------------------ Better Auth
 
@@ -75,6 +75,43 @@ export const vault = sqliteTable(
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   },
   (t) => [uniqueIndex("vault_owner_slug_unique").on(t.ownerId, t.slug)],
+);
+
+// ------------------------------------------------------------ account claims
+
+/**
+ * Single-use claim tokens for agent-provisioned accounts (public MCP `signup`
+ * tool). Only the SHA-256 hex hash of the token is stored; the plaintext
+ * appears exactly once, inside the signup tool result's claimUrl. A claim is
+ * redeemable while unexpired (created_at + 7 days) and unclaimed; redeeming it
+ * sets the user's password (credential account row) and claimed_at.
+ */
+export const accountClaim = sqliteTable("account_claims", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  tokenHash: text("token_hash").notNull().unique(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
+});
+
+// ------------------------------------------------------------ signup events
+
+/**
+ * One row per successful public-MCP signup, keyed by client IP — the basis of
+ * the per-IP rate limit (5 signups/hour). The (ip, created_at) index keeps the
+ * window count query index-friendly.
+ */
+export const signupEvent = sqliteTable(
+  "signup_events",
+  {
+    id: text("id").primaryKey(),
+    ip: text("ip").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => [index("signup_events_ip_created_at").on(t.ip, t.createdAt)],
 );
 
 // ---------------------------------------------------------------- api keys

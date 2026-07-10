@@ -1,6 +1,6 @@
 <script lang="ts">
 	import GraphMotif from "$lib/components/GraphMotif.svelte";
-	import { MCP_URL, SIGNUP_URL, SITE_URL } from "$lib/links";
+	import { APP_URL, MCP_URL, SIGNUP_URL, SITE_URL } from "$lib/links";
 
 	const title = "Brainz — Give your agent fleet a shared brain";
 	const description =
@@ -27,6 +27,10 @@ relations:
 
 Scores leads 0-100. Recomputed on every
 [[contact-model]] change; see [[scoring-decision]].`;
+
+	const signupSnippet = `# connect to ${MCP_URL} with NO auth header → one public tool
+→ tools/call signup { "email": "you@company.com" }
+← { "apiKey": "bz_…", "claimUrl": "${APP_URL}/claim/…", "vaultSlug": "my-vault" }`;
 </script>
 
 <svelte:head>
@@ -122,6 +126,18 @@ Scores leads 0-100. Recomputed on every
 					in git, forever portable.
 				</p>
 			</div>
+
+			<div class="card feature wide">
+				<h3>No signup form required — your agent does it</h3>
+				<p>
+					An orchestrator can provision its own brain: hit <code>{MCP_URL}</code> with no
+					credentials and the endpoint exposes a single public <code>signup</code> tool. One call
+					creates the account, a first vault, and an API key that works immediately — and returns a
+					claim link the agent hands to its human, who sets a password and takes ownership of the
+					dashboard whenever they're ready.
+				</p>
+				<pre><code>{signupSnippet}</code></pre>
+			</div>
 		</div>
 	</div>
 </section>
@@ -138,7 +154,8 @@ Scores leads 0-100. Recomputed on every
 				<p>
 					Write features, decisions, and constraints as markdown notes — or let agents capture
 					knowledge as they work with <code>upsert_concept</code>. Wiki-links and typed relations
-					grow the graph as you go.
+					grow the graph as you go. No account yet? Your agent can
+					<a href="/docs#agent-signup">sign itself up</a> and seed the vault.
 				</p>
 			</div>
 			<div class="step">
@@ -245,6 +262,9 @@ Scores leads 0-100. Recomputed on every
 		margin-top: 18px;
 		margin-bottom: 0;
 		font-size: 12.5px;
+	}
+	.feature.wide {
+		grid-column: 1 / -1;
 	}
 
 	/* ---------- how it works ---------- */

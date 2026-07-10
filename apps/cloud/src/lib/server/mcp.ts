@@ -21,18 +21,18 @@ export const SERVER_NAME = "brainz-cloud";
 export const SERVER_VERSION = "0.1.0";
 
 type TextContent = { type: "text"; text: string };
-type ToolResult = { content: TextContent[]; isError?: boolean };
+export type ToolResult = { content: TextContent[]; isError?: boolean };
 
-function ok(data: unknown): ToolResult {
+export function ok(data: unknown): ToolResult {
   return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
 }
 
-function fail(message: string): ToolResult {
+export function fail(message: string): ToolResult {
   return { isError: true, content: [{ type: "text", text: `Error: ${message}` }] };
 }
 
 /** Never throw across the MCP boundary — errors become isError results. */
-async function guarded(fn: () => ToolResult | Promise<ToolResult>): Promise<ToolResult> {
+export async function guarded(fn: () => ToolResult | Promise<ToolResult>): Promise<ToolResult> {
   try {
     return await fn();
   } catch (err) {
