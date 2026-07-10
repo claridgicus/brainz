@@ -100,6 +100,54 @@ Concept writes parse the submitted markdown body with engine's `parseNote` (wiki
 - Implementation options (agent's call, in preference order): (a) Cloudflare `agents` SDK `McpAgent` — MCP server AS a Durable Object, the platform-native pattern; run it per-vault, or (b) stateless `@modelcontextprotocol/sdk` StreamableHTTP via a fetch-adapter (e.g. `@hono/mcp`) in the route handler that calls into VaultDO. Either way the agent verifies against a real MCP client call over HTTP in wrangler dev. If McpAgent fights SvelteKit route integration, (b) is fine — don't sink hours.
 - Client wiring docs: `claude mcp add --transport http brainz https://<host>/mcp --header "Authorization: Bearer bz_..."` (and raw .mcp.json equivalent).
 
+### Agent-driven signup over MCP (public toolset)
+
+An orchestrator agent must be able to provision an account for its human straight from the MCP endpoint:
+
+- **Unauthenticated `/mcp` connections** no longer 401: they get a PUBLIC MCP server exposing exactly one tool, `signup` `{email, vaultName?}`. (Invalid/revoked bearer still 401s — only *absent* auth gets the public server.)
+- `signup` creates: a Better Auth user (email, NO password — credential set later by the human), a first vault (name default "My vault"), an API key, and a single-use **claim token** (`account_claims` table: id, user_id, token_hash SHA-256, created_at, expires_at +7d, claimed_at). Returns `{ apiKey: "bz_…", claimUrl: "https://brain.brownmatter.ai/claim/<token>", vaultSlug, email }` — with tool-description text telling the agent to deliver the claim URL to its human and keep the key for MCP access.
+- Duplicate email → isError with a "this email already has an account — sign in at /login" message (no info leak beyond existence; acceptable for v1).
+- **Rate limiting**: per-IP (CF-Connecting-IP) counter, max 5 signups/hour — D1 or a small DO counter; 429-style isError beyond it. Email format validated.
+- `/claim/[token]` page (UI): validates token (unexpired, unclaimed), shows the account email, lets the human set a password (Better Auth credential creation using the existing PBKDF2 hasher), signs them in, marks claim used, redirects to /dashboard. Expired/used → clear error page with a "sign up again" path.
+- Claimless accounts persist (their API key keeps working); only the claim token expires.
+- Contract: the `signup` tool schema lives in `@brainz/contracts` as `PUBLIC_MCP_TOOLS` (same shape as MCP_TOOLS; NOT added to the 8 vault tools — the local stdio server has no accounts). Docs (`apps/marketing` /docs + app MCP snippets) mention the flow.
+
+### Onboarding (`onboard` tool + CLI command)
+
+A vault must be onboarded before it's genuinely useful: onboarding = an orchestrator agent indexing an existing product's codebase into the vault. Brainz doesn't run agents itself — the `onboard` tool hands the CALLING agent a structured playbook and tracks completion.
+
+- **The product ontology** (types grow to 10: add `domain`, `workflow`, `story`, `spec` — engine + contracts + core + DO + both UIs' palettes + docs):
+  - `domain` — high-level product area ("Authentication", "Search"). The top of the graph; everything else hangs off domains.
+  - `feature` — a concrete capability, `part_of` a domain.
+  - `story` — a user story; the MAPPING facet between domains and features: story is `part_of` its domain and `realized_by` one or more features ("As a user I stay signed in across visits" → part_of Authentication, realized_by Session Refresh).
+  - `spec` — technical specification: the RULES under which a function must be performed; a spec `governs` the features/stories/domains it constrains (e.g. "Session tokens rotate every 15 min" governs Session Refresh).
+  - `workflow` — a multi-step user/system journey across features (`part_of` domain, `depends_on`/references features in order).
+  - `concept` (generic), `decision`, `constraint`, `pattern`, `glossary` — as before.
+  - Canonical relations grow: `realized_by`, `governs` join `depends_on`, `part_of`, `constrains`, `supersedes`, `related_to` (relations stay free-form strings; these are the documented conventions the playbook teaches).
+- **Code areas**: optional frontmatter `code_areas: ["packages/core/src/vault.ts", "apps/cloud/src/routes/api/**"]` — rough paths/globs telling a coding agent where in the codebase this knowledge lives. Additive `codeAreas?: string[]` on ConceptMeta (engine + contracts schemas + upsert inputs incl. MCP/REST/CLI). `get_context` bundles append a `Code areas:` line to each section that has them — that's the payoff: a subagent briefed by get_context knows both the rules AND where to apply them. UIs show them as monospace chips in the concept panel.
+- **Vault state**: `onboarded_at` (nullable) on the vault (D1 control-plane column) and mirrored in VaultDO meta; exposed in `vault_stats` / stats endpoints as `onboarded: boolean`.
+- **MCP tool `onboard`** (authenticated surface, 9th tool; also in MCP_TOOLS for the local stdio server with core storing onboarded state in vault config):
+  - `{action: "start", productName?, repoHint?}` → returns the PLAYBOOK (markdown): instructions to fan out subagents over the codebase (exclude node_modules/dist/.git/lockfiles/binaries), inventory every app file, and distill NOT file-by-file notes but product knowledge structured by the ontology: identify the domains first, then per domain the features (`part_of`), stories mapping to the features that realize them (`realized_by`), specs stating the rules that `govern` them, workflows, decisions, constraints, glossary — every concept carrying `code_areas` pointing at the rough parts of the codebase it lives in; each as `upsert_concept` calls with wiki-links/relations; target 20–60 concepts for a mid-size product; finish by calling `{action:"complete", summary}`.
+  - `{action: "complete", summary}` → sets onboarded, stores summary as a `spec`-type concept `product-onboarding-summary`.
+  - `{action: "status"}` → {onboarded, conceptCount, byType}.
+- **Nudge, not a wall**: while un-onboarded, `get_context` and `search_concepts` responses are prefixed with a one-line notice ("vault not onboarded — call onboard to index your product first"). No hard blocking.
+- **CLI**: `brainz onboard [--status|--complete]` — same playbook/semantics for local vaults (state in brainz.config.json).
+- Docs: dashboard MCP snippets mention onboarding as step 1; marketing /docs gets a subsection.
+
+### Tasks & drift sync (the work loop)
+
+Brownmatter is not just a map of the product — it's the pile of work on it, and it must stay true to the artifact (the codebase). Two capabilities:
+
+**Tasks — "take a task off the pile":**
+- New type `task` (11th): a unit of work not yet reflected in the artifact. Frontmatter: `task_status: open | taken | done` (distinct from concept `status`), optional `taken_by` (free-form agent/orchestrator label) + `taken_at`. Relations: a task `realizes` stories/features, is `governed_by` specs (inverse convention of `governs`), `part_of` a domain; `code_areas` say where the work lands.
+- MCP tools (authenticated surface): `list_tasks {task_status?, domain?}`; `take_task {id?}` — claims a specific task or THE NEXT open one (deterministic: oldest first), sets taken/taken_by/taken_at atomically (DO = trivially atomic; core = config-file lock is fine), and returns the task PLUS an auto-assembled context bundle for its domain/relations (get_context-grade, code areas included) — the orchestrator can fan out immediately with everything it needs; `complete_task {id, outcome}` — marks done, appends the outcome to the task body, and REMINDS the caller (in the tool result) to index what changed via upsert_concept so the graph matches the artifact.
+- The contract with the orchestrator (spelled out in take_task's description + playbook): after implementing, verify the artifact matches every spec that governs the task; discrepancies → fix or record a new task; then index the new/changed knowledge.
+
+**Drift sync — keep brownmatter true to the artifact:**
+- `sync` MCP tool (+ `brainz sync` CLI): `{action: "start"}` → returns a SYNC PLAYBOOK: the vault's `last_synced_at` (+ onboarded state), all concepts' code_areas as a coverage map, and instructions: diff the codebase since last sync (git log/status since timestamp), fan out subagents over changed areas, update stale concepts, index un-mapped new work (features/stories/specs/tasks for incomplete work found), report coverage gaps (code areas no concept references). `{action: "complete", summary}` → sets `last_synced_at`, stores summary in the `product-onboarding-summary` concept (append log).
+- Staleness nudge: `get_context` prefixes a one-liner when last_synced_at is older than 14 days ("knowledge may be stale — run sync"), same style as the onboarding nudge.
+- Stats expose `openTasks`, `lastSyncedAt` (UI: task count chip on dashboard cards; tasks filterable in the workspace, `task` gets its own palette color + open/taken/done badge).
+
 ### Branding
 
 Logo mark: the 💩 (pile of poo) emoji — the Brownmatter brand joke, played straight against a polished dark UI. Wordmark: "💩 Brainz". Favicon: 💩 as an inline-SVG data-URI. Marketing site lives at brownmatter.ai; the app at brain.brownmatter.ai.
