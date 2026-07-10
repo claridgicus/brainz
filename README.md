@@ -129,6 +129,7 @@ Global flags: `--vault <dir>` (default cwd), `--json` for machine-readable outpu
 ```
 packages/
   engine/      # @brainz/engine     — pure platform-agnostic logic: parse, search fusion, graph traversal, context assembly (Workers-compatible)
+  contracts/   # @brainz/contracts  — zod source of truth for every wire shape: MCP tool registry, cloud REST API, CLI --json (Workers-compatible)
   core/        # @brainz/core       — vault engine: SQLite/FTS5 index, hybrid search, graph, context assembly (built on engine)
   mcp-server/  # @brainz/mcp-server — MCP stdio server over core (binary: brainz-mcp)
   cli/         # @brainz/cli        — the `brainz` command

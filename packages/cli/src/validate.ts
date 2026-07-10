@@ -1,21 +1,14 @@
+import type { CliValidateJson, CliValidationIssue } from "@brainz/contracts";
 import { slugify, Vault } from "@brainz/core";
 import matter from "gray-matter";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-export interface ValidationIssue {
-  message: string;
-  /** File path relative to the vault dir, when the issue maps to one file. */
-  file?: string;
-}
+/** One validation issue; `file` is relative to the vault dir when the issue maps to one file. */
+export type ValidationIssue = CliValidationIssue;
 
-export interface ValidationResult {
-  ok: boolean;
-  errors: ValidationIssue[];
-  warnings: ValidationIssue[];
-  concepts: number;
-  edges: number;
-}
+/** The `brainz validate --json` report — shape owned by @brainz/contracts. */
+export type ValidationResult = CliValidateJson;
 
 /** Recursively list .md files, mirroring core's scan (skips dot-dirs & node_modules). */
 function scanMarkdownFiles(dir: string): string[] {

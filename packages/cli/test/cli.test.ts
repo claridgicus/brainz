@@ -5,6 +5,13 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  cliContextJsonSchema,
+  cliRelatedJsonSchema,
+  cliSearchJsonSchema,
+  cliValidateJsonSchema,
+} from "@brainz/contracts";
+import type { z } from "zod";
 import { runCli } from "../src/program.js";
 import { resolvePackageDir } from "../src/spawn.js";
 
@@ -51,6 +58,17 @@ async function run(args: string[], stdin = ""): Promise<RunResult> {
     readStdin: async () => stdin,
   });
   return { code, out, err };
+}
+
+/** Assert a --json payload parses with its @brainz/contracts schema (the anti-drift guarantee). */
+function expectContract(schema: z.ZodTypeAny, value: unknown): void {
+  const parsed = schema.safeParse(value);
+  expect(
+    parsed.success,
+    `--json output does not match contract schema: ${
+      parsed.success ? "" : JSON.stringify(parsed.error.issues)
+    }`,
+  ).toBe(true);
 }
 
 describe("brainz init", () => {
@@ -146,6 +164,7 @@ describe("brainz search", () => {
     const res = await run(["search", "auth", "--vault", dir, "--json"]);
     expect(res.code).toBe(0);
     const hits = JSON.parse(res.out);
+    expectContract(cliSearchJsonSchema, hits);
     expect(Array.isArray(hits)).toBe(true);
     expect(hits.length).toBeGreaterThan(0);
     const ids = hits.map((h: { concept: { id: string } }) => h.concept.id);
@@ -171,6 +190,7 @@ describe("brainz related", () => {
     const res = await run(["related", "auth-system", "--vault", dir, "--json"]);
     expect(res.code).toBe(0);
     const nodes = JSON.parse(res.out);
+    expectContract(cliRelatedJsonSchema, nodes);
     const ids = nodes.map((n: { concept: { id: string } }) => n.concept.id);
     expect(ids).toContain("use-jwt-sessions");
     for (const node of nodes) expect(node.distance).toBe(1);
@@ -244,6 +264,7 @@ describe("brainz context", () => {
     const res = await run(["context", "--ids", "lead,mrr", "--vault", dir, "--json"]);
     expect(res.code).toBe(0);
     const bundle = JSON.parse(res.out);
+    expectContract(cliContextJsonSchema, bundle);
     const ids = bundle.included.map((m: { id: string }) => m.id);
     expect(ids).toContain("lead");
     expect(ids).toContain("mrr");
@@ -277,6 +298,7 @@ describe("brainz validate", () => {
     const res = await run(["validate", "--vault", dir, "--json"]);
     expect(res.code).toBe(0);
     const result = JSON.parse(res.out);
+    expectContract(cliValidateJsonSchema, result);
     expect(result.ok).toBe(true);
     expect(result.errors).toEqual([]);
     expect(result.warnings).toHaveLength(2);

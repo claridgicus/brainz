@@ -28,6 +28,7 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
+    "@brainz/contracts": "*",
     "@brainz/core": "*",
     "@brainz/mcp-server": "*",
     "@brainz/web": "*",
@@ -38,6 +39,7 @@
   "devDependencies": {
     "@types/node": "^20.17.0",
     "typescript": "~5.5.4",
+    "zod": "^3.25.76",
     "vitest": "^2.1.9"
   }
 }

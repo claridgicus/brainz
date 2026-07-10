@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { MCP_TOOLS, getContextOutputSchema, getMcpTool, type McpToolName } from "@brainz/contracts";
 import { Vault } from "@brainz/core";
 import { createServer, resolveVaultDir } from "../src/server.js";
 
@@ -27,10 +28,22 @@ async function callTool(name: string, args: Record<string, unknown> = {}): Promi
   return (await client.callTool({ name, arguments: args })) as unknown as ToolResult;
 }
 
-async function callJson(name: string, args: Record<string, unknown> = {}): Promise<any> {
+/**
+ * Call a tool and parse its single JSON text block, validating it against the
+ * tool's contract outputSchema — the sync guarantee between server and contracts.
+ */
+async function callJson(name: McpToolName, args: Record<string, unknown> = {}): Promise<any> {
   const result = await callTool(name, args);
   expect(result.isError ?? false).toBe(false);
-  return JSON.parse(result.content[0].text);
+  const data = JSON.parse(result.content[0].text);
+  const parsed = getMcpTool(name).outputSchema.safeParse(data);
+  expect(
+    parsed.success,
+    `${name} output does not match contract outputSchema: ${
+      parsed.success ? "" : JSON.stringify(parsed.error.issues)
+    }`,
+  ).toBe(true);
+  return data;
 }
 
 beforeAll(async () => {
@@ -68,6 +81,18 @@ describe("tool registration", () => {
     ]);
     for (const tool of tools) {
       expect(tool.description ?? "").not.toBe("");
+    }
+  });
+
+  it("registrations come verbatim from the @brainz/contracts registry", async () => {
+    const { tools } = await client.listTools();
+    const byName = new Map(tools.map((t) => [t.name, t]));
+    expect(tools).toHaveLength(MCP_TOOLS.length);
+    for (const contract of MCP_TOOLS) {
+      const tool = byName.get(contract.name);
+      expect(tool, contract.name).toBeDefined();
+      expect(tool!.title).toBe(contract.title);
+      expect(tool!.description).toBe(contract.description);
     }
   });
 });
@@ -157,15 +182,16 @@ describe("get_related", () => {
 describe("get_context", () => {
   function parseBundle(result: ToolResult) {
     expect(result.isError ?? false).toBe(false);
+    // Two-block convention: markdown briefing, then the JSON footer.
     expect(result.content.length).toBe(2);
-    return {
-      markdown: result.content[0].text,
-      footer: JSON.parse(result.content[1].text) as {
-        included: string[];
-        truncated: boolean;
-        approxTokens: number;
-      },
-    };
+    const parsed = getContextOutputSchema.safeParse(JSON.parse(result.content[1].text));
+    expect(
+      parsed.success,
+      `get_context footer does not match contract outputSchema: ${
+        parsed.success ? "" : JSON.stringify(parsed.error.issues)
+      }`,
+    ).toBe(true);
+    return { markdown: result.content[0].text, footer: parsed.data! };
   }
 
   it("assembles a bundle from a query", async () => {

@@ -27,9 +27,9 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
+    "@brainz/contracts": "*",
     "@brainz/core": "*",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "zod": "^3.25.76"
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
     "@types/node": "^20.17.0",

@@ -1,3 +1,11 @@
+import type {
+  CliContextJson,
+  CliReindexJson,
+  CliRelatedJson,
+  CliSearchJson,
+  CliShowJson,
+  CliShowNeighbor,
+} from "@brainz/contracts";
 import type { Concept, ConceptType } from "@brainz/core";
 import { slugify, Vault } from "@brainz/core";
 import { Command, CommanderError, InvalidArgumentError, Option } from "commander";
@@ -97,12 +105,8 @@ function printJson(ctx: Ctx, value: unknown): void {
   ctx.out(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-interface NeighborInfo {
-  direction: "out" | "in";
-  relation: string;
-  id: string;
-  title: string | null; // null → pending concept (no note with that id)
-}
+/** Neighbor row for `show` — the contract's shape; `title: null` → pending concept. */
+type NeighborInfo = CliShowNeighbor;
 
 function neighborsOf(vault: Vault, id: string): NeighborInfo[] {
   const neighbors: NeighborInfo[] = [];
@@ -275,7 +279,7 @@ export function buildProgram(ctx: Ctx): Command {
             limit: opts.limit,
           });
           if (g.json) {
-            printJson(ctx, hits);
+            printJson(ctx, hits satisfies CliSearchJson);
             return;
           }
           if ((opts.mode ?? "hybrid") !== "keyword" && vault.embeddingStatus === "unavailable") {
@@ -311,7 +315,7 @@ export function buildProgram(ctx: Ctx): Command {
       if (!concept) throw new CliError(`unknown concept: ${id}`);
       const neighbors = neighborsOf(vault, id);
       if (g.json) {
-        printJson(ctx, { ...concept, neighbors });
+        printJson(ctx, { ...concept, neighbors } satisfies CliShowJson);
         return;
       }
       ctx.out(`${pc.bold(concept.title)}  ${pc.dim(`(${concept.id})`)}\n`);
@@ -346,7 +350,7 @@ export function buildProgram(ctx: Ctx): Command {
         if (!vault.getConcept(id)) throw new CliError(`unknown concept: ${id}`);
         const nodes = vault.related(id, { depth: opts.depth });
         if (g.json) {
-          printJson(ctx, nodes);
+          printJson(ctx, nodes satisfies CliRelatedJson);
           return;
         }
         if (nodes.length === 0) {
@@ -418,7 +422,7 @@ export function buildProgram(ctx: Ctx): Command {
             depth: opts.depth,
           });
           if (g.json) {
-            printJson(ctx, bundle);
+            printJson(ctx, bundle satisfies CliContextJson);
             return;
           }
           if (bundle.markdown.length > 0) {
@@ -443,7 +447,7 @@ export function buildProgram(ctx: Ctx): Command {
       await vault.reindex();
       const stats = vault.stats();
       if (g.json) {
-        printJson(ctx, { ...stats, embeddingStatus: vault.embeddingStatus });
+        printJson(ctx, { ...stats, embeddingStatus: vault.embeddingStatus } satisfies CliReindexJson);
         return;
       }
       ctx.out(`${pc.green("✓")} reindexed ${stats.concepts} concepts · ${stats.edges} edges\n`);

@@ -1,0 +1,35 @@
+{
+  "name": "@brainz/contracts",
+  "version": "0.1.0",
+  "description": "Brainz contracts: zod source of truth for every wire shape — MCP tool registry, cloud REST API, and CLI --json output.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsc -b && vitest run",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@brainz/engine": "*",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "typescript": "~5.5.4",
+    "vitest": "^2.1.9"
+  }
+}

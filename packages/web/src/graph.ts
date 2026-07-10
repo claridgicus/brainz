@@ -1,21 +1,10 @@
-import type { ConceptMeta, ConceptType, Edge } from "@brainz/core";
+import type { GraphNode, GraphPayload } from "@brainz/contracts";
+import type { ConceptMeta, Edge } from "@brainz/core";
 
 /** Node in the /api/graph payload. Pending nodes are edge targets with no
- * concept file yet — they get `type: "pending"` and `pending: true`. */
-export interface GraphNode {
-  id: string;
-  title: string;
-  type: ConceptType | "pending";
-  product?: string;
-  tags: string[];
-  degree: number;
-  pending?: true;
-}
-
-export interface GraphPayload {
-  nodes: GraphNode[];
-  edges: Edge[];
-}
+ * concept file yet — they get `type: "pending"` and `pending: true`.
+ * The shape is owned by @brainz/contracts (`graphNodeSchema`/`graphResponseSchema`). */
+export type { GraphNode, GraphPayload };
 
 /** Build the graph payload: one node per concept plus one "pending" node for
  * every edge endpoint that doesn't resolve to a concept. Degree counts every

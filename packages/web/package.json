@@ -20,6 +20,7 @@
     "typecheck": "tsc -b && tsc -p tsconfig.frontend.json"
   },
   "dependencies": {
+    "@brainz/contracts": "*",
     "@brainz/core": "*",
     "marked": "^13.0.3"
   },

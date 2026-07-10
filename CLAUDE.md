@@ -7,6 +7,7 @@
 npm workspaces monorepo (Node >= 20, TypeScript ~5.5, ESM throughout):
 
 - `packages/engine` — `@brainz/engine`, pure platform-agnostic logic (parse, slugify, RRF/cosine, BFS, context assembly, graph validation) — no fs/sqlite/node-only APIs, must stay Cloudflare Workers-compatible
+- `packages/contracts` — `@brainz/contracts`, zod source of truth for every wire shape (MCP tool registry `MCP_TOOLS`, cloud REST API, CLI `--json`); mcp-server/cli consume it — Workers-compatible like engine
 - `packages/core` — `@brainz/core`, vault engine over engine (SQLite/FTS5 index, file watching, embeddings); re-exports engine's public types + `slugify`
 - `packages/mcp-server` — `@brainz/mcp-server`, MCP stdio server over core (binary `brainz-mcp`)
 - `packages/cli` — `@brainz/cli`, the `brainz` command (binary `dist/bin.js`)
