@@ -25,8 +25,8 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "3"', () => {
-    expect(CONTRACTS_VERSION).toBe("3");
+  it('is "4"', () => {
+    expect(CONTRACTS_VERSION).toBe("4");
   });
 });
 
@@ -84,7 +84,7 @@ describe("PUBLIC_MCP_TOOLS registry (unauthenticated /mcp surface)", () => {
     expect(signup.title.length).toBeGreaterThan(0);
     expect(signup.description.length).toBeGreaterThan(50);
     // The description must tell the agent what to do with each credential.
-    expect(signup.description).toMatch(/claimUrl/);
+    expect(signup.description).toMatch(/loginUrl/);
     expect(signup.description).toMatch(/apiKey/i);
     expect(signup.inputSchema).toBeInstanceOf(z.ZodObject);
     expect(signup.outputSchema).toBeInstanceOf(z.ZodType);
@@ -102,7 +102,7 @@ describe("PUBLIC_MCP_TOOLS registry (unauthenticated /mcp surface)", () => {
   it("signup output round-trips and is strict", () => {
     const payload = {
       apiKey: "bz_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      claimUrl: "https://brainz.brownmatter.ai/claim/abc123",
+      loginUrl: "https://brainz.brownmatter.ai/api/auth/magic-link/verify?token=abc123",
       vaultSlug: "my-vault",
       email: "human@example.com",
     };

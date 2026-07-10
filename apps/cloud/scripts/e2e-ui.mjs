@@ -13,7 +13,7 @@
  * Run: node scripts/e2e-ui.mjs   (set E2E_UI_SKIP_BUILD=1 to reuse a build)
  */
 import { spawn, spawnSync } from "node:child_process";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -147,14 +147,62 @@ async function main() {
     );
 
     const login = await page("/login");
-    step("anon /login → 200", login.status === 200 && login.html.includes("Sign in"));
+    step(
+      "anon /login → 200, passwordless single email form (no password field)",
+      login.status === 200 &&
+        login.html.includes("Sign in") &&
+        login.html.includes('type="email"') &&
+        !login.html.includes('type="password"'),
+    );
 
-    // 2. signup via the auth API → session cookie
+    // 2. passwordless magic-link sign-in → session cookie. In wrangler dev the
+    // send_email binding is stubbed by miniflare, so the app uses
+    // MailChannelsMailer, which logs the message + writes the rendered text to a
+    // temp file ("Text: <path>"); read that file for the verify URL. (If a build
+    // ever runs DevMailer instead, its stderr "[DevMailer] …: <url>" line works
+    // too.)
     const email = `e2e-ui-${Date.now()}@example.com`;
-    const signup = await api("POST", "/api/auth/sign-up/email", {
-      body: { name: "UI E2E", email, password: "correct-horse-battery" },
+    const marker = devLog.length;
+    const linkRes = await fetch(`${BASE}/api/auth/sign-in/magic-link`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE },
+      body: JSON.stringify({ email, callbackURL: "/dashboard" }),
     });
-    step("signup returns 200 + cookie", signup.status === 200 && jar.size > 0, `status ${signup.status}`);
+    step("magic-link request returns 200", linkRes.status === 200, `status ${linkRes.status}`);
+    const escEmail = email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const devRe = new RegExp(`\\[DevMailer\\] magic link for ${escEmail}: (\\S+)`);
+    const magicRe = /\/api\/auth\/magic-link\/verify\?[^\s"'<>)]+/;
+    let magicUrl = null;
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline && !magicUrl) {
+      const slice = devLog.slice(marker);
+      const dev = slice.match(devRe);
+      if (dev) {
+        magicUrl = dev[1];
+        break;
+      }
+      const block = slice.split("send_email binding called").find((b) => b.includes(`To: ${email}`));
+      const fileMatch = block?.match(/Text:\s*(\S+\.txt)/);
+      if (fileMatch) {
+        try {
+          const contents = readFileSync(fileMatch[1], "utf8");
+          const um = contents.match(magicRe);
+          if (um) magicUrl = `${BASE}${um[0]}`;
+        } catch {
+          /* file not flushed yet */
+        }
+      }
+      if (!magicUrl) await new Promise((r) => setTimeout(r, 100));
+    }
+    step("captured the sign-in link from the mailer", Boolean(magicUrl), (magicUrl ?? "").slice(0, 50));
+    const mu = new URL(magicUrl);
+    const verified = await fetch(`${BASE}${mu.pathname}${mu.search}`, {
+      method: "GET",
+      redirect: "manual",
+      headers: { origin: BASE },
+    });
+    storeCookies(verified);
+    step("following the link signs in (session cookie)", jar.size > 0, `status ${verified.status}`);
 
     // 3. signed-in redirects + empty dashboard
     const home = await page("/");

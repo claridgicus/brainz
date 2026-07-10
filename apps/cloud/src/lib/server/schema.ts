@@ -48,14 +48,14 @@ export const account = sqliteTable(
     refreshTokenExpiresAt: integer("refresh_token_expires_at", { mode: "timestamp_ms" }),
     scope: text("scope"),
     idToken: text("id_token"),
+    // Kept for the Better Auth account schema; unused now that auth is
+    // passwordless (magic-link only). No credential rows are written.
     password: text("password"),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
   },
-  // One account row per (user, provider) — a user has at most one credential
-  // account. Defence in depth for the /claim redemption race: even if two
-  // concurrent submissions both slipped past the app-level checks, the DB
-  // rejects the second credential row.
+  // One account row per (user, provider) — a user has at most one OAuth account
+  // per provider. (Left in place from the credential era; harmless now.)
   (t) => [uniqueIndex("account_user_id_provider_id_unique").on(t.userId, t.providerId)],
 );
 
@@ -87,25 +87,28 @@ export const vault = sqliteTable(
   (t) => [uniqueIndex("vault_owner_slug_unique").on(t.ownerId, t.slug)],
 );
 
-// ------------------------------------------------------------ account claims
+// -------------------------------------------------------- magic-link events
 
 /**
- * Single-use claim tokens for agent-provisioned accounts (public MCP `signup`
- * tool). Only the SHA-256 hex hash of the token is stored; the plaintext
- * appears exactly once, inside the signup tool result's claimUrl. A claim is
- * redeemable while unexpired (created_at + 7 days) and unclaimed; redeeming it
- * sets the user's password (credential account row) and claimed_at.
+ * One row per magic-link REQUEST, keyed by email and client IP — the basis of
+ * the durable, D1-backed magic-link rate limit (5/hour/email, 20/hour/IP).
+ * Better Auth's own limiter is in-memory and resets per Worker instance, so it
+ * can't stop mail-bombing across the fleet; this table can. Indexes on
+ * (email, created_at) and (ip, created_at) keep the window counts fast.
  */
-export const accountClaim = sqliteTable("account_claims", {
-  id: text("id").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-  tokenHash: text("token_hash").notNull().unique(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
-  claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
-});
+export const magicLinkEvent = sqliteTable(
+  "magic_link_events",
+  {
+    id: text("id").primaryKey(),
+    email: text("email").notNull(),
+    ip: text("ip").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => [
+    index("magic_link_events_email_created_at").on(t.email, t.createdAt),
+    index("magic_link_events_ip_created_at").on(t.ip, t.createdAt),
+  ],
+);
 
 // ------------------------------------------------------------ signup events
 

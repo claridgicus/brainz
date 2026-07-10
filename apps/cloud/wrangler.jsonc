@@ -37,5 +37,11 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VaultDO"] }],
   // Workers AI: embeddings via @cf/baai/bge-base-en-v1.5 (768-dim).
   "ai": { "binding": "AI" },
+  // Outbound email (magic-link sign-in) via Cloudflare's Email Service.
+  // Deploy-day: onboard brownmatter.ai for Email Sending in the Cloudflare
+  // dashboard (auto-adds MX/SPF/DKIM/DMARC) so no-reply@brownmatter.ai can
+  // send. Absent locally → the mailer falls back to DevMailer (logs the link).
+  // See README-CLOUD "Deploy runbook → email".
+  "send_email": [{ "name": "SEND_EMAIL" }],
   "observability": { "enabled": true }
 }

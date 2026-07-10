@@ -5,14 +5,15 @@
  *
  * `signup` provisions a complete account for an orchestrator's human:
  * a Better Auth-compatible user row (emailVerified false, NO credential
- * account row — email+password sign-in fails cleanly until the account is
- * claimed), a first vault, a working API key, and a single-use claim token.
- * Only the SHA-256 hashes of the key and token are stored; the plaintexts
+ * account row — auth is passwordless / magic-link only), a first vault, and a
+ * working API key. It then mints a one-time MAGIC SIGN-IN LINK for the human
+ * (`loginUrl`) — opening it signs them straight into the dashboard. Only the
+ * SHA-256 hash of the key is stored; the plaintext key and the magic link
  * appear exactly once, in the tool result, and are never logged.
  *
- * Persistence goes through the small `SignupDeps` port so the signup flow is
- * unit-testable without a Workers runtime; the route wires it to drizzle/D1
- * via `signupDepsFromDb`.
+ * Persistence + link minting go through the small `SignupDeps` port so the
+ * flow is unit-testable without a Workers runtime; the route wires it to
+ * drizzle/D1 (`signupDepsFromDb`) and to Better Auth's magic-link minting.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
@@ -25,13 +26,7 @@ import {
 import { slugify } from "@brainz/engine";
 import { count, eq, gt, and } from "drizzle-orm";
 import { generateApiKey, hashApiKey, keyPrefixOf } from "./api-keys";
-import {
-  claimExpiry,
-  exceedsSignupRateLimit,
-  generateClaimToken,
-  hashClaimToken,
-  rateWindowStart,
-} from "./claims";
+import { exceedsSignupRateLimit, rateWindowStart } from "./rate-limit";
 import type { Db } from "./db";
 import { schema } from "./db";
 import { fail, guarded, ok, SERVER_NAME, SERVER_VERSION, type ToolResult } from "./mcp";
@@ -42,28 +37,31 @@ export interface ProvisionedSignup {
   user: typeof schema.user.$inferSelect;
   vault: typeof schema.vault.$inferSelect;
   apiKey: typeof schema.apiKey.$inferSelect;
-  claim: typeof schema.accountClaim.$inferSelect;
   event: typeof schema.signupEvent.$inferSelect;
 }
 
 /** Persistence + environment port for the signup flow (drizzle in prod, fakes in tests). */
 export interface SignupDeps {
   now(): Date;
-  /** Origin for the claim URL, e.g. "https://brainz.brownmatter.ai". */
-  origin: string;
   /** Client IP (CF-Connecting-IP), the rate-limit key. */
   ip: string;
   countRecentSignups(ip: string, since: Date): Promise<number>;
   emailExists(email: string): Promise<boolean>;
-  /** Persist all five rows atomically. */
+  /** Persist the account rows atomically. */
   persistSignup(p: ProvisionedSignup): Promise<void>;
+  /**
+   * Mint a one-time magic sign-in link for this email that lands on /dashboard.
+   * Called AFTER the account rows are persisted so the link resolves to the
+   * new user. Returns the full URL delivered to the human as `loginUrl`.
+   */
+  createLoginLink(email: string): Promise<string>;
 }
 
 export const DEFAULT_VAULT_NAME = "My vault";
 
 /**
  * The signup flow. Returns an MCP tool result; the ONLY place the plaintext
- * API key and claim URL ever appear.
+ * API key and magic sign-in link ever appear.
  */
 export async function handleSignup(input: SignupInput, deps: SignupDeps): Promise<ToolResult> {
   return guarded(async () => {
@@ -84,23 +82,22 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
 
     if (await deps.emailExists(email)) {
       return fail(
-        `an account for ${email} already exists — your human can sign in at ${deps.origin}/login ` +
-          "and create an API key from a vault's settings page instead",
+        `an account for ${email} already exists — your human can sign in at the /login page ` +
+          "(enter this email, click the magic link) and create an API key from a vault's settings page instead",
       );
     }
 
-    // Slug dedupe (dedupeSlug in claims.ts) is unnecessary here: the vault is
-    // this brand-new user's first, and slugs are only unique per owner.
+    // Slug dedupe is unnecessary here: the vault is this brand-new user's
+    // first, and slugs are only unique per owner.
     const vaultName = parsed.data.vaultName?.trim() || DEFAULT_VAULT_NAME;
     const vaultSlug = slugify(vaultName) || "my-vault";
 
     const apiKey = generateApiKey();
-    const claimToken = generateClaimToken();
     const userId = crypto.randomUUID();
     const vaultId = crypto.randomUUID();
 
     // Better Auth-compatible user row: emailVerified false and NO credential
-    // account row — sign-in is impossible until the human claims the account.
+    // account row — the human signs in via a magic link, never a password.
     await deps.persistSignup({
       user: {
         id: userId,
@@ -128,20 +125,15 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
         createdAt: now,
         lastUsedAt: null,
       },
-      claim: {
-        id: crypto.randomUUID(),
-        userId,
-        tokenHash: await hashClaimToken(claimToken),
-        createdAt: now,
-        expiresAt: claimExpiry(now),
-        claimedAt: null,
-      },
       event: { id: crypto.randomUUID(), ip: deps.ip, createdAt: now },
     });
 
+    // Mint the human's one-time sign-in link now that the user exists.
+    const loginUrl = await deps.createLoginLink(email);
+
     const output: SignupOutput = {
       apiKey,
-      claimUrl: `${deps.origin}/claim/${claimToken}`,
+      loginUrl,
       vaultSlug,
       email,
     };
@@ -177,12 +169,19 @@ export function buildPublicMcpServer(deps: SignupDeps): McpServer {
 
 // --------------------------------------------------------------- prod deps
 
-/** Wire SignupDeps to the D1 control plane (all five rows in one atomic batch). */
-export function signupDepsFromDb(db: Db, opts: { ip: string; origin: string }): SignupDeps {
+/**
+ * Wire SignupDeps to the D1 control plane (all account rows in one atomic
+ * batch) and to a magic-link minter. `createLoginLink` is supplied by the
+ * route, where the per-request Better Auth instance + request headers live.
+ */
+export function signupDepsFromDb(
+  db: Db,
+  opts: { ip: string; createLoginLink: (email: string) => Promise<string> },
+): SignupDeps {
   return {
     now: () => new Date(),
-    origin: opts.origin,
     ip: opts.ip,
+    createLoginLink: opts.createLoginLink,
     countRecentSignups: async (ip, since) => {
       const rows = await db
         .select({ n: count() })
@@ -203,7 +202,6 @@ export function signupDepsFromDb(db: Db, opts: { ip: string; origin: string }): 
         db.insert(schema.user).values(p.user),
         db.insert(schema.vault).values(p.vault),
         db.insert(schema.apiKey).values(p.apiKey),
-        db.insert(schema.accountClaim).values(p.claim),
         db.insert(schema.signupEvent).values(p.event),
       ]);
     },

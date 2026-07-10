@@ -10,6 +10,12 @@ export interface CloudEnv {
   /** Workers AI (embeddings: @cf/baai/bge-base-en-v1.5). */
   AI: import("@cloudflare/workers-types").Ai;
   ASSETS: import("@cloudflare/workers-types").Fetcher;
+  /**
+   * Cloudflare `send_email` binding (Email Routing → MailChannels). Present in
+   * production (wrangler.jsonc); absent in local dev/tests, where the mailer
+   * factory falls back to DevMailer.
+   */
+  SEND_EMAIL?: import("@cloudflare/workers-types").SendEmail;
   BETTER_AUTH_SECRET?: string;
   BETTER_AUTH_URL?: string;
   GITHUB_CLIENT_ID?: string;

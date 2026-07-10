@@ -3,15 +3,21 @@
  * Brainz Cloud E2E journey against `wrangler dev` (the real workerd runtime:
  * SvelteKit worker + D1 + VaultDO, fresh state per run).
  *
- * Flow: signup → cookie → create vault → upsert concepts (wiki-links, typed
- * relations, code_areas, new ontology types) → search → related → context
- * (budget respected, Code areas line) → graph (pending node) → API key
+ * Flow: passwordless magic-link sign-in (request link → capture from DevMailer
+ * → follow it → session cookie) → create vault → upsert concepts (wiki-links,
+ * typed relations, code_areas, new ontology types) → search → related →
+ * context (budget respected, Code areas line) → graph (pending node) → API key
  * (plaintext once) → MCP over HTTP with the bearer key (initialize,
  * tools/list = 9 tools, get_context, upsert_concept, onboarding nudge,
  * onboard status/start/complete + nudge disappearing) → verify via REST →
  * revoked key gets 401 → PUBLIC signup over unauthenticated MCP (exactly one
- * tool, provision account/vault/key, claim-link handoff, duplicate-email +
- * per-IP rate limit, invalid bearer still 401).
+ * tool, provision account/vault/key, magic loginUrl signs the human in,
+ * duplicate-email + per-IP rate limit, invalid bearer still 401) → assert NO
+ * password endpoints work → magic-link request rate-limit trips.
+ *
+ * Email capture: no send_email binding exists in `wrangler dev`, so the app
+ * uses DevMailer, which logs `[DevMailer] magic link for <email>: <url>` to
+ * stderr. The harness captures that from the wrangler dev output (devLog).
  *
  * Prereqs: repo deps installed and workspace packages built. The script
  * builds the app if needed, applies D1 migrations to a scratch state dir,
@@ -22,7 +28,7 @@
  * "unavailable"). That path is asserted, not fought.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -160,17 +166,96 @@ async function main() {
   dev.stdout.on("data", (d) => (devLog += d));
   dev.stderr.on("data", (d) => (devLog += d));
 
+  const MAGIC_RE = /\/api\/auth\/magic-link\/verify\?[^\s"'<>)]+/;
+
+  // Request a magic link for `email`, returning the response + a devLog marker.
+  async function requestMagicLink(email, { extraHeaders = {} } = {}) {
+    const marker = devLog.length;
+    const res = await fetch(`${BASE}/api/auth/sign-in/magic-link`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE, ...extraHeaders },
+      body: JSON.stringify({ email, callbackURL: "/dashboard" }),
+    });
+    return { res, marker };
+  }
+
+  // Capture the magic-link URL for `email` from the mailer output after
+  // `marker`. Two mailer paths appear in `wrangler dev`:
+  //   - DevMailer (no binding): logs "[DevMailer] magic link for <email>: <url>"
+  //   - MailChannelsMailer (miniflare stubs send_email): logs the message and
+  //     writes the rendered text/html to temp files ("Text: <path>") — we read
+  //     that file and pull the verify URL out of it.
+  async function captureLink(email, marker) {
+    const escEmail = email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const devRe = new RegExp(`\\[DevMailer\\] magic link for ${escEmail}: (\\S+)`);
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const slice = devLog.slice(marker);
+      const dev = slice.match(devRe);
+      if (dev) return dev[1];
+      // MailChannels/miniflare path: find the send block for THIS recipient and
+      // read the Text file it references.
+      const block = slice.split("send_email binding called").find((b) => b.includes(`To: ${email}`));
+      const fileMatch = block?.match(/Text:\s*(\S+\.txt)/);
+      if (fileMatch) {
+        try {
+          const contents = readFileSync(fileMatch[1], "utf8");
+          const urlMatch = contents.match(MAGIC_RE);
+          if (urlMatch) return `${BASE}${urlMatch[0]}`;
+        } catch {
+          /* file not flushed yet — retry */
+        }
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return null;
+  }
+
   try {
     await waitForReady(dev);
     console.log("-- wrangler dev ready\n");
 
-    // 1. signup (email/password) → session cookie
+    // 1. passwordless magic-link sign-in → session cookie
     const email = `e2e-${Date.now()}@example.com`;
-    const signup = await api("POST", "/api/auth/sign-up/email", {
-      body: { name: "E2E User", email, password: "correct-horse-battery" },
+    const linkReq = await requestMagicLink(email);
+    step("magic-link request returns 200", linkReq.res.status === 200, `status ${linkReq.res.status}`);
+    const capturedUrl = await captureLink(email, linkReq.marker);
+    step("mailer produced a verify link (captured)", Boolean(capturedUrl), (capturedUrl ?? "").slice(0, 60));
+    step(
+      "magic link points at Better Auth's magic-link/verify endpoint",
+      /\/api\/auth\/magic-link\/verify\?/.test(capturedUrl ?? ""),
+    );
+    // Follow it → session (unknown email → user created on verify).
+    const verifyUrl = new URL(capturedUrl);
+    const verified = await fetch(`${BASE}${verifyUrl.pathname}${verifyUrl.search}`, {
+      method: "GET",
+      redirect: "manual",
+      headers: { origin: BASE },
     });
-    step("signup returns 200", signup.status === 200, `status ${signup.status}`);
-    step("signup sets a session cookie", jar.size > 0, [...jar.keys()].join(", "));
+    storeCookies(verified);
+    step("following the magic link sets a session cookie", jar.size > 0, [...jar.keys()].join(", "));
+
+    // No password endpoints exist any more.
+    const pwSignIn = await fetch(`${BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE },
+      body: JSON.stringify({ email, password: "anything-at-all-123" }),
+    });
+    step(
+      "email+password sign-in endpoint is gone (4xx, never 200)",
+      pwSignIn.status >= 400 && pwSignIn.status !== 200,
+      `status ${pwSignIn.status}`,
+    );
+    const pwSignUp = await fetch(`${BASE}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE },
+      body: JSON.stringify({ name: "X", email: `x-${Date.now()}@example.com`, password: "anything-123" }),
+    });
+    step(
+      "email+password sign-up endpoint is gone (4xx, never 200)",
+      pwSignUp.status >= 400 && pwSignUp.status !== 200,
+      `status ${pwSignUp.status}`,
+    );
 
     // unauthenticated access is rejected
     const anon = await api("GET", "/api/vaults", { cookie: false });
@@ -496,17 +581,24 @@ async function main() {
       name: "signup",
       arguments: { email: claimEmail, vaultName: "Agent Vault" },
     });
-    step("public signup tool call succeeds", signupRes.isError !== true);
+    step(
+      "public signup tool call succeeds",
+      signupRes.isError !== true,
+      signupRes.isError ? (signupRes.content.find((c) => c.type === "text")?.text ?? "").slice(0, 160) : "",
+    );
     const signupPayload = JSON.parse(signupRes.content.find((c) => c.type === "text").text);
     assertParse(signupOutputSchema, signupPayload, "signup output parses with contract schema");
-    // wrangler dev rewrites the request host to the configured custom domain,
-    // so assert the claim PATH (which we then exercise against BASE) + slug.
-    const claimPath = new URL(signupPayload.claimUrl).pathname;
+    // The loginUrl is a real Better Auth magic link (single-use). wrangler dev
+    // rewrites the host to the custom domain, so assert the PATH + slug.
+    const loginUrl = new URL(signupPayload.loginUrl);
     step(
-      "claimUrl carries a /claim/<64-hex-token> path and slug derives from vaultName",
-      /^\/claim\/[0-9a-f]{64}$/.test(claimPath) && signupPayload.vaultSlug === "agent-vault",
-      `${signupPayload.vaultSlug} ${claimPath.slice(0, 20)}…`,
+      "loginUrl is a magic-link/verify link and slug derives from vaultName",
+      /\/api\/auth\/magic-link\/verify$/.test(loginUrl.pathname) &&
+        loginUrl.searchParams.get("token") &&
+        signupPayload.vaultSlug === "agent-vault",
+      `${signupPayload.vaultSlug} ${loginUrl.pathname}`,
     );
+    step("signup output has no legacy claimUrl field", !("claimUrl" in signupPayload));
 
     // the returned apiKey works immediately on the authenticated MCP surface
     const agentTransport = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), {
@@ -524,117 +616,60 @@ async function main() {
     );
     await agentMcp.close();
 
-    // pre-claim: NO credential account row exists → password sign-in fails cleanly
-    const preClaim = await fetch(`${BASE}/api/auth/sign-in/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: BASE },
-      body: JSON.stringify({ email: claimEmail, password: "some-guess-12345" }),
-    });
-    step("pre-claim password sign-in fails cleanly (401)", preClaim.status === 401, `status ${preClaim.status}`);
-
-    // 13. claim flow over HTTP (own cookie jar — the human's browser)
-    const claimPage = await fetch(`${BASE}${claimPath}`);
-    const claimHtml = await claimPage.text();
-    step(
-      "GET claim page → 200 and shows the account email",
-      claimPage.status === 200 && claimHtml.includes(claimEmail),
-      `status ${claimPage.status}`,
-    );
-
-    const claimJar = new Map();
-    const claimPassword = "chosen-by-human-42";
-    // accept: text/html = a real browser form post → SvelteKit answers with a
-    // true 303 redirect (Accept: */* would get the JSON action envelope).
-    const setPw = await fetch(`${BASE}${claimPath}`, {
-      method: "POST",
+    // 13. the human follows the magic loginUrl → signed straight into dashboard
+    // (own cookie jar — the human's browser). Unknown-until-now credential path:
+    // there is no password to set; the link IS the sign-in.
+    const humanJar = new Map();
+    const followLogin = await fetch(`${BASE}${loginUrl.pathname}${loginUrl.search}`, {
+      method: "GET",
       redirect: "manual",
-      headers: {
-        origin: BASE,
-        accept: "text/html",
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({ password: claimPassword }).toString(),
+      headers: { origin: BASE },
     });
-    for (const raw of setPw.headers.getSetCookie?.() ?? []) {
+    for (const raw of followLogin.headers.getSetCookie?.() ?? []) {
       const [pair] = raw.split(";");
       const eq = pair.indexOf("=");
-      if (eq > 0) claimJar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+      if (eq > 0) humanJar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
     }
     step(
-      "POST set-password → 303 redirect to /dashboard",
-      setPw.status === 303 && setPw.headers.get("location") === "/dashboard",
-      `status ${setPw.status} → ${setPw.headers.get("location")}`,
+      "following signup loginUrl signs the human in (redirect + session cookie)",
+      (followLogin.status === 302 || followLogin.status === 303) && humanJar.size > 0,
+      `status ${followLogin.status} → ${followLogin.headers.get("location")}`,
     );
-    step("claiming sets a session cookie", claimJar.size > 0, [...claimJar.keys()].join(", "));
 
-    const claimCookie = [...claimJar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
-    const claimVaults = await fetch(`${BASE}/api/vaults`, { headers: { cookie: claimCookie } });
-    const claimVaultsJson = await claimVaults.json().catch(() => null);
+    const humanCookie = [...humanJar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
+    const humanVaults = await fetch(`${BASE}/api/vaults`, { headers: { cookie: humanCookie } });
+    const humanVaultsJson = await humanVaults.json().catch(() => null);
     step(
-      "claimed session sees the agent-created vault via GET /api/vaults",
-      claimVaults.status === 200 &&
-        claimVaultsJson?.vaults?.some((v) => v.slug === signupPayload.vaultSlug),
-      JSON.stringify(claimVaultsJson?.vaults?.map((v) => v.slug)),
+      "signed-in session sees the agent-created vault via GET /api/vaults",
+      humanVaults.status === 200 &&
+        humanVaultsJson?.vaults?.some((v) => v.slug === signupPayload.vaultSlug),
+      JSON.stringify(humanVaultsJson?.vaults?.map((v) => v.slug)),
     );
 
-    const dash = await fetch(`${BASE}/dashboard`, { headers: { cookie: claimCookie } });
+    const dash = await fetch(`${BASE}/dashboard`, { headers: { cookie: humanCookie } });
     const dashHtml = await dash.text();
     step(
-      "dashboard loads for the claimed session and lists the vault",
+      "dashboard loads for the signed-in session and lists the vault",
       dash.status === 200 && dashHtml.includes("Agent Vault"),
       `status ${dash.status}`,
     );
 
-    const postClaimSignIn = await fetch(`${BASE}/api/auth/sign-in/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: BASE },
-      body: JSON.stringify({ email: claimEmail, password: claimPassword }),
-    });
-    step(
-      "post-claim email+password sign-in succeeds",
-      postClaimSignIn.status === 200,
-      `status ${postClaimSignIn.status}`,
-    );
-
-    const reusedPage = await fetch(`${BASE}${claimPath}`);
-    const reusedHtml = await reusedPage.text();
-    step(
-      "claim link is single-use (revisit reports it was already used)",
-      reusedPage.status === 200 && reusedHtml.includes("already been used"),
-    );
-
-    // A SECOND set-password POST with the same token must NOT redeem again:
-    // the conditional atomic consume already marked claimed_at, so this attempt
-    // sees 0 rows affected and returns the used-claim error — never a 303 to
-    // /dashboard and never a second credential row (guards the redemption race).
-    const reusedPost = await fetch(`${BASE}${claimPath}`, {
-      method: "POST",
+    // The magic link is single-use: following it again must NOT mint a session.
+    const reuseJar = new Map();
+    const reused = await fetch(`${BASE}${loginUrl.pathname}${loginUrl.search}`, {
+      method: "GET",
       redirect: "manual",
-      headers: {
-        origin: BASE,
-        accept: "text/html",
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({ password: "second-attempt-99" }).toString(),
+      headers: { origin: BASE },
     });
-    const reusedPostHtml = await reusedPost.text().catch(() => "");
+    for (const raw of reused.headers.getSetCookie?.() ?? []) {
+      const [pair] = raw.split(";");
+      const eq = pair.indexOf("=");
+      if (eq > 0) reuseJar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+    }
     step(
-      "re-POSTing the claimed token is rejected as already-used (no second redemption)",
-      reusedPost.status !== 303 && reusedPostHtml.includes("already been used"),
-      `status ${reusedPost.status}`,
-    );
-
-    // Sign-in still works with the FIRST password — the failed re-POST did not
-    // overwrite the credential the winning redemption created.
-    const afterReuseSignIn = await fetch(`${BASE}/api/auth/sign-in/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: BASE },
-      body: JSON.stringify({ email: claimEmail, password: claimPassword }),
-    });
-    step(
-      "original claim password still signs in after the rejected re-POST",
-      afterReuseSignIn.status === 200,
-      `status ${afterReuseSignIn.status}`,
+      "magic link is single-use (second follow mints no session cookie)",
+      reuseJar.size === 0,
+      `cookies=${reuseJar.size}, → ${reused.headers.get("location")}`,
     );
 
     // 14. duplicate email + per-IP rate limit (5/hour), still over the public server
@@ -690,6 +725,31 @@ async function main() {
       body: "{}",
     });
     step("malformed bearer on /mcp still → 401", malformedBearer.status === 401, `status ${malformedBearer.status}`);
+
+    // 16. magic-link REQUEST rate limit (D1-backed): 5/hour/email. A fresh
+    // address gets its 6th request throttled with a 429 that leaks nothing.
+    const rlEmail = `ratelimit-${Date.now()}@example.com`;
+    let rlOk = true;
+    for (let i = 1; i <= 5; i++) {
+      const r = await fetch(`${BASE}/api/auth/sign-in/magic-link`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: BASE },
+        body: JSON.stringify({ email: rlEmail, callbackURL: "/dashboard" }),
+      });
+      if (r.status !== 200) rlOk = false;
+    }
+    step("magic-link requests 1-5 for one email succeed (200)", rlOk);
+    const rlSixth = await fetch(`${BASE}/api/auth/sign-in/magic-link`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE },
+      body: JSON.stringify({ email: rlEmail, callbackURL: "/dashboard" }),
+    });
+    const rlBody = await rlSixth.json().catch(() => ({}));
+    step(
+      "6th magic-link request for the same email → 429 throttle (no existence leak)",
+      rlSixth.status === 429 && !/exist|found/i.test(JSON.stringify(rlBody)),
+      `status ${rlSixth.status}`,
+    );
   } catch (err) {
     failed++;
     process.exitCode = 1;

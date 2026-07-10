@@ -388,7 +388,12 @@ export const signupInputSchema = z.object({
 export const signupOutputSchema = z
   .object({
     apiKey: z.string(),
-    claimUrl: z.string(),
+    /**
+     * A magic sign-in link for the human: opening it signs them straight into
+     * the dashboard (single-use, ~15 min TTL). Replaces the old set-password
+     * claim URL — auth is passwordless now.
+     */
+    loginUrl: z.string(),
     vaultSlug: z.string(),
     email: z.string(),
   })
@@ -406,12 +411,13 @@ export const PUBLIC_MCP_TOOLS = [
     title: "Sign up (provision an account for your human)",
     description:
       "Provision a Brainz Cloud account for your human: creates the account, a first knowledge vault, " +
-      "and a working API key, plus a single-use claim link. Keep the returned apiKey yourself — send it " +
+      "and a working API key, plus a one-time magic sign-in link. Keep the returned apiKey yourself — send it " +
       "as `Authorization: Bearer <apiKey>` to this same /mcp endpoint and the 9 vault tools unlock " +
-      "immediately, no human action required. Deliver the claimUrl to your human: opening it lets them " +
-      "set a password and take ownership of the account in the dashboard (the link is single-use and " +
-      "expires in 7 days; the API key keeps working either way). Call this once per email — if the " +
-      "email already has an account, you'll get an error telling your human to sign in instead.",
+      "immediately, no human action required. Deliver the loginUrl to your human: opening it signs them " +
+      "straight into the dashboard — no password to set (auth is passwordless / magic-link only). The " +
+      "link is single-use and expires in ~15 minutes; the API key keeps working regardless. Call this " +
+      "once per email — if the email already has an account, you'll get an error telling your human to " +
+      "sign in instead.",
     inputSchema: signupInputSchema,
     outputSchema: signupOutputSchema,
   },

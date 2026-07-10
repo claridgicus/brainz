@@ -159,12 +159,17 @@ examples/
 Brainz Cloud's dashboard (sign-up, vaults, graph workspace, API keys) ships at
 https://brainz.brownmatter.ai — free hosted vaults over the same engine.
 
+Auth is **passwordless** — magic link only. Enter your email on `/login` or `/signup` and
+you get a one-time sign-in link (single-use, ~15 min TTL); the first link for an unknown
+email creates the account. GitHub OAuth is available when configured. There are no
+passwords anywhere.
+
 Agents can even provision their own account: connecting to
 `https://brainz.brownmatter.ai/mcp` **without** an `Authorization` header exposes a single
 public `signup` tool. One call creates a user, a first vault, and a working API key, and
-returns a single-use claim URL (valid 7 days) that the agent hands to its human, who sets
-a password there to take ownership of the dashboard. The API key works immediately —
-password sign-in stays disabled until the account is claimed.
+returns a one-time **magic sign-in link** (`loginUrl`) that the agent hands to its human —
+opening it signs them straight into the dashboard, no password to set. The API key works
+immediately and keeps working regardless of whether the human ever opens the link.
 
 ## Embeddings
 

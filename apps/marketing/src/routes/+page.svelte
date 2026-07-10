@@ -30,7 +30,7 @@ Scores leads 0-100. Recomputed on every
 
 	const signupSnippet = `# connect to ${MCP_URL} with NO auth header → one public tool
 → tools/call signup { "email": "you@company.com" }
-← { "apiKey": "bz_…", "claimUrl": "${APP_URL}/claim/…", "vaultSlug": "my-vault" }`;
+← { "apiKey": "bz_…", "loginUrl": "${APP_URL}/api/auth/magic-link/verify?token=…", "vaultSlug": "my-vault" }`;
 </script>
 
 <svelte:head>
@@ -134,8 +134,8 @@ Scores leads 0-100. Recomputed on every
 					An orchestrator can provision its own brain: hit <code>{MCP_URL}</code> with no
 					credentials and the endpoint exposes a single public <code>signup</code> tool. One call
 					creates the account, a first vault, and an API key that works immediately — and returns a
-					claim link the agent hands to its human, who sets a password and takes ownership of the
-					dashboard whenever they're ready.
+					one-time magic sign-in link the agent hands to its human, who opens it to land in the
+					dashboard. No passwords anywhere — Brainz is passwordless.
 				</p>
 				<pre><code>{signupSnippet}</code></pre>
 			</div>

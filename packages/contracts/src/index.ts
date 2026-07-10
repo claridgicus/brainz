@@ -7,7 +7,7 @@
  */
 
 /** Bump on breaking wire-shape changes. */
-export const CONTRACTS_VERSION = "3";
+export const CONTRACTS_VERSION = "4";
 
 export * from "./domain.js";
 export * from "./mcp.js";

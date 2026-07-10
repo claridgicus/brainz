@@ -13,9 +13,17 @@ create a vault, point any orchestrator at `https://brainz.brownmatter.ai/mcp`.
 - **D1 control plane** (drizzle): Better Auth tables (user/session/account/
   verification), `vault` registry (`vault.id` is the DO name), `api_key`
   (SHA-256 hashed, plaintext shown once).
-- **Auth**: Better Auth (email+password; GitHub OAuth when
-  `GITHUB_CLIENT_ID/SECRET` are set). Cookie sessions for the dashboard;
-  `Authorization: Bearer bz_...` keys for the API/MCP, scoped to their vault.
+- **Auth**: Better Auth, **passwordless** — the `magicLink` plugin is the only
+  credential surface (enter email → one-time link → session; unknown email
+  signs up on first use). Links are single-use, hashed at rest, ~15 min TTL.
+  GitHub OAuth stays available when `GITHUB_CLIENT_ID/SECRET` are set. Cookie
+  sessions for the dashboard; `Authorization: Bearer bz_...` keys for the
+  API/MCP, scoped to their vault. Email is delivered via the Cloudflare
+  `send_email` binding (`MailChannelsMailer`) in production, or a `DevMailer`
+  that logs the link when the binding is absent (local dev). Two audit
+  hardenings are folded in: a D1-backed magic-link request limiter
+  (5/hour/email, 20/hour/IP) and a fail-closed `BETTER_AUTH_SECRET` (missing in
+  production ⇒ `createAuth` throws).
 - **Remote MCP** (`/mcp`): stateless Streamable HTTP via `@hono/mcp`, tools
   iterated from `MCP_TOOLS` in `@brainz/contracts` (same registry as the
   stdio server).
@@ -94,8 +102,32 @@ Account-specific steps, in order:
 5. DNS: the `brownmatter.ai` zone must be on this Cloudflare account;
    `wrangler.jsonc` declares `brainz.brownmatter.ai` as a custom domain route
    (Cloudflare creates the DNS record on first deploy).
-6. `npm run deploy`
-7. Verify: sign up at https://brainz.brownmatter.ai, create a vault + API key,
+6. **Email (magic-link delivery via the `send_email` binding).** Until this is
+   done, sign-in emails don't leave the platform — locally you get `DevMailer`
+   (link logged to stderr), but the deployed Worker needs the domain onboarded
+   for sending:
+   - In the Cloudflare dashboard, onboard `brownmatter.ai` for **Email Sending**
+     (Email → Email Service / Email Routing → enable sending). Cloudflare
+     **auto-adds** the required DNS records to the zone: an MX (on the
+     `cf-bounce` subdomain), an SPF `TXT`, a **DKIM `TXT`** (signs outbound
+     mail), and a DMARC `TXT` on `_dmarc.brownmatter.ai`. Propagation is
+     typically 5–15 min on Cloudflare DNS.
+   - The sender is `no-reply@brownmatter.ai` — it must be on the onboarded
+     domain (it is). The `send_email: [{ name: "SEND_EMAIL" }]` binding in
+     `wrangler.jsonc` is already declared; no per-address verification is needed
+     for the sender once the domain is onboarded.
+   - **Recipient caveat (free tier):** on the name-only binding, the Worker can
+     send only to **verified destination addresses** in your account. To send
+     magic links to arbitrary user emails you need the expanded/paid Email
+     Service sending tier — verify that before public launch, or magic-link
+     delivery to non-verified recipients will fail (`E_*` send error).
+   - Note: MailChannels was retired as the transport (Aug 2024); the binding now
+     sends through Cloudflare's own Email Service. Same binding, same DNS.
+   - Also **delete the stale `brain.brownmatter.ai` DNS record** if it still
+     exists (the app moved to `brainz.brownmatter.ai`; `brain.*` currently 530s).
+7. `npm run deploy`
+8. Verify: sign in at https://brainz.brownmatter.ai (enter your email, open the
+   magic link), create a vault + API key,
    then:
    ```sh
    claude mcp add --transport http brainz https://brainz.brownmatter.ai/mcp \

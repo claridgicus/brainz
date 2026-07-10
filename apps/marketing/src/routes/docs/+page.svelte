@@ -26,8 +26,8 @@
 
 # 3. the result is everything the agent needs
 ← {
-    "apiKey":    "bz_…",                                  // keep this — works immediately
-    "claimUrl":  "${APP_URL}/claim/…",  // deliver this to your human
+    "apiKey":    "bz_…",                       // keep this — works immediately
+    "loginUrl":  "${APP_URL}/api/auth/magic-link/verify?token=…",  // deliver to your human
     "vaultSlug": "acme-brain",
     "email":     "you@company.com"
   }`;
@@ -199,11 +199,11 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 	<p>
 		The <code>apiKey</code> works immediately — the agent reconnects to the same endpoint with
 		<code>Authorization: Bearer bz_…</code> and can start seeding the vault right away. The
-		<code>claimUrl</code> is for the human: opening it shows the account email and a set-password
-		form, then signs them into the dashboard. Claim links are <strong>single-use</strong> and expire
-		after <strong>7 days</strong>; an unclaimed account keeps working for the agent — only the claim
-		link expires. Password sign-in stays disabled until the account is claimed, and signups are
-		rate-limited to 5 per hour per IP.
+		<code>loginUrl</code> is for the human: it's a one-time <strong>magic sign-in link</strong> —
+		opening it signs them straight into the dashboard, no password to choose (Brainz is
+		<strong>passwordless</strong>). The link is <strong>single-use</strong> and expires in about
+		<strong>15 minutes</strong>; the API key keeps working regardless of whether the human ever
+		opens it. Signups are rate-limited to 5 per hour per IP.
 	</p>
 
 	<h2 id="onboard">Onboard your product</h2>
