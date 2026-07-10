@@ -102,7 +102,7 @@ describe("PUBLIC_MCP_TOOLS registry (unauthenticated /mcp surface)", () => {
   it("signup output round-trips and is strict", () => {
     const payload = {
       apiKey: "bz_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      claimUrl: "https://brain.brownmatter.ai/claim/abc123",
+      claimUrl: "https://brainz.brownmatter.ai/claim/abc123",
       vaultSlug: "my-vault",
       email: "human@example.com",
     };

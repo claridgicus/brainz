@@ -213,7 +213,7 @@ async function main() {
     step("/v/ui-vault/settings → 200", settings.status === 200, `status ${settings.status}`);
     step("settings SSR has API keys + danger zone", settings.html.includes("API keys") && settings.html.includes("Danger zone"));
     step("settings lists the created key by name + prefix", settings.html.includes("ui-e2e-key") && settings.html.includes(keyRes.json.keyPrefix));
-    step("settings shows the MCP setup snippets", settings.html.includes("https://brain.brownmatter.ai/mcp") && settings.html.includes("claude mcp add"));
+    step("settings shows the MCP setup snippets", settings.html.includes("https://brainz.brownmatter.ai/mcp") && settings.html.includes("claude mcp add"));
     step("settings teaches onboard as step 1", settings.html.includes("onboard"));
 
     // 8. unknown slug 404s

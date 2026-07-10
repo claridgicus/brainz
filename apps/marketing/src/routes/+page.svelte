@@ -2,9 +2,9 @@
 	import GraphMotif from "$lib/components/GraphMotif.svelte";
 	import { APP_URL, MCP_URL, SIGNUP_URL, SITE_URL } from "$lib/links";
 
-	const title = "Brainz — Give your agent fleet a shared brain";
+	const title = "Brownmatter — Brainz gives your agent fleet a shared brain";
 	const description =
-		"Brainz is a free product-knowledge graph for AI agent orchestration. Orchestrators query it over MCP; get_context returns a token-budgeted markdown briefing for every coding subagent.";
+		"Brownmatter makes Brainz: a free product-knowledge graph for AI agent orchestration. Orchestrators query it over MCP; get_context returns a token-budgeted markdown briefing for every coding subagent.";
 
 	const mcpSnippet = `{
   "mcpServers": {
@@ -38,7 +38,7 @@ Scores leads 0-100. Recomputed on every
 	<meta name="description" content={description} />
 	<link rel="canonical" href={SITE_URL} />
 	<meta property="og:type" content="website" />
-	<meta property="og:site_name" content="Brainz" />
+	<meta property="og:site_name" content="Brownmatter" />
 	<meta property="og:title" content={title} />
 	<meta property="og:description" content={description} />
 	<meta property="og:url" content={SITE_URL} />
@@ -65,7 +65,8 @@ Scores leads 0-100. Recomputed on every
 				<a class="btn btn-lg" href="/docs">Read the docs</a>
 			</div>
 			<p class="hero-note">
-				Hosted at <code>brain.brownmatter.ai</code> — or run it locally from a folder of markdown.
+				Brainz is a Brownmatter product — hosted at <code>brainz.brownmatter.ai</code>, or run it
+				locally from a folder of markdown.
 			</p>
 		</div>
 		<div class="hero-visual" aria-hidden="false">
@@ -185,7 +186,7 @@ Scores leads 0-100. Recomputed on every
 	<div class="container free-inner">
 		<h2 class="section-title">Free. Actually free.</h2>
 		<p class="free-copy">
-			Hosted vaults at <code>brain.brownmatter.ai</code> are free for everyone — no tiers, no trial
+			Hosted vaults at <code>brainz.brownmatter.ai</code> are free for everyone — no tiers, no trial
 			clock, no credit card, no seat limits. And because the engine is open source and every concept
 			is plain markdown, you're never locked in: the same vault runs from a folder on your laptop.
 		</p>

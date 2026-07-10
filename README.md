@@ -151,16 +151,16 @@ packages/
   cli/         # @brainz/cli        — the `brainz` command
   web/         # @brainz/web        — local graph view: d3-force frontend + JSON API (/api/graph, /api/concept/:id, /api/search, /api/stats)
 apps/
-  cloud/       # @brainz/cloud      — Brainz Cloud: SvelteKit on one Cloudflare Worker (dashboard + REST API + remote MCP at https://brain.brownmatter.ai; one Durable Object per vault, D1 control plane)
+  cloud/       # @brainz/cloud      — Brainz Cloud: SvelteKit on one Cloudflare Worker (dashboard + REST API + remote MCP at https://brainz.brownmatter.ai; one Durable Object per vault, D1 control plane)
 examples/
   demo-vault/  # seeded example vault (Acme CRM)
 ```
 
 Brainz Cloud's dashboard (sign-up, vaults, graph workspace, API keys) ships at
-https://brain.brownmatter.ai — free hosted vaults over the same engine.
+https://brainz.brownmatter.ai — free hosted vaults over the same engine.
 
 Agents can even provision their own account: connecting to
-`https://brain.brownmatter.ai/mcp` **without** an `Authorization` header exposes a single
+`https://brainz.brownmatter.ai/mcp` **without** an `Authorization` header exposes a single
 public `signup` tool. One call creates a user, a first vault, and a working API key, and
 returns a single-use claim URL (valid 7 days) that the agent hands to its human, who sets
 a password there to take ownership of the dashboard. The API key works immediately —

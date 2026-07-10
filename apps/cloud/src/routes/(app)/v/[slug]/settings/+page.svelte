@@ -82,7 +82,7 @@
 		new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 
 	// --------------------------------------------------------------- mcp docs
-	const MCP_URL = "https://brain.brownmatter.ai/mcp";
+	const MCP_URL = "https://brainz.brownmatter.ai/mcp";
 	const mcpJson = (key: string) => `{
   "mcpServers": {
     "brainz": {

@@ -3,7 +3,7 @@
 </script>
 
 <svelte:head>
-	<title>{page.status} — Brainz</title>
+	<title>{page.status} — Brownmatter</title>
 </svelte:head>
 
 <div class="container wrap">

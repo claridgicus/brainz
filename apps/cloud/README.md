@@ -1,8 +1,8 @@
 # @brainz/cloud — Brainz Cloud
 
 SvelteKit app deployed as **one Cloudflare Worker**: dashboard UI + REST API +
-remote MCP at **https://brain.brownmatter.ai**. Free hosted vaults: sign up,
-create a vault, point any orchestrator at `https://brain.brownmatter.ai/mcp`.
+remote MCP at **https://brainz.brownmatter.ai**. Free hosted vaults: sign up,
+create a vault, point any orchestrator at `https://brainz.brownmatter.ai/mcp`.
 
 ## Architecture
 
@@ -86,19 +86,19 @@ Account-specific steps, in order:
 4. Secrets:
    ```sh
    npx wrangler secret put BETTER_AUTH_SECRET   # openssl rand -base64 32
-   npx wrangler secret put BETTER_AUTH_URL      # https://brain.brownmatter.ai
+   npx wrangler secret put BETTER_AUTH_URL      # https://brainz.brownmatter.ai
    # optional GitHub OAuth:
    npx wrangler secret put GITHUB_CLIENT_ID
    npx wrangler secret put GITHUB_CLIENT_SECRET
    ```
 5. DNS: the `brownmatter.ai` zone must be on this Cloudflare account;
-   `wrangler.jsonc` declares `brain.brownmatter.ai` as a custom domain route
+   `wrangler.jsonc` declares `brainz.brownmatter.ai` as a custom domain route
    (Cloudflare creates the DNS record on first deploy).
 6. `npm run deploy`
-7. Verify: sign up at https://brain.brownmatter.ai, create a vault + API key,
+7. Verify: sign up at https://brainz.brownmatter.ai, create a vault + API key,
    then:
    ```sh
-   claude mcp add --transport http brainz https://brain.brownmatter.ai/mcp \
+   claude mcp add --transport http brainz https://brainz.brownmatter.ai/mcp \
      --header "Authorization: Bearer bz_..."
    ```
    and call `vault_stats`. Or raw `.mcp.json`:
@@ -107,7 +107,7 @@ Account-specific steps, in order:
      "mcpServers": {
        "brainz": {
          "type": "http",
-         "url": "https://brain.brownmatter.ai/mcp",
+         "url": "https://brainz.brownmatter.ai/mcp",
          "headers": { "Authorization": "Bearer bz_..." }
        }
      }

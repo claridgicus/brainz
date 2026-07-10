@@ -37,8 +37,8 @@ const errors = [];
 if (htmlFiles.length === 0) errors.push("no HTML files found in build/");
 
 // --- 1. CTA links present on the prerendered pages -------------------------
-const SIGNUP = "https://brain.brownmatter.ai/signup";
-const LOGIN = "https://brain.brownmatter.ai/login";
+const SIGNUP = "https://brainz.brownmatter.ai/signup";
+const LOGIN = "https://brainz.brownmatter.ai/login";
 for (const page of ["index.html", "docs.html"]) {
 	const file = htmlFiles.find((f) => f.endsWith(`/${page}`) || f.endsWith(`\\${page}`));
 	if (!file) {
@@ -48,6 +48,15 @@ for (const page of ["index.html", "docs.html"]) {
 	const html = readFileSync(file, "utf8");
 	if (!html.includes(SIGNUP)) errors.push(`${page}: missing signup URL ${SIGNUP}`);
 	if (!html.includes(LOGIN)) errors.push(`${page}: missing login URL ${LOGIN}`);
+	// Brand model: Brownmatter is the company, Brainz the product. The footer
+	// (rendered on every page) must carry the attribution line, and the retired
+	// brain.* host must never appear.
+	if (!html.includes("Brainz is a Brownmatter product")) {
+		errors.push(`${page}: missing the "Brainz is a Brownmatter product" footer line`);
+	}
+	if (/https?:\/\/brain\.brownmatter\.ai/.test(html)) {
+		errors.push(`${page}: references the retired brain.brownmatter.ai host`);
+	}
 }
 
 // --- 1b. agent-driven signup is visible ------------------------------------

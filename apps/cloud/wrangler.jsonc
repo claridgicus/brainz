@@ -18,7 +18,7 @@
     "directory": ".svelte-kit/cloudflare"
   },
   // Production dashboard + API + MCP host.
-  "routes": [{ "pattern": "brain.brownmatter.ai", "custom_domain": true }],
+  "routes": [{ "pattern": "brainz.brownmatter.ai", "custom_domain": true }],
   // D1 is the shared control plane (auth, vault registry, API keys).
   // Create it with: wrangler d1 create brainz
   // …then paste the returned database_id here.

@@ -13,7 +13,7 @@ npm workspaces monorepo (Node >= 20, TypeScript ~5.5, ESM throughout; workspaces
 - `packages/mcp-server` — `@brainz/mcp-server`, MCP stdio server over core (binary `brainz-mcp`)
 - `packages/cli` — `@brainz/cli`, the `brainz` command (binary `dist/bin.js`)
 - `packages/web` — `@brainz/web`, graph-view server + esbuild-bundled frontend (`frontend/` → `dist/public`)
-- `apps/cloud` — `@brainz/cloud`, SvelteKit app deployed as ONE Cloudflare Worker (https://brain.brownmatter.ai): dashboard + REST API + remote MCP `/mcp`. One Durable Object per vault (`VaultDO`, DO SQLite = all vault content); D1 is only the control plane (Better Auth, vault registry, hashed API keys)
+- `apps/cloud` — `@brainz/cloud`, SvelteKit app deployed as ONE Cloudflare Worker (https://brainz.brownmatter.ai): dashboard + REST API + remote MCP `/mcp`. One Durable Object per vault (`VaultDO`, DO SQLite = all vault content); D1 is only the control plane (Better Auth, vault registry, hashed API keys)
 - `examples/demo-vault` — seeded demo vault used by tests and manual verification
 
 ### apps/cloud specifics

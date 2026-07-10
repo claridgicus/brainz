@@ -6,7 +6,7 @@
  * - drizzle adapter over the D1 control plane
  * - sveltekitCookies must be the LAST plugin (per Better Auth docs)
  *
- * Production: BETTER_AUTH_URL=https://brain.brownmatter.ai (wrangler secret).
+ * Production: BETTER_AUTH_URL=https://brainz.brownmatter.ai (wrangler secret).
  * Locally it may be unset — Better Auth then infers the base URL per request,
  * and both localhost origins are trusted.
  */
@@ -18,7 +18,7 @@ import { sveltekitCookies } from "better-auth/svelte-kit";
 import { createDb, schema } from "./db";
 import { hashPassword, verifyPassword } from "./password";
 
-export const PRODUCTION_ORIGIN = "https://brain.brownmatter.ai";
+export const PRODUCTION_ORIGIN = "https://brainz.brownmatter.ai";
 
 export function createAuth(env: CloudEnv) {
   const db = createDb(env.DB);

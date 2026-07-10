@@ -18,7 +18,7 @@ function fakeDeps(overrides: Partial<SignupDeps> = {}) {
   const persisted: ProvisionedSignup[] = [];
   const deps: SignupDeps = {
     now: () => NOW,
-    origin: "https://brain.brownmatter.ai",
+    origin: "https://brainz.brownmatter.ai",
     ip: "203.0.113.7",
     countRecentSignups: async () => 0,
     emailExists: async () => false,
@@ -68,7 +68,7 @@ describe("public MCP server (unauthenticated surface)", () => {
     expect(payload.vaultSlug).toBe("acme-brain");
     expect(payload.apiKey).toMatch(/^bz_[A-Za-z0-9]{32}$/);
     expect(payload.claimUrl).toMatch(
-      /^https:\/\/brain\.brownmatter\.ai\/claim\/[0-9a-f]{64}$/,
+      /^https:\/\/brainz\.brownmatter\.ai\/claim\/[0-9a-f]{64}$/,
     );
 
     expect(persisted).toHaveLength(1);

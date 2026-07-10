@@ -9,7 +9,7 @@
 			<Wordmark />
 			<p>
 				A product-knowledge graph for agent orchestration.<br />
-				Made by Brownmatter.
+				Brainz is a Brownmatter product.
 			</p>
 		</div>
 		<div class="cols">

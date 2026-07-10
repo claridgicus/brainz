@@ -5,7 +5,7 @@
 
 <header>
 	<div class="container inner">
-		<a href="/" class="home" aria-label="Brainz home"><Wordmark /></a>
+		<a href="/" class="home" aria-label="Brownmatter home"><Wordmark /></a>
 		<nav aria-label="Main">
 			<a href="/docs" class="navlink">Docs</a>
 			<a href={GITHUB_URL} class="navlink hide-sm" rel="noopener">GitHub</a>

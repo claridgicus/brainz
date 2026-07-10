@@ -49,7 +49,7 @@ export interface ProvisionedSignup {
 /** Persistence + environment port for the signup flow (drizzle in prod, fakes in tests). */
 export interface SignupDeps {
   now(): Date;
-  /** Origin for the claim URL, e.g. "https://brain.brownmatter.ai". */
+  /** Origin for the claim URL, e.g. "https://brainz.brownmatter.ai". */
   origin: string;
   /** Client IP (CF-Connecting-IP), the rate-limit key. */
   ip: string;

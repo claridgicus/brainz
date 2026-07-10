@@ -3,7 +3,7 @@
 
 	const title = "Docs — Get started with Brainz";
 	const description =
-		"Wire Brainz into your agents in minutes: hosted remote MCP at brain.brownmatter.ai or the local-first CLI over stdio. All nine MCP tools, documented.";
+		"Wire Brainz into your agents in minutes: hosted remote MCP at brainz.brownmatter.ai or the local-first CLI over stdio. All nine MCP tools, documented.";
 
 	const remoteMcpSnippet = `{
   "mcpServers": {
@@ -151,7 +151,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 	<meta name="description" content={description} />
 	<link rel="canonical" href="{SITE_URL}/docs" />
 	<meta property="og:type" content="article" />
-	<meta property="og:site_name" content="Brainz" />
+	<meta property="og:site_name" content="Brownmatter" />
 	<meta property="og:title" content={title} />
 	<meta property="og:description" content={description} />
 	<meta property="og:url" content="{SITE_URL}/docs" />
@@ -165,7 +165,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		<span class="kicker">Docs</span>
 		<h1>Getting started</h1>
 		<p class="lede">
-			Two ways to run the same brain: hosted at <code>brain.brownmatter.ai</code> (free, remote MCP
+			Two ways to run the same brain: hosted at <code>brainz.brownmatter.ai</code> (free, remote MCP
 			over HTTP) or local-first from a folder of markdown (open source CLI, MCP over stdio). Both
 			expose the identical nine tools, so your orchestrator doesn't care which one it's talking to.
 		</p>

@@ -1,5 +1,5 @@
 /** Single source of truth for every outbound link on the marketing site. */
-export const APP_URL = "https://brain.brownmatter.ai";
+export const APP_URL = "https://brainz.brownmatter.ai";
 export const SIGNUP_URL = `${APP_URL}/signup`;
 export const LOGIN_URL = `${APP_URL}/login`;
 export const MCP_URL = `${APP_URL}/mcp`;

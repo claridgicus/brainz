@@ -1,5 +1,5 @@
 /**
- * Remote MCP endpoint (Streamable HTTP): https://brain.brownmatter.ai/mcp
+ * Remote MCP endpoint (Streamable HTTP): https://brainz.brownmatter.ai/mcp
  *
  * Auth split:
  * - `Authorization: Bearer bz_...` (valid) → SHA-256 → D1 api_key lookup →
@@ -16,7 +16,7 @@
  * worker; @hono/mcp drops cleanly into a SvelteKit endpoint.
  *
  * Client wiring:
- *   claude mcp add --transport http brainz https://brain.brownmatter.ai/mcp \
+ *   claude mcp add --transport http brainz https://brainz.brownmatter.ai/mcp \
  *     --header "Authorization: Bearer bz_..."
  */
 import type { RequestHandler } from "@sveltejs/kit";
@@ -41,7 +41,7 @@ const handleMcp: RequestHandler = async (event) => {
     server = buildPublicMcpServer(
       signupDepsFromDb(createDb(platform.env.DB), {
         ip: event.request.headers.get("cf-connecting-ip") ?? "local",
-        // Claim URLs must be https://brain.brownmatter.ai in production —
+        // Claim URLs must be https://brainz.brownmatter.ai in production —
         // BETTER_AUTH_URL pins it there; local dev falls back to the request.
         origin: platform.env.BETTER_AUTH_URL ?? event.url.origin,
       }),
