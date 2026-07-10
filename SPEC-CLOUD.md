@@ -161,6 +161,20 @@ The tenant unit becomes the **project** — human-readable name, many users ↔ 
 - **UI**: project picker in the (app) header (current project name + dropdown: switch, create, invite chip showing pending count); dashboard groups by membership; settings gains Members (list, roles, remove) + Invites (create w/ role, copy URL, revoke) sections; rename stays; create-project flow asks for a human-readable name (slug auto).
 - **Contracts**: project/member/invite schemas + updated key schemas in api.ts; CONTRACTS_VERSION bump. REST routes move to `/api/projects/...` with `/api/vaults` kept as deprecated aliases until the UI/e2e migrate (delete aliases in the same wave if all callers are updated — preferred).
 
+### Passwordless auth (magic link) + email (Wave A)
+
+Auth becomes **magic-link only — passwordless**. Email delivery via Cloudflare's `send_email` Worker binding (MailChannels transport).
+
+- **Better Auth**: enable the `magicLink` plugin; REMOVE email+password (no credential provider). Sign-in = enter email → receive a one-time link → click → session. Sign-up = same flow (first magic-link for an unknown email creates the user). Keep GitHub OAuth conditional as-is.
+- **The claim/invite flows collapse into magic links**: agent `signup` still provisions user+vault+API key and returns a `loginUrl` (a magic link that signs the human straight in) instead of a set-password claim page. The `account_claims`/password (`password.ts`, PBKDF2) machinery is REMOVED; project invites (Wave P) likewise become magic-link joins. `/claim/[token]` route retired (or redirects to magic-link sign-in).
+- **Email**: `Mailer` interface (`sendMagicLink({to, url})`, `sendInvite(...)`) with two implementations: `MailChannelsMailer` (uses the `SEND_EMAIL` binding — `wrangler.jsonc` `send_email: [{ name: "SEND_EMAIL" }]`, `nodejs_compat`; from `no-reply@brownmatter.ai`, DKIM-signed) and a `DevMailer` (logs the URL to stderr — used in `wrangler dev`/tests where no binding/DKIM exists). Select by binding presence. HTML + text templates, Brownmatter-branded, one clear button. Never log the token in prod; DevMailer logging is dev-only.
+- **Security hardenings folded in** (from the audit):
+  - **Rate limiting** (was HIGH): magic-link REQUEST endpoint gets a D1-backed per-IP + per-email limiter (e.g. 5/hour/email, 20/hour/IP) mirroring the `signup_events` pattern — survives per-request Worker instances (Better Auth's in-memory limiter does not). Prevents mail-bombing an address and enumeration.
+  - **Fail-closed secret** (was MEDIUM): `createAuth` THROWS if `BETTER_AUTH_SECRET` is absent when origin is production; dev fallback only under `import.meta.env.DEV`.
+- **Magic-link tokens**: single-use, short TTL (~15 min), hashed at rest — Better Auth plugin defaults, verified. Delivered only via the Mailer.
+- **Deploy-day (user)**: create the MailChannels account, add the DKIM TXT + domain-lockdown records for brownmatter.ai so `no-reply@brownmatter.ai` sends. Until then DevMailer/console is the fallback (documented). Also delete the stale `brain.brownmatter.ai` DNS record (currently 530).
+- Contracts/UI: signup output `claimUrl`→`loginUrl` (CONTRACTS_VERSION bump); login/signup pages become one email-entry form + "check your inbox" state; settings/docs mention passwordless. E2E: request-link → DevMailer captures URL → follow it → session; rate-limit boundary; no password paths remain.
+
 ### Brand model
 
 - **Brownmatter** = the company / parent brand. The marketing site at `brownmatter.ai` presents Brownmatter.
