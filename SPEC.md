@@ -29,7 +29,7 @@ A vault is a directory:
 
 ```
 my-vault/
-  brainz.config.json      # { "name": "...", "embedding": { "provider": "local" | "openai" | "none" } }
+  brainz.config.json      # { "name": "...", "embedding": { "provider": "cloudflare" | "local" | "none" } }
   concepts/               # all *.md notes, may be nested in subfolders
   .brainz/                # derived data, gitignored: index.db (SQLite)
 ```
@@ -120,7 +120,7 @@ export class Vault {
 
 - SQLite via `better-sqlite3`; tables `concepts`, `edges`, FTS5 table `concepts_fts(title, body, tags)`, `embeddings(id, vector BLOB /* float32 */)`. Content hash per file to skip unchanged notes on reindex.
 - **Keyword**: FTS5 bm25. **Semantic**: cosine over embeddings, computed in JS (fine ≤ ~10k nodes). **Hybrid**: reciprocal-rank-fusion of the two lists.
-- Embeddings pluggable: `local` (default; `@xenova/transformers`, `Xenova/all-MiniLM-L6-v2`, lazy-loaded) | `openai` (`text-embedding-3-small`, `OPENAI_API_KEY`) | `none`. If the provider fails (offline, no key), **degrade gracefully to keyword-only** — never crash.
+- Embeddings pluggable: `cloudflare` (default; Workers AI REST API `POST /accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/baai/bge-base-en-v1.5`, auth `Bearer CLOUDFLARE_API_TOKEN`, 768-dim — the SAME model Brainz Cloud uses, so vectors are portable between local vaults and brain.brownmatter.ai; batch texts per request where the API allows) | `local` (`@xenova/transformers`, `Xenova/all-MiniLM-L6-v2`, lazy-loaded, fully offline) | `none`. If the configured provider fails (offline, missing `CLOUDFLARE_ACCOUNT_ID`/`CLOUDFLARE_API_TOKEN`, absent optional package), **degrade gracefully to keyword-only** — never crash. `embeddingStatus` reflects it. (History: an `openai` provider shipped in v1 and was removed in favor of `cloudflare` — a vault config still saying `openai` should be treated as `cloudflare`-with-warning or `none`, not a crash.)
 - `assembleContext`: seed nodes (search hits or ids) → expand graph to `depth` → rank (seed score, then distance) → concatenate as `## <title> (<id>)` sections until `tokenBudget`; set `truncated` if cut.
 
 ## `@brainz/mcp-server` — MCP tools (stdio, `@modelcontextprotocol/sdk`)
