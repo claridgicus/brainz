@@ -26,7 +26,7 @@
     {
       "binding": "DB",
       "database_name": "brainz",
-      "database_id": "<REPLACE-WITH-YOUR-D1-DATABASE-ID>",
+      "database_id": "c4a7ad9d-89c5-41b8-a7f9-a818a0e5324e",
       "migrations_dir": "drizzle"
     }
   ],
