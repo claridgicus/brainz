@@ -11,8 +11,8 @@
  * The token is only ever compared by SHA-256 hash and never logged.
  */
 import { fail, redirect } from "@sveltejs/kit";
-import { eq } from "drizzle-orm";
-import { claimState, hashClaimToken, isClaimTokenFormat } from "$lib/server/claims";
+import { and, eq, isNull } from "drizzle-orm";
+import { claimState, consumeClaim, hashClaimToken, isClaimTokenFormat } from "$lib/server/claims";
 import { createDb, schema } from "$lib/server/db";
 import { hashPassword } from "$lib/server/password";
 import type { Actions, PageServerLoad } from "./$types";
@@ -82,23 +82,39 @@ export const actions: Actions = {
     if (existing.length > 0) return fail(409, { error: "This account has already been claimed." });
 
     const now = new Date();
-    // Credential account row exactly as Better Auth's sign-up creates it:
-    // providerId "credential", accountId = user id, password = PBKDF2 hash.
-    await db.batch([
-      db.insert(schema.account).values({
-        id: crypto.randomUUID(),
-        userId: row.user.id,
-        accountId: row.user.id,
-        providerId: "credential",
-        password: await hashPassword(password),
-        createdAt: now,
-        updatedAt: now,
-      }),
-      db
-        .update(schema.accountClaim)
-        .set({ claimedAt: now })
-        .where(eq(schema.accountClaim.id, row.claim.id)),
-    ]);
+    // Win the claim atomically BEFORE writing anything: the conditional UPDATE
+    // only matches while claimed_at IS NULL, so of any number of concurrent
+    // submissions of the same valid token exactly one consumes it. The
+    // check-then-act pre-checks above can both pass under a race — this is what
+    // actually enforces single use. 0 rows affected ⇒ someone else already
+    // claimed it ⇒ same "already used" answer the claimed state returns.
+    const won = await consumeClaim(
+      (id, claimedAt) =>
+        db
+          .update(schema.accountClaim)
+          .set({ claimedAt })
+          .where(and(eq(schema.accountClaim.id, id), isNull(schema.accountClaim.claimedAt)))
+          .returning({ id: schema.accountClaim.id }),
+      row.claim.id,
+      now,
+    );
+    if (!won) return fail(410, { error: "This claim link has already been used." });
+
+    // We own the claim now; create the credential account row exactly as Better
+    // Auth's sign-up does: providerId "credential", accountId = user id,
+    // password = PBKDF2 hash. The UNIQUE(user_id, provider_id) index is a
+    // second line of defence against a duplicate credential row. If this insert
+    // fails the claim is already marked used — a rare state the human recovers
+    // from by signing in / password reset, never a security hole.
+    await db.insert(schema.account).values({
+      id: crypto.randomUUID(),
+      userId: row.user.id,
+      accountId: row.user.id,
+      providerId: "credential",
+      password: await hashPassword(password),
+      createdAt: now,
+      updatedAt: now,
+    });
 
     // Sign the human in via the Better Auth API (sveltekitCookies sets the
     // session cookie on this event). If it somehow fails, the credential is

@@ -603,6 +603,40 @@ async function main() {
       reusedPage.status === 200 && reusedHtml.includes("already been used"),
     );
 
+    // A SECOND set-password POST with the same token must NOT redeem again:
+    // the conditional atomic consume already marked claimed_at, so this attempt
+    // sees 0 rows affected and returns the used-claim error — never a 303 to
+    // /dashboard and never a second credential row (guards the redemption race).
+    const reusedPost = await fetch(`${BASE}${claimPath}`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        origin: BASE,
+        accept: "text/html",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ password: "second-attempt-99" }).toString(),
+    });
+    const reusedPostHtml = await reusedPost.text().catch(() => "");
+    step(
+      "re-POSTing the claimed token is rejected as already-used (no second redemption)",
+      reusedPost.status !== 303 && reusedPostHtml.includes("already been used"),
+      `status ${reusedPost.status}`,
+    );
+
+    // Sign-in still works with the FIRST password — the failed re-POST did not
+    // overwrite the credential the winning redemption created.
+    const afterReuseSignIn = await fetch(`${BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE },
+      body: JSON.stringify({ email: claimEmail, password: claimPassword }),
+    });
+    step(
+      "original claim password still signs in after the rejected re-POST",
+      afterReuseSignIn.status === 200,
+      `status ${afterReuseSignIn.status}`,
+    );
+
     // 14. duplicate email + per-IP rate limit (5/hour), still over the public server
     const dup = await pub.callTool({ name: "signup", arguments: { email: claimEmail } });
     const dupText = dup.content.find((c) => c.type === "text")?.text ?? "";

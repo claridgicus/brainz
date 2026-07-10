@@ -61,6 +61,32 @@ export function exceedsSignupRateLimit(countInWindow: number): boolean {
   return countInWindow >= SIGNUP_RATE_LIMIT;
 }
 
+/**
+ * Minimal shape of the conditional claim-consume UPDATE, so the win/lose logic
+ * is testable without a Workers/D1 runtime. Implementations run:
+ *   UPDATE account_claims SET claimed_at = ? WHERE id = ? AND claimed_at IS NULL
+ * and return the rows that were actually updated. The DB serialises concurrent
+ * updates, so at most one caller ever sees a non-empty result.
+ */
+export type ClaimConsumer = (id: string, claimedAt: Date) => Promise<{ id: string }[]>;
+
+/**
+ * Atomically redeem a claim. The conditional UPDATE behind `consume` only
+ * matches while claimed_at IS NULL, so exactly one of any number of concurrent
+ * redemptions wins (returns true); everyone else sees 0 rows affected — the
+ * claim was already consumed — and gets false. This is the single-use
+ * guarantee. The pre-checks in the caller are only early, friendly exits; this
+ * is the check that actually matters under concurrency.
+ */
+export async function consumeClaim(
+  consume: ClaimConsumer,
+  id: string,
+  claimedAt: Date,
+): Promise<boolean> {
+  const updated = await consume(id, claimedAt);
+  return updated.length > 0;
+}
+
 /** Slug with a numeric suffix when the base is already taken: my-vault, my-vault-2, … */
 export function dedupeSlug(base: string, taken: ReadonlySet<string>): string {
   if (!taken.has(base)) return base;
