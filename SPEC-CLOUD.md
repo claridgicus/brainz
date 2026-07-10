@@ -42,6 +42,17 @@ No behavior changes to `@brainz/core`'s public API. Engine has zero runtime deps
 
 Stack: Svelte 5 (runes), SvelteKit, `@sveltejs/adapter-cloudflare`, wrangler.jsonc bindings: `DB` (D1, control plane only), `VAULT_DO` (Durable Object namespace, `new_sqlite_classes` migration), `AI` (Workers AI). Drizzle ORM + drizzle-kit migrations for D1. Zod for input validation. Dark theme matching packages/web aesthetic.
 
+### Wrangler setup (explicit deliverable — TICKET: wrangler-setup)
+
+`apps/cloud/wrangler.jsonc`, complete and deploy-ready except account-specific ids:
+- `name: "brainz-cloud"`, `main` per adapter-cloudflare output, `compatibility_date` (recent), `compatibility_flags: ["nodejs_compat"]` (required: gray-matter touches Buffer/fs-stubs — verified in the engine wave)
+- Bindings: `DB` (d1_databases — `database_id: "<REPLACE>"` placeholder + comment with the `wrangler d1 create brainz` command), `VAULT_DO` (durable_objects binding to class `VaultDO` + `migrations: [{ tag: "v1", new_sqlite_classes: ["VaultDO"] }]`), `AI` (Workers AI)
+- `routes: [{ pattern: "brain.brownmatter.ai", custom_domain: true }]`
+- Assets/static config as adapter-cloudflare requires; `.dev.vars.example` (BETTER_AUTH_SECRET, BETTER_AUTH_URL=http://localhost:5173, GITHUB_CLIENT_ID/SECRET optional); `.dev.vars` gitignored
+- npm scripts: `dev` (vite dev with platformProxy), `build`, `preview` (wrangler dev on built output), `deploy` (build + wrangler deploy), `db:generate` (drizzle-kit), `db:migrate:local` / `db:migrate:remote` (wrangler d1 migrations apply)
+- README-CLOUD deploy runbook (user-side, in order): wrangler login → `wrangler d1 create brainz` → paste id → `db:migrate:remote` → `wrangler secret put BETTER_AUTH_SECRET` (+ BETTER_AUTH_URL) → DNS for brownmatter.ai on the Cloudflare account → `npm run deploy` → verify `/mcp` with a bearer key
+- Acceptance: `wrangler dev` boots locally with local D1 + DO; `wrangler deploy --dry-run` (or `wrangler versions upload --dry-run` equivalent) passes config validation without an account.
+
 ### Storage architecture: one Durable Object per vault
 
 **Vault content lives in a per-vault Durable Object (`VaultDO`) using DO SQLite storage (`ctx.storage.sql`).** D1 is only the shared control plane. Isolation comes from the DO boundary, not WHERE clauses.
@@ -66,6 +77,7 @@ Concept writes parse the submitted markdown body with engine's `parseNote` (wiki
 
 - better-auth with drizzle adapter (sqlite/D1), email+password enabled; GitHub OAuth enabled only when `GITHUB_CLIENT_ID/SECRET` present.
 - SvelteKit integration per Better Auth docs: mount handler in `src/hooks.server.ts`, expose session in `locals`. Client: better-auth/svelte client for the UI.
+- **Production domain: `https://brain.brownmatter.ai`** — the user-facing dashboard AND the MCP/API host. `BETTER_AUTH_URL=https://brain.brownmatter.ai` in production (localhost in `.dev.vars`), Better Auth `trustedOrigins` includes it, and wrangler.jsonc declares the custom domain route (`routes: [{ pattern: "brain.brownmatter.ai", custom_domain: true }]`). MCP setup snippets/docs use `https://brain.brownmatter.ai/mcp`.
 - Secrets via wrangler: `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`. Provide `.dev.vars.example`.
 - API keys: either Better Auth's apiKey plugin or the custom `api_key` table above — agent's call, but requirements hold: per-vault scope, hashed at rest, shown once, revocable from UI, `last_used_at` updated on use.
 
