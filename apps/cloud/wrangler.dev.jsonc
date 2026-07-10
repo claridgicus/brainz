@@ -1,0 +1,34 @@
+// Dev-only config for `vite dev`'s platformProxy (see svelte.config.js).
+// Identical to wrangler.jsonc MINUS the Workers AI binding: AI is a
+// remote-only binding, and getPlatformProxy would demand a Cloudflare login
+// just to boot vite. Without env.AI the vault degrades to keyword-only
+// search (the same graceful path as an AI outage). Use `npm run preview`
+// (wrangler dev, logged in) to exercise real embeddings locally.
+// NOT used by `wrangler dev` / `wrangler deploy` — they read wrangler.jsonc.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "brainz-cloud",
+  "main": ".svelte-kit/cloudflare/_worker.js",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": ".svelte-kit/cloudflare"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "brainz",
+      "database_id": "<REPLACE-WITH-YOUR-D1-DATABASE-ID>",
+      "migrations_dir": "drizzle"
+    }
+  ],
+  // VAULT_DO lives in the dev-only sidecar Worker (wrangler.do.jsonc) —
+  // getPlatformProxy can't host same-worker DOs but can reach one hosted by
+  // a parallel `wrangler dev` session via the dev registry (fetch stubs).
+  "durable_objects": {
+    "bindings": [
+      { "name": "VAULT_DO", "class_name": "VaultDO", "script_name": "brainz-cloud-do" }
+    ]
+  }
+}

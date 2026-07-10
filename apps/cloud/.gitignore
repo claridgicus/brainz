@@ -1,0 +1,8 @@
+node_modules/
+.svelte-kit/
+.wrangler/
+.dev.vars
+build/
+dist/
+vite.config.ts.timestamp-*
+worker-configuration.d.ts

@@ -1,0 +1,13 @@
+// Dev-only sidecar Worker hosting VaultDO for `vite dev` (see src/do-worker.ts
+// and scripts/dev.mjs). Never deployed.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "brainz-cloud-do",
+  "main": "src/do-worker.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "VAULT_DO", "class_name": "VaultDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VaultDO"] }]
+}

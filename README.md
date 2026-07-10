@@ -134,6 +134,8 @@ packages/
   mcp-server/  # @brainz/mcp-server — MCP stdio server over core (binary: brainz-mcp)
   cli/         # @brainz/cli        — the `brainz` command
   web/         # @brainz/web        — local graph view: d3-force frontend + JSON API (/api/graph, /api/concept/:id, /api/search, /api/stats)
+apps/
+  cloud/       # @brainz/cloud      — Brainz Cloud: SvelteKit on one Cloudflare Worker (dashboard + REST API + remote MCP at https://brain.brownmatter.ai; one Durable Object per vault, D1 control plane)
 examples/
   demo-vault/  # seeded example vault (Acme CRM)
 ```

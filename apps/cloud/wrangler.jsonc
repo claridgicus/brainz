@@ -1,0 +1,41 @@
+// Brainz Cloud — ONE Cloudflare Worker: SvelteKit UI + REST API + remote MCP.
+// Deploy-ready except the account-specific D1 database_id (see below).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "brainz-cloud",
+  // adapter-cloudflare emits the compiled SvelteKit worker HERE (it writes to
+  // whatever `main` points at). The npm `build` script then appends the
+  // VaultDO Durable Object export to it (scripts/patch-worker.mjs) because
+  // the adapter cannot add named exports itself and DO classes must be
+  // exported from the Worker entrypoint. `npm run build` must run before
+  // wrangler dev/deploy (the `preview` and `deploy` scripts do this).
+  "main": ".svelte-kit/cloudflare/_worker.js",
+  "compatibility_date": "2026-06-01",
+  // nodejs_compat is required: @brainz/engine's gray-matter touches Buffer.
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": ".svelte-kit/cloudflare"
+  },
+  // Production dashboard + API + MCP host.
+  "routes": [{ "pattern": "brain.brownmatter.ai", "custom_domain": true }],
+  // D1 is the shared control plane (auth, vault registry, API keys).
+  // Create it with: wrangler d1 create brainz
+  // …then paste the returned database_id here.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "brainz",
+      "database_id": "<REPLACE-WITH-YOUR-D1-DATABASE-ID>",
+      "migrations_dir": "drizzle"
+    }
+  ],
+  // One Durable Object per vault; vault content lives in DO SQLite storage.
+  "durable_objects": {
+    "bindings": [{ "name": "VAULT_DO", "class_name": "VaultDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VaultDO"] }],
+  // Workers AI: embeddings via @cf/baai/bge-base-en-v1.5 (768-dim).
+  "ai": { "binding": "AI" },
+  "observability": { "enabled": true }
+}

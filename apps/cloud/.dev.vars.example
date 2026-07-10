@@ -1,0 +1,11 @@
+# Copy to .dev.vars (gitignored) for local development.
+# Production values are set with `wrangler secret put <NAME>`.
+BETTER_AUTH_SECRET=dev-insecure-secret-change-me
+# vite dev serves on 5173; `npm run preview` (wrangler dev) serves on 8787.
+# BETTER_AUTH_URL is optional locally — Better Auth infers the base URL from
+# the request when unset, and both localhost origins are trusted.
+BETTER_AUTH_URL=http://localhost:5173
+
+# Optional: GitHub OAuth is enabled only when both values are present.
+# GITHUB_CLIENT_ID=
+# GITHUB_CLIENT_SECRET=
