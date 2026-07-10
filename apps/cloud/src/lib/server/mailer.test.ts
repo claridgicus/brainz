@@ -39,6 +39,36 @@ describe("MailChannelsMailer", () => {
   });
 });
 
+describe("MailChannelsMailer graceful degradation", () => {
+  it("does NOT throw when the binding send() rejects — it logs instead", async () => {
+    // Simulates the production failure: Cloudflare's Email Sending rejects an
+    // unverified recipient, so binding.send() throws. sendMagicLink must
+    // resolve (so the auth request would not 500) and log the real error.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const boom = Object.assign(new Error("E_RECIPIENT_SUPPRESSED"), {
+      cause: new Error("recipient not verified"),
+    });
+    const send = vi.fn().mockRejectedValue(boom);
+    const binding = { send } as unknown as SendEmail;
+
+    await expect(
+      new MailChannelsMailer(binding).sendMagicLink({
+        to: "unverified@example.com",
+        url: "https://brainz.brownmatter.ai/api/auth/magic-link/verify?token=abc",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalled();
+    const logged = spy.mock.calls.map((c) => c.join(" ")).join(" ");
+    expect(logged).toContain("E_RECIPIENT_SUPPRESSED");
+    expect(logged).toContain("recipient not verified");
+    // The token/URL must never be logged on the failure path.
+    expect(logged).not.toContain("token=abc");
+    spy.mockRestore();
+  });
+});
+
 describe("DevMailer", () => {
   it("captures the last link and logs to stderr instead of sending", async () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});

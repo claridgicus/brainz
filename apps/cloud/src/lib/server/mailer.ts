@@ -126,13 +126,32 @@ export class MailChannelsMailer implements Mailer {
 
   private async send(to: string, tpl: Template): Promise<void> {
     // Builder overload of SendEmail.send (modern workerd) — no raw MIME needed.
-    await this.binding.send({
-      from: { name: FROM_NAME, email: FROM_ADDRESS },
-      to,
-      subject: tpl.subject,
-      text: tpl.text,
-      html: tpl.html,
-    });
+    // The builder object shape {from,to,subject,text,html} is Cloudflare's
+    // recommended EmailMessageBuilder format for the native Email Sending path.
+    //
+    // GRACEFUL DEGRADATION (intentional): the real `send_email` binding THROWS
+    // when it cannot deliver — most commonly because Cloudflare's Email Sending
+    // only delivers to VERIFIED destination addresses unless the sending domain
+    // is onboarded for Email Sending on the Workers Paid plan (see the deploy
+    // runbook / mailer docblock). Letting that throw propagate would 500 the
+    // sign-in request even though Better Auth already minted a valid token.
+    // Instead we swallow the error and log it loudly so it shows in
+    // `wrangler tail`. The magic-link token still exists; only DELIVERY failed.
+    // Losing the email silently is acceptable FOR NOW (better than a 500) and
+    // must be removed once the Cloudflare Email tier covers arbitrary recipients.
+    try {
+      await this.binding.send({
+        from: { name: FROM_NAME, email: FROM_ADDRESS },
+        to,
+        subject: tpl.subject,
+        text: tpl.text,
+        html: tpl.html,
+      });
+    } catch (err) {
+      logSendFailure(to, err);
+      // Deliberately not rethrown: a delivery failure must not fail the
+      // (already-successful) auth request or leak that send failed to the user.
+    }
   }
 
   async sendMagicLink({ to, url }: { to: string; url: string }): Promise<void> {
@@ -142,6 +161,17 @@ export class MailChannelsMailer implements Mailer {
   async sendInvite({ to, url, projectName }: { to: string; url: string; projectName: string }): Promise<void> {
     await this.send(to, inviteTemplate(url, projectName));
   }
+}
+
+/**
+ * Log an email-send failure loudly (message + any nested cause) so the real
+ * Cloudflare error is visible in `wrangler tail`. Never includes the token/URL.
+ */
+function logSendFailure(to: string, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  const cause = err instanceof Error && err.cause ? ` cause=${String((err.cause as Error)?.message ?? err.cause)}` : "";
+  // eslint-disable-next-line no-console
+  console.error(`[mailer] email send FAILED to ${to}: ${message}${cause}`);
 }
 
 /**

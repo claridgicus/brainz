@@ -95,7 +95,24 @@ export function createAuth(env: CloudEnv, mailerOverride?: Mailer) {
         // Hash tokens at rest — the plaintext exists only inside the emailed URL.
         storeToken: "hashed",
         sendMagicLink: async ({ email, url }) => {
-          await mailer.sendMagicLink({ to: email, url });
+          // GRACEFUL DEGRADATION (intentional): the token is already minted by
+          // Better Auth before this callback runs; a delivery failure must NOT
+          // 500 the sign-in request. The production mailer already swallows +
+          // logs its own send errors, but we defend here too so ANY unexpected
+          // throw (future mailer, template error) degrades to "logged" rather
+          // than a 500 that leaks that send failed. The user still sees the
+          // generic "check your inbox" response. Remove once the Cloudflare
+          // Email tier reliably delivers to arbitrary recipients.
+          try {
+            await mailer.sendMagicLink({ to: email, url });
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.error(
+              `[auth] sendMagicLink delivery failed (sign-in still succeeds): ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
         },
       }),
       // MUST be last (Better Auth docs).
