@@ -140,6 +140,9 @@ examples/
   demo-vault/  # seeded example vault (Acme CRM)
 ```
 
+Brainz Cloud's dashboard (sign-up, vaults, graph workspace, API keys) ships at
+https://brain.brownmatter.ai — free hosted vaults over the same engine.
+
 ## Embeddings
 
 Configured per vault in `brainz.config.json` → `embedding.provider`:

@@ -124,9 +124,12 @@ Backend-owned (this wave): `wrangler.jsonc` (+`wrangler.dev.jsonc`,
 `src/hooks.server.ts`, `src/routes/api/**`, `src/routes/mcp/**`,
 `src/app.d.ts`, `src/routes/+layout.server.ts`, `scripts/**`, `package.json`.
 
-UI-owned (next wave): `src/routes/(marketing)/**`, `src/routes/(app)/**`,
-`/login`, `/signup`, `src/lib/components/**`, `src/lib/api.ts`,
-`src/app.css`. All UI deps (d3-force, marked, better-auth's svelte client)
-are pre-installed. The root `+layout.server.ts` already exposes
-`data.user` / `data.session`; create the auth client with
-`createAuthClient()` from `better-auth/svelte`.
+UI-owned: the root `+page.svelte` (splash), `/login`, `/signup`,
+`src/routes/(app)/**` (session-guarded: `/dashboard`, `/v/[slug]` graph
+workspace, `/v/[slug]/settings`), `src/lib/components/**`, `src/lib/api.ts`
+(typed REST client — every response parsed with `@brainz/contracts`),
+`src/lib/{markdown,graph-data,nav,auth-client}.ts`, `src/app.css`, and
+`scripts/e2e-ui.mjs` (`node scripts/e2e-ui.mjs`: boots wrangler dev and
+asserts the SSR'd auth/dashboard/workspace/settings journey). The root
+`+layout.server.ts` exposes `data.user` / `data.session`; the auth client is
+`createAuthClient()` from `better-auth/svelte` (`src/lib/auth-client.ts`).

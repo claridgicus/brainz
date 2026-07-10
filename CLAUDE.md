@@ -22,6 +22,7 @@ npm workspaces monorepo (Node >= 20, TypeScript ~5.5, ESM throughout; workspaces
 - `npm run build` = `vite build` + `scripts/patch-worker.mjs`, which appends the `VaultDO` export to the adapter-generated `.svelte-kit/cloudflare/_worker.js` (adapter-cloudflare can't export DO classes). Never edit `_worker.js` by hand; never point wrangler `main` at a source file (the adapter overwrites whatever `main` names).
 - Wire shapes come from `@brainz/contracts` (`MCP_TOOLS`, `api.ts`) — REST/MCP responses must safeParse against them; don't invent shapes.
 - Backend/UI file ownership is listed in SPEC-CLOUD.md ("File ownership") and apps/cloud/README.md.
+- UI layout: splash `/` + `/login`/`/signup` (Better Auth svelte client), session-guarded `(app)` group (`/dashboard`, `/v/[slug]` graph workspace, `/v/[slug]/settings`); slugs map to vault ids via `GET /api/vaults` in `(app)/v/[slug]/+layout.server.ts`; the typed REST client is `src/lib/api.ts` (parses every response with `@brainz/contracts`); UI journey check: `node scripts/e2e-ui.mjs`.
 
 ## Commands
 
