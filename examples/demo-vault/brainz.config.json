@@ -1,0 +1,6 @@
+{
+  "name": "acme-crm",
+  "embedding": {
+    "provider": "none"
+  }
+}

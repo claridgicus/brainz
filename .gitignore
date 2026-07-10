@@ -1,0 +1,4 @@
+node_modules/
+dist/
+.brainz/
+*.tsbuildinfo
