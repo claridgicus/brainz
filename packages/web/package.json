@@ -1,0 +1,34 @@
+{
+  "name": "@brainz/web",
+  "version": "0.1.0",
+  "description": "Brainz graph-view web app: local server + force-directed graph UI over a vault.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/server.js",
+  "bin": {
+    "brainz-web": "./dist/server.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b && node scripts/build-frontend.mjs",
+    "test": "npm run build && vitest run",
+    "typecheck": "tsc -b && tsc -p tsconfig.frontend.json"
+  },
+  "dependencies": {
+    "@brainz/core": "*",
+    "marked": "^13.0.3"
+  },
+  "devDependencies": {
+    "@types/d3-force": "^3.0.10",
+    "@types/node": "^20.17.0",
+    "d3-force": "^3.0.0",
+    "esbuild": "^0.23.1",
+    "typescript": "~5.5.4",
+    "vitest": "^2.1.9"
+  }
+}

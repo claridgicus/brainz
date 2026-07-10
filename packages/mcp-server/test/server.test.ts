@@ -1,0 +1,301 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { cp, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { Vault } from "@brainz/core";
+import { createServer, resolveVaultDir } from "../src/server.js";
+
+const DEMO_VAULT = fileURLToPath(
+  new URL("../../../examples/demo-vault", import.meta.url),
+);
+
+type TextContent = { type: "text"; text: string };
+
+interface ToolResult {
+  content: TextContent[];
+  isError?: boolean;
+}
+
+let tmpVault: string;
+let vault: Vault;
+let client: Client;
+
+async function callTool(name: string, args: Record<string, unknown> = {}): Promise<ToolResult> {
+  return (await client.callTool({ name, arguments: args })) as unknown as ToolResult;
+}
+
+async function callJson(name: string, args: Record<string, unknown> = {}): Promise<any> {
+  const result = await callTool(name, args);
+  expect(result.isError ?? false).toBe(false);
+  return JSON.parse(result.content[0].text);
+}
+
+beforeAll(async () => {
+  // Work on a throwaway copy so the example vault stays pristine.
+  tmpVault = await mkdtemp(path.join(tmpdir(), "brainz-mcp-test-"));
+  await cp(DEMO_VAULT, tmpVault, { recursive: true });
+  await rm(path.join(tmpVault, ".brainz"), { recursive: true, force: true });
+
+  vault = await Vault.open(tmpVault);
+  const server = createServer(vault);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  client = new Client({ name: "test-client", version: "0.0.0" });
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+});
+
+afterAll(async () => {
+  await client?.close();
+  vault?.close();
+  await rm(tmpVault, { recursive: true, force: true });
+});
+
+describe("tool registration", () => {
+  it("exposes the eight spec'd tools", async () => {
+    const { tools } = await client.listTools();
+    const names = tools.map((t) => t.name).sort();
+    expect(names).toEqual([
+      "get_concept",
+      "get_context",
+      "get_related",
+      "link_concepts",
+      "list_concepts",
+      "search_concepts",
+      "upsert_concept",
+      "vault_stats",
+    ]);
+    for (const tool of tools) {
+      expect(tool.description ?? "").not.toBe("");
+    }
+  });
+});
+
+describe("search_concepts", () => {
+  it("returns ranked hits for a real query", async () => {
+    const data = await callJson("search_concepts", { query: "lead scoring" });
+    expect(data.hits.length).toBeGreaterThan(0);
+    const hit = data.hits[0];
+    expect(hit).toHaveProperty("id");
+    expect(hit).toHaveProperty("title");
+    expect(hit).toHaveProperty("type");
+    expect(hit).toHaveProperty("score");
+    expect(hit).toHaveProperty("snippet");
+    expect(data.hits.map((h: any) => h.id)).toContain("lead-scoring");
+  });
+
+  it("returns an empty list (not an error) for garbage", async () => {
+    const data = await callJson("search_concepts", { query: "zzz )))(((" });
+    expect(data.hits).toEqual([]);
+  });
+
+  it("respects type filter and limit", async () => {
+    const data = await callJson("search_concepts", {
+      query: "postgres",
+      type: "decision",
+      limit: 1,
+    });
+    expect(data.hits.length).toBeLessThanOrEqual(1);
+    for (const hit of data.hits) expect(hit.type).toBe("decision");
+  });
+});
+
+describe("get_concept", () => {
+  it("returns body, meta, and direct neighbors for a known id", async () => {
+    const data = await callJson("get_concept", { id: "lead-scoring" });
+    expect(data.id).toBe("lead-scoring");
+    expect(data.title).toBe("Lead Scoring");
+    expect(data.type).toBe("feature");
+    expect(data.body).toContain("score");
+    expect(Array.isArray(data.neighbors)).toBe(true);
+    const neighborIds = data.neighbors.map((n: any) => n.id);
+    expect(neighborIds).toContain("contact-model");
+    expect(neighborIds).toContain("email-campaigns");
+    for (const n of data.neighbors) {
+      expect(typeof n.relation).toBe("string");
+      expect(["in", "out"]).toContain(n.direction);
+    }
+  });
+
+  it("returns isError for an unknown id", async () => {
+    const result = await callTool("get_concept", { id: "does-not-exist" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("does-not-exist");
+  });
+});
+
+describe("get_related", () => {
+  it("traverses to the requested depth with via paths", async () => {
+    const data = await callJson("get_related", { id: "auth-system", depth: 2 });
+    expect(data.related.length).toBeGreaterThan(0);
+    for (const node of data.related) {
+      expect(node.distance).toBeGreaterThanOrEqual(1);
+      expect(node.distance).toBeLessThanOrEqual(2);
+      expect(node.via.length).toBeGreaterThan(0);
+    }
+    expect(data.related.some((n: any) => n.distance === 2)).toBe(true);
+  });
+
+  it("filters by relation names", async () => {
+    const data = await callJson("get_related", {
+      id: "lead-scoring",
+      relations: ["depends_on"],
+    });
+    for (const node of data.related) {
+      for (const edge of node.via) expect(edge.relation).toBe("depends_on");
+    }
+    expect(data.related.map((n: any) => n.id)).toContain("contact-model");
+  });
+
+  it("returns isError for an unknown id", async () => {
+    const result = await callTool("get_related", { id: "nope-nope" });
+    expect(result.isError).toBe(true);
+  });
+});
+
+describe("get_context", () => {
+  function parseBundle(result: ToolResult) {
+    expect(result.isError ?? false).toBe(false);
+    expect(result.content.length).toBe(2);
+    return {
+      markdown: result.content[0].text,
+      footer: JSON.parse(result.content[1].text) as {
+        included: string[];
+        truncated: boolean;
+        approxTokens: number;
+      },
+    };
+  }
+
+  it("assembles a bundle from a query", async () => {
+    const result = await callTool("get_context", { query: "authentication sessions" });
+    const { markdown, footer } = parseBundle(result);
+    expect(markdown).toContain("## ");
+    expect(footer.included.length).toBeGreaterThan(0);
+    expect(footer.approxTokens).toBeGreaterThan(0);
+    expect(markdown).toContain("(auth-system)");
+  });
+
+  it("assembles a bundle from explicit ids", async () => {
+    const result = await callTool("get_context", { ids: ["mrr"], depth: 0 });
+    const { markdown, footer } = parseBundle(result);
+    expect(footer.included).toEqual(["mrr"]);
+    expect(markdown).toContain("(mrr)");
+  });
+
+  it("respects the token budget", async () => {
+    const result = await callTool("get_context", {
+      query: "leads contacts campaigns",
+      depth: 2,
+      tokenBudget: 300,
+    });
+    const { footer } = parseBundle(result);
+    expect(footer.approxTokens).toBeLessThanOrEqual(300);
+    expect(footer.truncated).toBe(true);
+  });
+
+  it("errors when neither query nor ids is given", async () => {
+    const result = await callTool("get_context", {});
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/query.*ids|ids.*query/);
+  });
+});
+
+describe("upsert_concept and link_concepts", () => {
+  it("round-trips an upserted concept through get_concept", async () => {
+    const saved = await callJson("upsert_concept", {
+      title: "Webhook Retries",
+      body: "Retries use exponential backoff via the [[outbox-pattern]].",
+      type: "pattern",
+      product: "acme-crm",
+      tags: ["reliability"],
+    });
+    expect(saved.id).toBe("webhook-retries");
+    expect(saved.type).toBe("pattern");
+
+    const fetched = await callJson("get_concept", { id: "webhook-retries" });
+    expect(fetched.title).toBe("Webhook Retries");
+    expect(fetched.body).toContain("exponential backoff");
+    // The wiki-link created an edge.
+    expect(fetched.neighbors.map((n: any) => n.id)).toContain("outbox-pattern");
+  });
+
+  it("errors on an empty title", async () => {
+    const result = await callTool("upsert_concept", { title: "   ", body: "x" });
+    expect(result.isError).toBe(true);
+  });
+
+  it("links two concepts and the edge shows up in get_related", async () => {
+    const data = await callJson("link_concepts", {
+      from: "webhook-retries",
+      to: "rate-limiting",
+      relation: "depends_on",
+    });
+    expect(data.ok).toBe(true);
+
+    const related = await callJson("get_related", {
+      id: "webhook-retries",
+      relations: ["depends_on"],
+    });
+    expect(related.related.map((n: any) => n.id)).toContain("rate-limiting");
+  });
+
+  it("errors when linking from an unknown concept", async () => {
+    const result = await callTool("link_concepts", { from: "ghost", to: "mrr" });
+    expect(result.isError).toBe(true);
+  });
+});
+
+describe("list_concepts and vault_stats", () => {
+  it("lists metas with filters", async () => {
+    const all = await callJson("list_concepts", {});
+    expect(all.count).toBeGreaterThanOrEqual(13);
+    const decisions = await callJson("list_concepts", { type: "decision" });
+    expect(decisions.count).toBeGreaterThan(0);
+    for (const c of decisions.concepts) expect(c.type).toBe("decision");
+  });
+
+  it("reports vault stats with counts and embedding status", async () => {
+    const stats = await callJson("vault_stats", {});
+    expect(stats.concepts).toBeGreaterThanOrEqual(13);
+    expect(stats.edges).toBeGreaterThan(0);
+    expect(stats.products).toContain("acme-crm");
+    expect(stats.byType.decision).toBeGreaterThan(0);
+    // demo vault config: provider "none"
+    expect(stats.embeddings).toBe("unavailable");
+  });
+});
+
+describe("resources", () => {
+  it("lists concepts as resources and reads one", async () => {
+    const { resources } = await client.listResources();
+    expect(resources.length).toBeGreaterThanOrEqual(13);
+    const mrr = resources.find((r) => r.uri === "brainz://concept/mrr");
+    expect(mrr).toBeDefined();
+
+    const read = await client.readResource({ uri: "brainz://concept/mrr" });
+    const text = (read.contents[0] as { text: string }).text;
+    expect(text).toContain("MRR");
+  });
+});
+
+describe("resolveVaultDir", () => {
+  it("prefers --vault over env and cwd", () => {
+    expect(resolveVaultDir(["--vault", "/a/b"], { BRAINZ_VAULT: "/x" })).toBe(
+      path.resolve("/a/b"),
+    );
+    expect(resolveVaultDir(["--vault=/a/c"], { BRAINZ_VAULT: "/x" })).toBe(
+      path.resolve("/a/c"),
+    );
+  });
+
+  it("falls back to BRAINZ_VAULT, then cwd", () => {
+    expect(resolveVaultDir([], { BRAINZ_VAULT: "/from-env" })).toBe(path.resolve("/from-env"));
+    expect(resolveVaultDir([], {})).toBe(process.cwd());
+  });
+
+  it("throws when --vault has no value", () => {
+    expect(() => resolveVaultDir(["--vault"], {})).toThrow();
+  });
+});

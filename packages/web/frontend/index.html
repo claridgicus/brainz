@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Brainz — Graph</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='5' cy='6' r='3' fill='%234f9cf9'/%3E%3Ccircle cx='11' cy='11' r='2.4' fill='%2334d399'/%3E%3Cpath d='M5 6L11 11' stroke='%236b7280'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <header id="topbar">
+    <div id="brand">
+      <span id="brand-mark">◉</span>
+      <span id="vault-name">brainz</span>
+      <span id="vault-stats"></span>
+    </div>
+    <div id="search-wrap">
+      <input id="search" type="text" placeholder="Search concepts…  ( / )" autocomplete="off" spellcheck="false" />
+      <div id="search-results" hidden></div>
+    </div>
+    <div id="filters" title="Filter by concept type"></div>
+    <button id="focus-chip" hidden></button>
+  </header>
+  <main>
+    <svg id="graph" role="img" aria-label="Concept graph"></svg>
+    <aside id="panel" hidden>
+      <div id="panel-head">
+        <h2 id="panel-title"></h2>
+        <div id="panel-actions">
+          <button id="panel-focus" title="Focus graph on this node's depth-2 neighborhood">Focus</button>
+          <button id="panel-close" title="Close (Esc)">✕</button>
+        </div>
+      </div>
+      <div id="panel-badges"></div>
+      <div id="panel-body" class="markdown"></div>
+      <div id="panel-edges"></div>
+    </aside>
+    <div id="empty-hint" hidden>No nodes match the current filters.</div>
+  </main>
+  <div id="tooltip" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+{
+  "name": "@brainz/cli",
+  "version": "0.1.0",
+  "description": "brainz — command-line interface for Brainz product knowledge vaults.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "brainz": "dist/bin.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsc -b && vitest run",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@brainz/core": "*",
+    "@brainz/mcp-server": "*",
+    "@brainz/web": "*",
+    "commander": "^12.1.0",
+    "gray-matter": "^4.0.3",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "typescript": "~5.5.4",
+    "vitest": "^2.1.9"
+  }
+}
