@@ -42,7 +42,8 @@
 		padding: 0 20px;
 		height: 54px;
 		border-bottom: 1px solid var(--border);
-		background: rgb(15 18 24 / 0.9);
+		background: rgb(14 14 17 / 0.88);
+		backdrop-filter: blur(10px);
 	}
 	.home:hover {
 		text-decoration: none;

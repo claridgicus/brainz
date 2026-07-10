@@ -145,7 +145,7 @@
 					class:off={!enabledTypes.includes(t)}
 					onclick={() => toggleType(t)}
 				>
-					<span class="dot" style="background:{TYPE_COLORS[t]}"></span>{t}
+					<span class="dot" style="background:{TYPE_COLORS[t]}; color:{TYPE_COLORS[t]}"></span>{t}
 				</button>
 			{/each}
 		</div>
@@ -294,18 +294,22 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 6px;
-		font: 600 12px/1 var(--font-sans);
+		font: 500 12px/1 var(--font-sans);
 		padding: 5px 10px;
 		border-radius: 999px;
-		border: 1px solid var(--border);
+		border: 1px solid var(--border-strong);
 		background: var(--bg-overlay);
 		color: var(--text);
 		cursor: pointer;
+		transition:
+			border-color 120ms ease,
+			opacity 120ms ease;
 	}
 	.chip .dot {
 		width: 8px;
 		height: 8px;
 		border-radius: 50%;
+		box-shadow: 0 0 6px currentcolor;
 	}
 	.chip.off {
 		opacity: 0.4;
@@ -359,7 +363,8 @@
 		gap: 8px;
 		font-size: 12.5px;
 		color: var(--text-dim);
-		background: rgb(15 18 24 / 0.82);
+		background: rgb(14 14 17 / 0.82);
+		backdrop-filter: blur(8px);
 		border: 1px solid var(--border);
 		border-radius: 8px;
 		padding: 6px 12px;

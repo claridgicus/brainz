@@ -117,11 +117,16 @@
 	.vault {
 		display: block;
 		color: var(--text);
-		transition: border-color 120ms ease;
+		transition:
+			border-color 120ms ease,
+			box-shadow 120ms ease;
 	}
 	.vault:hover {
 		text-decoration: none;
 		border-color: var(--accent);
+		box-shadow:
+			var(--surface-ring),
+			var(--glow);
 	}
 	.vault h2 {
 		font-size: 16px;

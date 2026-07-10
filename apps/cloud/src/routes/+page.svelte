@@ -30,23 +30,27 @@
 		justify-content: center;
 		text-align: center;
 		padding: 24px;
+		/* quiet violet aurora behind the hero, Obsidian-style */
+		background:
+			radial-gradient(ellipse 62% 46% at 50% 38%, rgb(124 58 237 / 0.12), transparent 70%),
+			var(--bg);
 	}
 	.mark {
 		font-size: 64px;
 		line-height: 1;
-		filter: drop-shadow(0 2px 6px rgb(0 0 0 / 0.45));
-		margin-bottom: 12px;
+		filter: drop-shadow(0 0 26px rgb(124 58 237 / 0.5)) drop-shadow(0 2px 6px rgb(0 0 0 / 0.45));
+		margin-bottom: 14px;
 	}
 	h1 {
-		font-size: 42px;
-		letter-spacing: -0.02em;
-		margin-bottom: 8px;
+		font-size: 52px;
+		letter-spacing: -0.025em;
+		margin-bottom: 10px;
 	}
 	.tagline {
 		color: var(--text-dim);
-		font-size: 17px;
-		max-width: 460px;
-		margin-bottom: 26px;
+		font-size: 18px;
+		max-width: 480px;
+		margin-bottom: 28px;
 	}
 	.cta {
 		display: flex;
