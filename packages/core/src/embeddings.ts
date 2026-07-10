@@ -1,4 +1,4 @@
-export type EmbeddingProviderName = "local" | "openai" | "none";
+export type EmbeddingProviderName = "cloudflare" | "local" | "none";
 
 export interface EmbeddingConfig {
   provider: EmbeddingProviderName;
@@ -9,12 +9,19 @@ export interface Embedder {
   embed(texts: string[]): Promise<Float32Array[]>;
 }
 
+const CLOUDFLARE_MODEL = "@cf/baai/bge-base-en-v1.5";
 const LOCAL_MODEL = "Xenova/all-MiniLM-L6-v2";
-const OPENAI_MODEL = "text-embedding-3-small";
+
+/** Env vars required by the "cloudflare" provider (Workers AI REST API). */
+export const CLOUDFLARE_ENV_VARS = ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"] as const;
+
+/** Max texts sent per Workers AI request. The API accepts an array of texts;
+ * the docs publish no hard item limit, so chunk conservatively. */
+export const CLOUDFLARE_BATCH_SIZE = 100;
 
 /**
  * Create an embedder for the configured provider, or null when embeddings are
- * unavailable (provider "none", missing optional dependency, missing API key, …).
+ * unavailable (provider "none", missing optional dependency, missing credentials, …).
  * Never throws — unavailability must degrade gracefully to keyword-only search.
  */
 export async function createEmbedder(config: EmbeddingConfig): Promise<Embedder | null> {
@@ -22,8 +29,8 @@ export async function createEmbedder(config: EmbeddingConfig): Promise<Embedder 
     switch (config.provider) {
       case "none":
         return null;
-      case "openai":
-        return createOpenAiEmbedder(config.model ?? OPENAI_MODEL);
+      case "cloudflare":
+        return createCloudflareEmbedder(config.model ?? CLOUDFLARE_MODEL);
       case "local":
         return await createLocalEmbedder(config.model ?? LOCAL_MODEL);
       default:
@@ -34,25 +41,47 @@ export async function createEmbedder(config: EmbeddingConfig): Promise<Embedder 
   }
 }
 
-function createOpenAiEmbedder(model: string): Embedder | null {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return null;
+/**
+ * Cloudflare Workers AI embeddings (default: @cf/baai/bge-base-en-v1.5, 768-dim).
+ * POST https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{model}
+ * with `{ "text": string[] }`; the response is
+ * `{ result: { shape: number[], data: number[][] }, success: boolean }`.
+ * Requires CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN; missing creds → null.
+ */
+function createCloudflareEmbedder(model: string): Embedder | null {
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+  if (!accountId || !apiToken) return null;
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`;
   return {
     async embed(texts: string[]): Promise<Float32Array[]> {
-      const res = await fetch("https://api.openai.com/v1/embeddings", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({ model, input: texts }),
-      });
-      if (!res.ok) {
-        throw new Error(`OpenAI embeddings request failed: ${res.status} ${res.statusText}`);
+      const out: Float32Array[] = [];
+      for (let i = 0; i < texts.length; i += CLOUDFLARE_BATCH_SIZE) {
+        const chunk = texts.slice(i, i + CLOUDFLARE_BATCH_SIZE);
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${apiToken}`,
+          },
+          body: JSON.stringify({ text: chunk }),
+        });
+        if (!res.ok) {
+          throw new Error(
+            `Cloudflare Workers AI embeddings request failed: ${res.status} ${res.statusText}`,
+          );
+        }
+        const json = (await res.json()) as {
+          success?: boolean;
+          result?: { shape?: number[]; data?: number[][] };
+        };
+        const data = json.result?.data;
+        if (json.success === false || !Array.isArray(data) || data.length !== chunk.length) {
+          throw new Error("Cloudflare Workers AI returned an unexpected embeddings response");
+        }
+        for (const vector of data) out.push(Float32Array.from(vector));
       }
-      const json = (await res.json()) as { data: { index: number; embedding: number[] }[] };
-      const sorted = [...json.data].sort((a, b) => a.index - b.index);
-      return sorted.map((d) => Float32Array.from(d.embedding));
+      return out;
     },
   };
 }

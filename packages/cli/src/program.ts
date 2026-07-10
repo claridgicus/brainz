@@ -187,7 +187,7 @@ export function buildProgram(ctx: Ctx): Command {
       created.push(relPath);
     };
 
-    const config = { name: path.basename(dir), embedding: { provider: "local" } };
+    const config = { name: path.basename(dir), embedding: { provider: "cloudflare" } };
     await writeIfMissing("brainz.config.json", `${JSON.stringify(config, null, 2)}\n`);
     await writeIfMissing(path.join("concepts", "welcome.md"), SAMPLE_NOTE);
     await writeIfMissing(".gitignore", ".brainz/\n");
@@ -210,6 +210,9 @@ export function buildProgram(ctx: Ctx): Command {
         `  brainz search welcome${vaultFlag}`,
         `  brainz context --query welcome${vaultFlag}`,
         `  brainz mcp${vaultFlag}    # expose the vault to agents over MCP`,
+        "",
+        "Semantic search uses Cloudflare Workers AI by default — set CLOUDFLARE_ACCOUNT_ID",
+        "and CLOUDFLARE_API_TOKEN to enable it (without them, search is keyword-only).",
         "",
       ].join("\n"),
     );
@@ -461,7 +464,10 @@ export function buildProgram(ctx: Ctx): Command {
       ctx.out(
         vault.embeddingStatus === "ready"
           ? pc.dim("  embeddings: ready (semantic + hybrid search available)\n")
-          : pc.dim("  embeddings: unavailable (keyword-only search)\n"),
+          : pc.dim(
+              "  embeddings: unavailable (keyword-only search; provider \"cloudflare\" needs " +
+                "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN)\n",
+            ),
       );
     });
   });

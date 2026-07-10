@@ -4,7 +4,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cliContextJsonSchema,
   cliRelatedJsonSchema,
@@ -19,7 +19,16 @@ const DEMO_VAULT = fileURLToPath(new URL("../../../examples/demo-vault", import.
 const DIST_BIN = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
 
 const cleanups: (() => Promise<void>)[] = [];
+
+beforeEach(() => {
+  // Vaults scaffolded by `init` default to the cloudflare embedding provider;
+  // blank out credentials so tests stay offline (keyword-only, no network).
+  vi.stubEnv("CLOUDFLARE_ACCOUNT_ID", "");
+  vi.stubEnv("CLOUDFLARE_API_TOKEN", "");
+});
+
 afterEach(async () => {
+  vi.unstubAllEnvs();
   while (cleanups.length > 0) await cleanups.pop()!();
 });
 
@@ -82,6 +91,8 @@ describe("brainz init", () => {
     expect(res.out).toContain("Next steps");
     const config = JSON.parse(await readFile(path.join(dir, "brainz.config.json"), "utf8"));
     expect(config.name).toBe(path.basename(dir));
+    expect(config.embedding).toEqual({ provider: "cloudflare" });
+    expect(res.out).toContain("CLOUDFLARE_ACCOUNT_ID");
   });
 
   it("skips existing files on re-run", async () => {
