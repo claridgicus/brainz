@@ -100,6 +100,10 @@ Concept writes parse the submitted markdown body with engine's `parseNote` (wiki
 - Implementation options (agent's call, in preference order): (a) Cloudflare `agents` SDK `McpAgent` — MCP server AS a Durable Object, the platform-native pattern; run it per-vault, or (b) stateless `@modelcontextprotocol/sdk` StreamableHTTP via a fetch-adapter (e.g. `@hono/mcp`) in the route handler that calls into VaultDO. Either way the agent verifies against a real MCP client call over HTTP in wrangler dev. If McpAgent fights SvelteKit route integration, (b) is fine — don't sink hours.
 - Client wiring docs: `claude mcp add --transport http brainz https://<host>/mcp --header "Authorization: Bearer bz_..."` (and raw .mcp.json equivalent).
 
+### Branding
+
+Logo mark: the 💩 (pile of poo) emoji — the Brownmatter brand joke, played straight against a polished dark UI. Wordmark: "💩 Brainz". Favicon: 💩 as an inline-SVG data-URI. Marketing site lives at brownmatter.ai; the app at brain.brownmatter.ai.
+
 ### UI (Svelte 5, `src/routes/(marketing)` + `(app)`)
 
 - Landing `/`: the pitch — "give your agent fleet a shared brain"; explains orchestrator → get_context → subagent flow; free-for-everyone; CTA to sign up.
