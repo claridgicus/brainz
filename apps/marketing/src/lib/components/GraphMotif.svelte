@@ -74,7 +74,7 @@
 
 	.edges line {
 		stroke: var(--edge);
-		stroke-width: 1.4;
+		stroke-width: 1.5;
 	}
 	.edges .typed {
 		stroke-dasharray: 5 4;
@@ -104,9 +104,12 @@
 	}
 
 	.node circle {
+		fill: var(--ink);
+		stroke: var(--bg);
+		stroke-width: 1.5;
+	}
+	.node.hub circle {
 		fill: var(--accent);
-		stroke: rgb(255 255 255 / 0.25);
-		stroke-width: 1;
 	}
 	.node text {
 		fill: var(--text-dim);
@@ -118,15 +121,16 @@
 	}
 	.node.hub text {
 		fill: var(--text);
+		font-weight: 600;
 	}
 	.node.hub .halo {
 		fill: var(--accent);
-		fill-opacity: 0.16;
+		fill-opacity: 0.2;
 		stroke: none;
 		animation: halo 3.2s ease-in-out infinite;
 	}
 	.node.pending circle {
-		fill-opacity: 0.3;
+		fill-opacity: 0.25;
 		fill: var(--text-dim);
 		stroke: var(--text-dim);
 		stroke-dasharray: 3 3;
