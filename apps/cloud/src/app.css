@@ -1,22 +1,80 @@
-/* Brainz Cloud — dark theme, palette shared with the marketing site and the
-   local graph view (packages/web). */
+/* Brainz Cloud — Obsidian-inspired dark design language.
+ *
+ * Token set extracted from studying obsidian.md (2026-07):
+ *   base           #0f0f0f near-black, pure neutral, no blue tint
+ *   nav border     1px #262626
+ *   cards          #1e1e1e–#1f1f1f, radius 8–12px, border #363636,
+ *                  inset highlight ring rgba(255,255,255,.05)
+ *   inner panels   #171717 (recessed wells inside cards)
+ *   text           #eeeeee; secondary #b3b3b3
+ *   accent         #7c3aed primary buttons (white text, 8px radius,
+ *                  weight 500, inset rgba(255,255,255,.1) ring);
+ *                  links / interactive #a78bfa
+ *   headings       weight 600, tight tracking (-0.02em)
+ *   type           system-ui / Inter-style grotesque stack
+ *   graph          glowing dots on near-black, faint thin edges,
+ *                  labels in dim gray under the nodes
+ *
+ * Fonts: system stack only (same approach as Obsidian's site) — the app
+ * makes zero external requests and needs no font license.
+ */
 
 :root {
-	--bg: #0f1218;
-	--bg-raised: #171c26;
-	--bg-overlay: #1d2430;
-	--border: #2a3342;
-	--text: #dbe2ee;
-	--text-dim: #8b96a8;
-	--accent: #4f9cf9;
-	--accent-soft: rgb(79 156 249 / 0.12);
-	--edge: #3a4557;
+	/* surfaces — near-black base, layered upward like Obsidian */
+	--bg: #0e0e11;
+	--bg-deep: #0a0a0d; /* graph canvas / recessed wells */
+	--bg-raised: #16161b; /* cards, panels */
+	--bg-overlay: #1e1e25; /* popovers, inputs, hovers */
+	--border: #26262d;
+	--border-strong: #37373f;
+	--surface-ring: inset 0 0 0 1px rgb(255 255 255 / 0.04);
+
+	/* text */
+	--text: #ececf1;
+	--text-dim: #a3a3af;
+
+	/* accent — Obsidian purple range */
+	--accent: #a78bfa; /* links, focus, interactive */
+	--accent-strong: #7c3aed; /* primary buttons */
+	--accent-hover: #8b5cf6;
+	--accent-soft: rgb(167 139 250 / 0.13);
+	--glow: 0 0 20px rgb(124 58 237 / 0.35);
+
+	--edge: #31313b; /* graph edge lines */
 	--danger: #f87171;
 	--danger-soft: rgb(248 113 113 / 0.12);
 	--ok: #34d399;
 
+	/* ---- graph node palette: ELEVEN concept categories -----------------
+	 * Full mapping (keep in sync with TYPE_COLORS in $lib/graph-data.ts):
+	 *   concept    → --node-concept    #a78bfa  violet (the signature hue)
+	 *   feature    → --node-feature    #34d399  emerald
+	 *   decision   → --node-decision   #fbbf24  amber
+	 *   constraint → --node-constraint #f87171  red
+	 *   pattern    → --node-pattern    #22d3ee  cyan
+	 *   glossary   → --node-glossary   #f472b6  pink
+	 *   domain     → --node-domain     #60a5fa  blue      (new type)
+	 *   workflow   → --node-workflow   #fb923c  orange    (new type)
+	 *   story      → --node-story      #a3e635  lime      (new type)
+	 *   spec       → --node-spec       #2dd4bf  teal      (new type)
+	 *   pending    → --node-pending    #6b7280  gray, rendered dashed
+	 * All eleven are defined here so the branch adding the four new types
+	 * only has to add TYPE_COLORS entries — the tokens already exist. */
+	--node-concept: #a78bfa;
+	--node-feature: #34d399;
+	--node-decision: #fbbf24;
+	--node-constraint: #f87171;
+	--node-pattern: #22d3ee;
+	--node-glossary: #f472b6;
+	--node-domain: #60a5fa;
+	--node-workflow: #fb923c;
+	--node-story: #a3e635;
+	--node-spec: #2dd4bf;
+	--node-pending: #6b7280;
+
 	--font-sans:
-		-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+		ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter,
+		"Helvetica Neue", Arial, sans-serif;
 	--font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -44,8 +102,8 @@ h3,
 h4 {
 	line-height: 1.2;
 	margin: 0 0 0.5em;
-	font-weight: 700;
-	letter-spacing: -0.015em;
+	font-weight: 600;
+	letter-spacing: -0.02em;
 }
 
 p {
@@ -74,9 +132,9 @@ code {
 }
 
 pre {
-	background: var(--bg-raised);
+	background: var(--bg-deep);
 	border: 1px solid var(--border);
-	border-radius: 10px;
+	border-radius: 8px;
 	padding: 14px 16px;
 	overflow-x: auto;
 	font-size: 13px;
@@ -91,7 +149,7 @@ pre code {
 }
 
 ::selection {
-	background: rgb(79 156 249 / 0.35);
+	background: rgb(124 58 237 / 0.45);
 }
 
 /* ---------- forms ---------- */
@@ -102,17 +160,20 @@ pre code {
 	width: 100%;
 	font: 14px/1.5 var(--font-sans);
 	color: var(--text);
-	background: var(--bg);
-	border: 1px solid var(--border);
+	background: var(--bg-deep);
+	border: 1px solid var(--border-strong);
 	border-radius: 8px;
 	padding: 9px 12px;
 	outline: none;
-	transition: border-color 120ms ease;
+	transition:
+		border-color 120ms ease,
+		box-shadow 120ms ease;
 }
 .input:focus,
 .select:focus,
 .textarea:focus {
 	border-color: var(--accent);
+	box-shadow: 0 0 0 3px rgb(124 58 237 / 0.22);
 }
 .input::placeholder,
 .textarea::placeholder {
@@ -127,7 +188,7 @@ pre code {
 }
 .select {
 	appearance: none;
-	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238b96a8' fill='none' stroke-width='1.5'/%3E%3C/svg%3E");
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a3a3af' fill='none' stroke-width='1.5'/%3E%3C/svg%3E");
 	background-repeat: no-repeat;
 	background-position: right 12px center;
 	padding-right: 30px;
@@ -141,7 +202,7 @@ pre code {
 }
 .field > label {
 	font-size: 12px;
-	font-weight: 650;
+	font-weight: 600;
 	color: var(--text-dim);
 	text-transform: uppercase;
 	letter-spacing: 0.06em;
@@ -154,17 +215,19 @@ pre code {
 	align-items: center;
 	justify-content: center;
 	gap: 8px;
-	font: 600 14px/1 var(--font-sans);
+	font: 500 14px/1 var(--font-sans);
 	padding: 9px 16px;
 	border-radius: 8px;
-	border: 1px solid var(--border);
+	border: 1px solid var(--border-strong);
 	background: var(--bg-overlay);
 	color: var(--text);
 	cursor: pointer;
 	white-space: nowrap;
+	box-shadow: var(--surface-ring);
 	transition:
 		border-color 120ms ease,
-		background 120ms ease;
+		background 120ms ease,
+		box-shadow 120ms ease;
 }
 .btn:hover {
 	text-decoration: none;
@@ -173,17 +236,21 @@ pre code {
 .btn:disabled {
 	opacity: 0.55;
 	cursor: default;
-	border-color: var(--border);
+	border-color: var(--border-strong);
 }
 
 .btn-primary {
-	background: var(--accent);
-	border-color: var(--accent);
-	color: #0b1220;
+	background: var(--accent-strong);
+	border-color: transparent;
+	color: #fff;
+	box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.1);
 }
 .btn-primary:hover:not(:disabled) {
-	background: #6cadfa;
-	border-color: #6cadfa;
+	background: var(--accent-hover);
+	border-color: transparent;
+	box-shadow:
+		inset 0 0 0 1px rgb(255 255 255 / 0.12),
+		var(--glow);
 }
 
 .btn-danger {
@@ -198,10 +265,12 @@ pre code {
 .btn-ghost {
 	background: transparent;
 	border-color: transparent;
+	box-shadow: none;
 	color: var(--text-dim);
 }
 .btn-ghost:hover {
 	color: var(--text);
+	background: var(--bg-overlay);
 	border-color: var(--border);
 }
 
@@ -218,6 +287,7 @@ pre code {
 	border: 1px solid var(--border);
 	border-radius: 12px;
 	padding: 20px;
+	box-shadow: var(--surface-ring);
 }
 
 .badge {
@@ -225,10 +295,10 @@ pre code {
 	align-items: center;
 	gap: 6px;
 	font-size: 11.5px;
-	font-weight: 600;
+	font-weight: 500;
 	padding: 2px 9px;
 	border-radius: 999px;
-	border: 1px solid var(--border);
+	border: 1px solid var(--border-strong);
 	background: var(--bg-overlay);
 	color: var(--text-dim);
 	white-space: nowrap;
@@ -254,7 +324,7 @@ pre code {
 	display: inline-block;
 	width: 16px;
 	height: 16px;
-	border: 2px solid var(--border);
+	border: 2px solid var(--border-strong);
 	border-top-color: var(--accent);
 	border-radius: 50%;
 	animation: spin 700ms linear infinite;
@@ -275,23 +345,32 @@ pre code {
 	white-space: nowrap;
 }
 
-/* ---------- rendered markdown (concept bodies, previews) ---------- */
+/* ---------- rendered markdown (concept bodies, previews) ----------
+   Obsidian-like reading experience: comfortable measure, clear heading
+   scale, quiet code, violet-tinted wiki-links. */
 
 .md {
-	font-size: 14px;
-	line-height: 1.65;
+	font-size: 14.5px;
+	line-height: 1.7;
 	overflow-wrap: break-word;
+	max-width: 68ch;
 }
 .md h1 {
-	font-size: 19px;
+	font-size: 20px;
+	margin-top: 0.2em;
 }
 .md h2 {
-	font-size: 16.5px;
-	margin-top: 1.4em;
+	font-size: 17px;
+	margin-top: 1.5em;
 }
 .md h3 {
-	font-size: 14.5px;
+	font-size: 15px;
+	margin-top: 1.3em;
+}
+.md h4 {
+	font-size: 14px;
 	margin-top: 1.2em;
+	color: var(--text-dim);
 }
 .md ul,
 .md ol {
@@ -299,12 +378,20 @@ pre code {
 	margin: 0 0 1em;
 }
 .md li {
-	margin: 0.25em 0;
+	margin: 0.3em 0;
+}
+.md li::marker {
+	color: var(--text-dim);
+}
+.md hr {
+	border: none;
+	border-top: 1px solid var(--border);
+	margin: 1.5em 0;
 }
 .md blockquote {
 	margin: 0 0 1em;
-	padding: 4px 14px;
-	border-left: 3px solid var(--border);
+	padding: 4px 16px;
+	border-left: 3px solid var(--accent-strong);
 	color: var(--text-dim);
 }
 .md table {
@@ -314,12 +401,16 @@ pre code {
 }
 .md th,
 .md td {
-	border: 1px solid var(--border);
+	border: 1px solid var(--border-strong);
 	padding: 6px 10px;
 	text-align: left;
 }
+.md th {
+	background: var(--bg-overlay);
+}
 .md img {
 	max-width: 100%;
+	border-radius: 8px;
 }
 .md a[href^="#concept:"] {
 	background: var(--accent-soft);

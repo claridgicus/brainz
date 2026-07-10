@@ -313,14 +313,34 @@
 
 	$effect(() => {
 		// One-time SVG scaffolding (defs + viewport groups).
+		// Obsidian-style glow: each circle blurs a copy of itself in its own
+		// fill color (feGaussianBlur on SourceGraphic), so every node type
+		// halos in its palette hue with no per-color filter plumbing.
 		svg.innerHTML = `
 			<defs>
 				<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-					<path d="M0,1 L9,5 L0,9 Z" fill="#3a4557"></path>
+					<path d="M0,1 L9,5 L0,9 Z" fill="#3a3a44"></path>
 				</marker>
 				<marker id="arrow-hl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-					<path d="M0,1 L9,5 L0,9 Z" fill="#7fb4fb"></path>
+					<path d="M0,1 L9,5 L0,9 Z" fill="#a78bfa"></path>
 				</marker>
+				<filter id="node-glow" x="-80%" y="-80%" width="260%" height="260%">
+					<feGaussianBlur in="SourceGraphic" stdDeviation="2.2" result="halo"></feGaussianBlur>
+					<feComponentTransfer in="halo" result="softHalo">
+						<feFuncA type="linear" slope="0.55"></feFuncA>
+					</feComponentTransfer>
+					<feMerge>
+						<feMergeNode in="softHalo"></feMergeNode>
+						<feMergeNode in="SourceGraphic"></feMergeNode>
+					</feMerge>
+				</filter>
+				<filter id="node-glow-strong" x="-150%" y="-150%" width="400%" height="400%">
+					<feGaussianBlur in="SourceGraphic" stdDeviation="5.5" result="halo"></feGaussianBlur>
+					<feMerge>
+						<feMergeNode in="halo"></feMergeNode>
+						<feMergeNode in="SourceGraphic"></feMergeNode>
+					</feMerge>
+				</filter>
 			</defs>`;
 		viewport = document.createElementNS(SVG_NS, "g");
 		edgesG = document.createElementNS(SVG_NS, "g");
@@ -377,6 +397,11 @@
 		display: block;
 		cursor: grab;
 		touch-action: none;
+		/* Obsidian graph view: nodes float on a recessed near-black canvas
+		   with the faintest violet breath at the center. */
+		background:
+			radial-gradient(ellipse 90% 70% at 50% 45%, rgb(124 58 237 / 0.05), transparent 70%),
+			var(--bg-deep);
 	}
 	svg:global(.panning) {
 		cursor: grabbing;
@@ -397,26 +422,28 @@
 		position: fixed;
 		z-index: 50;
 		background: var(--bg-overlay);
-		border: 1px solid var(--border);
+		border: 1px solid var(--border-strong);
 		border-radius: 6px;
 		padding: 3px 9px;
 		font-size: 12px;
 		color: var(--text);
 		pointer-events: none;
-		box-shadow: 0 4px 14px rgb(0 0 0 / 0.4);
+		box-shadow: 0 4px 14px rgb(0 0 0 / 0.5);
 	}
 
 	/* Imperative SVG children need :global selectors. */
 	svg :global(line) {
 		stroke: var(--edge);
-		stroke-width: 1.2;
+		stroke-width: 1;
+		stroke-linecap: round;
+		opacity: 0.85;
 	}
 	svg :global(line.typed) {
 		marker-end: url(#arrow);
 	}
 	svg :global(line.hl) {
-		stroke: #7fb4fb;
-		stroke-width: 1.8;
+		stroke: var(--accent);
+		stroke-width: 1.6;
 	}
 	svg :global(line.typed.hl) {
 		marker-end: url(#arrow-hl);
@@ -426,14 +453,16 @@
 		cursor: pointer;
 	}
 	svg :global(g.node circle) {
-		stroke: rgb(255 255 255 / 0.18);
+		stroke: rgb(255 255 255 / 0.12);
 		stroke-width: 1;
+		filter: url(#node-glow);
 		transition: opacity 120ms ease;
 	}
 	svg :global(g.node.pending circle) {
-		fill-opacity: 0.35;
-		stroke: #6b7280;
+		fill-opacity: 0.3;
+		stroke: var(--node-pending, #6b7280);
 		stroke-dasharray: 3 3;
+		filter: none;
 	}
 	svg :global(g.node text) {
 		fill: var(--text-dim);
@@ -441,18 +470,29 @@
 		text-anchor: middle;
 		pointer-events: none;
 		user-select: none;
+		paint-order: stroke;
+		stroke: rgb(10 10 13 / 0.8);
+		stroke-width: 3px;
 	}
 	svg:global(.labels-hidden) :global(g.node text) {
 		display: none;
 	}
 	svg :global(g.node.selected circle) {
-		stroke: #fff;
+		stroke: var(--accent);
 		stroke-width: 2;
+		filter: url(#node-glow-strong);
+	}
+	svg :global(g.node.selected text) {
+		fill: var(--text);
 	}
 
-	/* Hover: dim everything but the hovered node's neighborhood. */
+	/* Hover: halo the hovered node, dim everything outside its neighborhood. */
+	svg :global(g.node.active circle) {
+		stroke: rgb(255 255 255 / 0.35);
+		filter: url(#node-glow-strong);
+	}
 	svg:global(.hovering) :global(g.node) {
-		opacity: 0.25;
+		opacity: 0.2;
 	}
 	svg:global(.hovering) :global(g.node.active),
 	svg:global(.hovering) :global(g.node.nbr) {
@@ -462,7 +502,7 @@
 		fill: var(--text);
 	}
 	svg:global(.hovering) :global(line) {
-		opacity: 0.15;
+		opacity: 0.12;
 	}
 	svg:global(.hovering) :global(line.hl) {
 		opacity: 1;

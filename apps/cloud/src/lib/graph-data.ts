@@ -3,18 +3,25 @@
 
 import type { Edge, GraphNode, GraphPayload } from "@brainz/contracts";
 
-/** Node fill palette by concept type — shared with packages/web's graph view. */
+/** Node fill palette by concept type — Obsidian-inspired, violet-forward.
+ *
+ * The full ELEVEN-category palette lives as CSS custom properties in
+ * src/app.css (--node-*); keep these hexes in sync with those tokens:
+ *   concept #a78bfa · feature #34d399 · decision #fbbf24 ·
+ *   constraint #f87171 · pattern #22d3ee · glossary #f472b6 ·
+ *   domain #60a5fa · workflow #fb923c · story #a3e635 · spec #2dd4bf ·
+ *   pending #6b7280 (gray, rendered dashed). */
 export const TYPE_COLORS: Record<string, string> = {
-  concept: "#4f9cf9",
-  domain: "#f472b6",
+  concept: "#a78bfa",
+  domain: "#60a5fa",
   feature: "#34d399",
   story: "#a3e635",
   spec: "#2dd4bf",
   workflow: "#fb923c",
   decision: "#fbbf24",
   constraint: "#f87171",
-  pattern: "#a78bfa",
-  glossary: "#22d3ee",
+  pattern: "#22d3ee",
+  glossary: "#f472b6",
   pending: "#6b7280",
 };
 export const ALL_TYPES = Object.keys(TYPE_COLORS);
