@@ -3,6 +3,7 @@ import {
   CLAIM_TTL_MS,
   claimExpiry,
   claimState,
+  consumeClaim,
   dedupeSlug,
   exceedsSignupRateLimit,
   generateClaimToken,
@@ -12,6 +13,25 @@ import {
   SIGNUP_RATE_LIMIT,
   SIGNUP_RATE_WINDOW_MS,
 } from "./claims";
+
+/**
+ * In-memory stand-in for the D1 conditional consume UPDATE
+ *   UPDATE account_claims SET claimed_at=? WHERE id=? AND claimed_at IS NULL RETURNING id
+ * The DB serialises concurrent updates; we model that by mutating shared state
+ * synchronously inside each call, so the second caller observes the first
+ * caller's write. Returns the rows actually updated (0 or 1).
+ */
+function fakeConsumer(claims: Map<string, { claimedAt: Date | null }>) {
+  let calls = 0;
+  const consume = async (id: string, claimedAt: Date) => {
+    calls++;
+    const row = claims.get(id);
+    if (!row || row.claimedAt !== null) return [];
+    row.claimedAt = claimedAt; // WHERE claimed_at IS NULL matched → consume
+    return [{ id }];
+  };
+  return { consume, calls: () => calls };
+}
 
 describe("claim tokens", () => {
   it("generates 64-hex-char tokens, unique per call", () => {
@@ -68,6 +88,48 @@ describe("claim expiry / single use", () => {
     const claim = { expiresAt: claimExpiry(created), claimedAt: created };
     expect(claimState(claim, new Date(created.getTime() + 1000))).toBe("claimed");
     expect(claimState(claim, new Date(claim.expiresAt.getTime() + 1))).toBe("claimed");
+  });
+});
+
+describe("consumeClaim (atomic single-use redemption)", () => {
+  const at = new Date("2026-07-10T00:00:00.000Z");
+
+  it("wins on an unclaimed row and marks claimed_at exactly once", async () => {
+    const claims = new Map([["c1", { claimedAt: null as Date | null }]]);
+    const { consume } = fakeConsumer(claims);
+    expect(await consumeClaim(consume, "c1", at)).toBe(true);
+    expect(claims.get("c1")!.claimedAt).toBe(at);
+  });
+
+  it("loses on an already-claimed row (0 rows affected → false)", async () => {
+    const claims = new Map([["c1", { claimedAt: new Date("2026-01-01") as Date | null }]]);
+    const { consume } = fakeConsumer(claims);
+    const first = claims.get("c1")!.claimedAt;
+    expect(await consumeClaim(consume, "c1", at)).toBe(false);
+    // Does not clobber the existing claimed_at.
+    expect(claims.get("c1")!.claimedAt).toBe(first);
+  });
+
+  it("double redemption of one token: exactly one wins, the second is 'already used'", async () => {
+    const claims = new Map([["c1", { claimedAt: null as Date | null }]]);
+    const { consume, calls } = fakeConsumer(claims);
+
+    // Two concurrent submissions of the same valid token. Both would pass the
+    // check-then-act pre-checks; only the conditional consume decides the winner.
+    const results = await Promise.all([
+      consumeClaim(consume, "c1", at),
+      consumeClaim(consume, "c1", new Date(at.getTime() + 5)),
+    ]);
+
+    expect(results.filter(Boolean)).toHaveLength(1); // exactly one true
+    expect(results.filter((r) => !r)).toHaveLength(1); // exactly one false → "already used"
+    expect(calls()).toBe(2);
+    // Winner's timestamp is the one persisted; the loser never overwrites it.
+    expect(claims.get("c1")!.claimedAt).toBe(at);
+
+    // A third, later attempt also loses — the claim stays consumed.
+    expect(await consumeClaim(consume, "c1", new Date(at.getTime() + 10))).toBe(false);
+    expect(claims.get("c1")!.claimedAt).toBe(at);
   });
 });
 
