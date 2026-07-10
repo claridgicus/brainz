@@ -87,8 +87,19 @@ export class Vault {
     this.dir = dir;
     this.#db = db;
     this.#config = config;
-    const provider = config.embedding?.provider ?? "none";
-    if (provider === "none" || (provider === "openai" && !process.env.OPENAI_API_KEY)) {
+    const provider: string = config.embedding?.provider ?? "none";
+    if (provider === "openai") {
+      // Removed in favor of "cloudflare" (Workers AI). Legacy configs degrade
+      // to keyword-only with a hint — never a crash.
+      process.stderr.write(
+        'brainz: embedding provider "openai" was removed — set "cloudflare" in brainz.config.json (falling back to keyword-only search)\n',
+      );
+      this.#embeddingStatus = "unavailable";
+    } else if (
+      provider === "none" ||
+      (provider === "cloudflare" &&
+        !(process.env.CLOUDFLARE_ACCOUNT_ID && process.env.CLOUDFLARE_API_TOKEN))
+    ) {
       this.#embeddingStatus = "unavailable";
     } else {
       this.#embeddingStatus = "ready";
@@ -108,10 +119,10 @@ export class Vault {
       config = {
         ...raw,
         name: typeof raw.name === "string" && raw.name ? raw.name : path.basename(abs),
-        embedding: raw.embedding ?? { provider: "local" },
+        embedding: raw.embedding ?? { provider: "cloudflare" },
       };
     } else {
-      config = { name: path.basename(abs), embedding: { provider: "local" } };
+      config = { name: path.basename(abs), embedding: { provider: "cloudflare" } };
       await fsp.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
     }
 
@@ -277,17 +288,14 @@ export class Vault {
       `INSERT INTO embeddings (id, vector, hash) VALUES (?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET vector = excluded.vector, hash = excluded.hash`,
     );
-    const BATCH = 16;
     try {
-      for (let i = 0; i < pending.length; i += BATCH) {
-        const batch = pending.slice(i, i + BATCH);
-        const vectors = await embedder.embed(batch.map((p) => p.text));
-        batch.forEach((p, j) => {
-          const packed = packVector(vectors[j]);
-          // better-sqlite3 requires Buffer for BLOBs; this is a no-copy view.
-          insert.run(p.id, Buffer.from(packed.buffer, packed.byteOffset, packed.byteLength), p.hash);
-        });
-      }
+      // Providers batch internally (Cloudflare chunks texts per request).
+      const vectors = await embedder.embed(pending.map((p) => p.text));
+      pending.forEach((p, j) => {
+        const packed = packVector(vectors[j]);
+        // better-sqlite3 requires Buffer for BLOBs; this is a no-copy view.
+        insert.run(p.id, Buffer.from(packed.buffer, packed.byteOffset, packed.byteLength), p.hash);
+      });
     } catch {
       this.#embeddingStatus = "unavailable"; // degrade gracefully; keyword search still works
     }

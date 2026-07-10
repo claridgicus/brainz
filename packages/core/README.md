@@ -17,7 +17,7 @@ vault.close();
 
 ```
 my-vault/
-  brainz.config.json   # { "name": "...", "embedding": { "provider": "local" | "openai" | "none" } }
+  brainz.config.json   # { "name": "...", "embedding": { "provider": "cloudflare" | "local" | "none" } }
   concepts/            # *.md notes (may be nested)
   .brainz/index.db     # derived SQLite index (gitignore this)
 ```
@@ -27,14 +27,28 @@ source of truth; the index is fully rebuildable via `vault.reindex()`.
 
 ## Embeddings (optional)
 
-- `"local"` (default config): uses `@xenova/transformers` (`Xenova/all-MiniLM-L6-v2`).
-  The package is loaded lazily via dynamic import and is **not** a dependency of
-  this package — run `npm i @xenova/transformers` in your project to enable local
-  embeddings. If it is missing or fails to load (e.g. offline), search degrades
-  gracefully to keyword-only.
-- `"openai"`: `text-embedding-3-small` via `fetch`, key from `OPENAI_API_KEY`.
-  Missing key → keyword-only fallback.
+- `"cloudflare"` (default config): Cloudflare Workers AI REST API with
+  `@cf/baai/bge-base-en-v1.5` (768-dim, the same model Brainz Cloud uses, so
+  vectors are portable between local vaults and the cloud brain). Requires two
+  env vars:
+  - `CLOUDFLARE_ACCOUNT_ID` — dash.cloudflare.com → your account → the id is in
+    the URL (or any zone/account overview page).
+  - `CLOUDFLARE_API_TOKEN` — dash.cloudflare.com → My Profile → API Tokens →
+    Create Token with the **Workers AI: Read** permission.
+
+  Texts are batched (up to 100 per request). Missing env vars, network failure,
+  or a non-2xx response → graceful keyword-only fallback; a reindex never fails
+  because of embeddings.
+- `"local"`: fully offline alternative via `@xenova/transformers`
+  (`Xenova/all-MiniLM-L6-v2`). The package is loaded lazily via dynamic import
+  and is **not** a dependency of this package — run `npm i @xenova/transformers`
+  in your project to enable it. If it is missing or fails to load, search
+  degrades gracefully to keyword-only.
 - `"none"`: embeddings skipped entirely.
+
+The `"openai"` provider from v1 was removed: a config that still says
+`"openai"` is treated as unavailable (keyword-only) with a one-line stderr
+warning suggesting `"cloudflare"` — it never crashes.
 
 `vault.embeddingStatus` (`"ready" | "unavailable"`) reports whether semantic
 search is active. `search({ mode: "hybrid" | "semantic" })` silently falls back

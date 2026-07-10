@@ -4,12 +4,22 @@ import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createEmbedder, CLOUDFLARE_BATCH_SIZE } from "../src/embeddings.js";
 import { Vault } from "../src/index.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 
+beforeEach(() => {
+  // Tests must never see real credentials or make real network calls.
+  vi.stubEnv("CLOUDFLARE_ACCOUNT_ID", "");
+  vi.stubEnv("CLOUDFLARE_API_TOKEN", "");
+});
+
 afterEach(async () => {
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
   while (cleanups.length > 0) await cleanups.pop()!();
 });
 
@@ -59,7 +69,7 @@ describe("Vault.open", () => {
     expect(existsSync(path.join(dir, "concepts"))).toBe(true);
     expect(existsSync(path.join(dir, ".brainz", "index.db"))).toBe(true);
     const config = JSON.parse(await readFile(path.join(dir, "brainz.config.json"), "utf8"));
-    expect(config).toEqual({ name: path.basename(dir), embedding: { provider: "local" } });
+    expect(config).toEqual({ name: path.basename(dir), embedding: { provider: "cloudflare" } });
   });
 
   it("indexes existing notes on open", async () => {
@@ -170,14 +180,182 @@ describe("search", () => {
   });
 
   it("degrades to unavailable when the local provider cannot load", async () => {
-    // default config uses provider "local"; @xenova/transformers is not installed here
+    // @xenova/transformers is not installed here
     const dir = await makeDir();
+    await writeFile(
+      path.join(dir, "brainz.config.json"),
+      JSON.stringify({ name: "local-test", embedding: { provider: "local" } }),
+    );
     const vault = await Vault.open(dir);
     cleanups.push(async () => vault.close());
     await vault.upsertConcept({ title: "Solo", body: "solo body text" });
     const hits = await vault.search({ query: "solo" });
     expect(hits.map((h) => h.concept.id)).toEqual(["solo"]);
     expect(vault.embeddingStatus).toBe("unavailable");
+  });
+});
+
+describe("cloudflare embeddings", () => {
+  /** Vault dir with provider "cloudflare" and the GRAPH notes (not yet opened,
+   * so tests can stub env/fetch first). */
+  async function makeCloudflareDir(
+    provider = "cloudflare",
+    files: Record<string, string> = GRAPH,
+  ): Promise<string> {
+    const dir = await makeDir();
+    await writeFile(
+      path.join(dir, "brainz.config.json"),
+      JSON.stringify({ name: "cf-test", embedding: { provider } }),
+    );
+    await mkdir(path.join(dir, "concepts"), { recursive: true });
+    for (const [name, content] of Object.entries(files)) {
+      await writeFile(path.join(dir, "concepts", name), content);
+    }
+    return dir;
+  }
+
+  function stubCreds(): void {
+    vi.stubEnv("CLOUDFLARE_ACCOUNT_ID", "acct-123");
+    vi.stubEnv("CLOUDFLARE_API_TOKEN", "tok-456");
+  }
+
+  /** Deterministic fake embedding: dimensions keyed to marker words so tests can
+   * steer semantic similarity. Last dim is a bias so no vector is all-zero. */
+  function fakeVec(text: string): number[] {
+    const t = text.toLowerCase();
+    return [
+      t.includes("postgres") || t.includes("storage") ? 1 : 0,
+      t.includes("alpha") ? 1 : 0,
+      t.includes("gamma") ? 1 : 0,
+      0.1,
+    ];
+  }
+
+  function okResponse(texts: string[]): Response {
+    return new Response(
+      JSON.stringify({
+        success: true,
+        result: { shape: [texts.length, 4], data: texts.map(fakeVec) },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  it("embeds via Workers AI, stores vectors, and hybrid/semantic search uses them", async () => {
+    stubCreds();
+    const calls: { url: string; auth: string | undefined; texts: string[] }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as { text: string[] };
+        const headers = new Headers(init?.headers);
+        calls.push({ url: String(url), auth: headers.get("authorization") ?? undefined, texts: body.text });
+        return okResponse(body.text);
+      }),
+    );
+
+    const vault = await Vault.open(await makeCloudflareDir());
+    cleanups.push(async () => vault.close());
+    expect(vault.embeddingStatus).toBe("ready");
+    expect(calls[0].url).toBe(
+      "https://api.cloudflare.com/client/v4/accounts/acct-123/ai/run/@cf/baai/bge-base-en-v1.5",
+    );
+    expect(calls[0].auth).toBe("Bearer tok-456");
+    expect(calls[0].texts.length).toBe(3); // one batched request for all 3 notes
+
+    // Vectors are stored per concept as packed float32 blobs.
+    const db = new Database(path.join(vault.dir, ".brainz", "index.db"));
+    const rows = db.prepare("SELECT id, vector FROM embeddings ORDER BY id").all() as {
+      id: string;
+      vector: Buffer;
+    }[];
+    db.close();
+    expect(rows.map((r) => r.id)).toEqual(["a", "b", "c"]);
+    expect(rows[0].vector.length).toBe(4 * 4); // 4 dims × float32
+
+    // "storage" appears in no note text, so keyword search finds nothing —
+    // only the stored vectors can rank b (whose fake vector matches) on top.
+    expect(await vault.search({ query: "storage", mode: "keyword" })).toEqual([]);
+    const semantic = await vault.search({ query: "storage", mode: "semantic" });
+    expect(semantic[0]?.concept.id).toBe("b");
+    const hybrid = await vault.search({ query: "storage" });
+    expect(hybrid[0]?.concept.id).toBe("b");
+    expect(vault.embeddingStatus).toBe("ready");
+  });
+
+  it("missing credentials → unavailable, keyword fallback, and no network calls", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const vault = await Vault.open(await makeCloudflareDir());
+    cleanups.push(async () => vault.close());
+    expect(vault.embeddingStatus).toBe("unavailable");
+    const hits = await vault.search({ query: "postgres" });
+    expect(hits[0]?.concept.id).toBe("b"); // keyword fallback still works
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("API error (non-2xx) → reindex still succeeds and degrades to keyword-only", async () => {
+    stubCreds();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("nope", { status: 500, statusText: "Internal Server Error" })),
+    );
+    const vault = await Vault.open(await makeCloudflareDir()); // must not throw
+    cleanups.push(async () => vault.close());
+    expect(vault.stats().concepts).toBe(3);
+    expect(vault.embeddingStatus).toBe("unavailable");
+    const hits = await vault.search({ query: "postgres" });
+    expect(hits[0]?.concept.id).toBe("b");
+  });
+
+  it("network failure (fetch rejects) → reindex still succeeds", async () => {
+    stubCreds();
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("offline"))));
+    const vault = await Vault.open(await makeCloudflareDir());
+    cleanups.push(async () => vault.close());
+    expect(vault.stats().concepts).toBe(3);
+    expect(vault.embeddingStatus).toBe("unavailable");
+  });
+
+  it('legacy "openai" provider → unavailable with a one-line warning, never a crash', async () => {
+    const errSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const vault = await Vault.open(await makeCloudflareDir("openai"));
+    cleanups.push(async () => vault.close());
+    expect(vault.embeddingStatus).toBe("unavailable");
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('"cloudflare"'));
+    await vault.reindex(); // still succeeds
+    const hits = await vault.search({ query: "postgres" });
+    expect(hits[0]?.concept.id).toBe("b");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it(`splits requests into batches of ${CLOUDFLARE_BATCH_SIZE} texts, preserving order`, async () => {
+    stubCreds();
+    const batchSizes: number[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string | URL, init?: RequestInit) => {
+        const { text } = JSON.parse(String(init?.body)) as { text: string[] };
+        batchSizes.push(text.length);
+        return new Response(
+          JSON.stringify({
+            success: true,
+            result: { shape: [text.length, 2], data: text.map((t) => [Number(t.slice(5)), 1]) },
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+    const embedder = await createEmbedder({ provider: "cloudflare" });
+    expect(embedder).not.toBeNull();
+    const texts = Array.from({ length: 250 }, (_, i) => `text-${i}`);
+    const vectors = await embedder!.embed(texts);
+    expect(batchSizes).toEqual([100, 100, 50]);
+    expect(vectors.length).toBe(250);
+    expect(vectors[0][0]).toBe(0);
+    expect(vectors[249][0]).toBe(249);
   });
 });
 

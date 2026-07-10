@@ -66,7 +66,7 @@ A vault is a directory:
 
 ```
 my-vault/
-  brainz.config.json   # { "name": "...", "embedding": { "provider": "local" | "openai" | "none" } }
+  brainz.config.json   # { "name": "...", "embedding": { "provider": "cloudflare" | "local" | "none" } }
   concepts/            # all *.md notes, may be nested in subfolders
   .brainz/             # derived SQLite index — gitignored, rebuilt from markdown
 ```
@@ -144,12 +144,18 @@ examples/
 
 Configured per vault in `brainz.config.json` → `embedding.provider`:
 
-- `local` (default for new vaults) — `@xenova/transformers` with `Xenova/all-MiniLM-L6-v2`,
+- `cloudflare` (default for new vaults) — Cloudflare Workers AI
+  (`@cf/baai/bge-base-en-v1.5`, 768-dim — the same model Brainz Cloud uses, so vectors
+  are portable). Needs `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (create one at
+  dash.cloudflare.com → My Profile → API Tokens with the *Workers AI: Read* permission).
+- `local` — offline alternative: `@xenova/transformers` with `Xenova/all-MiniLM-L6-v2`,
   lazy-loaded. The package is optional; install it in your project
   (`npm i @xenova/transformers`) to enable local semantic search.
-- `openai` — `text-embedding-3-small`, needs `OPENAI_API_KEY`.
 - `none` — keyword-only (the demo vault uses this so it works offline).
 
+The v1 `openai` provider was removed — a config still saying `openai` degrades to
+keyword-only with a stderr warning suggesting `cloudflare`.
+
 Search is hybrid (reciprocal-rank fusion of FTS5 bm25 + cosine over embeddings). If the
-embedding provider is unavailable — package missing, offline, no API key — everything
+embedding provider is unavailable — missing env vars, offline, package missing — everything
 **degrades gracefully to keyword-only**; nothing crashes.
