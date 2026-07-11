@@ -6,13 +6,20 @@ import {
 	clearAnchorsFromNodes,
 	defaultVisibleTypes,
 	deserializeAnchors,
+	focusRevealSet,
+	isDimmed,
+	isEdgeDimmed,
 	isNodeInViewport,
+	mergeFocusRender,
 	nodesInViewport,
 	planEdges,
+	radiusForTypeDegree,
 	serializeAnchors,
 	setAnchor,
 	stubEdgesFor,
 	toScreen,
+	typeClusterCenter,
+	typeSizeScale,
 	type AnchorableNode,
 	type AnchorMap,
 	type PositionedNode,
@@ -115,6 +122,140 @@ describe("planEdges / stubEdgesFor", () => {
 		const stubs = stubEdgesFor(edges, visible, allIds);
 		expect(stubs).toHaveLength(1);
 		expect(stubs[0]!.towardId).toBe("c");
+	});
+});
+
+describe("typeSizeScale / radiusForTypeDegree", () => {
+	it("ranks concept largest, domain next, then structural, then leaf/pending", () => {
+		expect(typeSizeScale("concept")).toBeGreaterThan(typeSizeScale("domain"));
+		expect(typeSizeScale("domain")).toBeGreaterThan(typeSizeScale("feature"));
+		expect(typeSizeScale("feature")).toBeGreaterThan(typeSizeScale("glossary"));
+		expect(typeSizeScale("glossary")).toBeGreaterThan(typeSizeScale("pending"));
+	});
+	it("falls back to 1.0 for an unranked type", () => {
+		expect(typeSizeScale("totally-made-up")).toBe(1);
+	});
+	it("scales the degree curve by the type rank (concept dwarfs glossary at equal degree)", () => {
+		const base = 6 + Math.sqrt(9) * 2.4; // degree 9
+		expect(radiusForTypeDegree("concept", 9)).toBeCloseTo(base * 1.9);
+		expect(radiusForTypeDegree("glossary", 9)).toBeCloseTo(base * 0.9);
+		expect(radiusForTypeDegree("concept", 9)).toBeGreaterThan(radiusForTypeDegree("glossary", 9));
+	});
+	it("still grows with degree within a type", () => {
+		expect(radiusForTypeDegree("feature", 16)).toBeGreaterThan(radiusForTypeDegree("feature", 1));
+	});
+	it("treats negative degree as 0 (no NaN)", () => {
+		expect(radiusForTypeDegree("concept", -3)).toBeCloseTo(6 * 1.9);
+	});
+});
+
+describe("typeClusterCenter", () => {
+	const types = ["a", "b", "c", "d"];
+	it("centers unknown types / degenerate lists on the canvas center", () => {
+		expect(typeClusterCenter("zzz", types, 800, 600)).toEqual({ x: 400, y: 300 });
+		expect(typeClusterCenter("a", [], 800, 600)).toEqual({ x: 400, y: 300 });
+		expect(typeClusterCenter("a", ["a"], 800, 600)).toEqual({ x: 400, y: 300 });
+	});
+	it("spreads types evenly around a circle (first type at the top)", () => {
+		const first = typeClusterCenter("a", types, 800, 600, 100);
+		// angle -90°: directly above center → same x, y reduced by radius.
+		expect(first.x).toBeCloseTo(400);
+		expect(first.y).toBeCloseTo(200);
+	});
+	it("gives different types different centers", () => {
+		const a = typeClusterCenter("a", types, 800, 600);
+		const b = typeClusterCenter("b", types, 800, 600);
+		expect(a).not.toEqual(b);
+	});
+	it("places all centers on the ring at the requested radius", () => {
+		for (const t of types) {
+			const c = typeClusterCenter(t, types, 800, 600, 120);
+			expect(Math.hypot(c.x - 400, c.y - 300)).toBeCloseTo(120);
+		}
+	});
+});
+
+describe("focusRevealSet", () => {
+	// a—b, a—c (directed a→b, c→a), b—d; e isolated.
+	const edges: Edge[] = [
+		{ from: "a", to: "b", relation: "references" },
+		{ from: "c", to: "a", relation: "depends_on" },
+		{ from: "b", to: "d", relation: "references" },
+	];
+
+	it("returns an empty set when nothing is focused", () => {
+		expect(focusRevealSet(null, edges).size).toBe(0);
+	});
+
+	it("includes the focused node and its 1-hop neighbors in BOTH directions", () => {
+		// a has an outgoing edge to b and an incoming edge from c → {a, b, c}
+		expect([...focusRevealSet("a", edges)].sort()).toEqual(["a", "b", "c"]);
+	});
+
+	it("does not reach 2 hops (d is a neighbor of b, not of a)", () => {
+		expect(focusRevealSet("a", edges).has("d")).toBe(false);
+	});
+
+	it("reveals only itself for an isolated node", () => {
+		expect([...focusRevealSet("e", edges)]).toEqual(["e"]);
+	});
+
+	it("off-type neighbors still land in the reveal set (type filter is not consulted here)", () => {
+		// focusRevealSet is purely edge-driven — a neighbor's type never excludes it.
+		expect(focusRevealSet("b", edges).has("d")).toBe(true);
+		expect(focusRevealSet("b", edges).has("a")).toBe(true);
+	});
+});
+
+describe("isDimmed", () => {
+	it("dims nothing when no node is focused (empty reveal set)", () => {
+		const empty = new Set<string>();
+		expect(isDimmed("anything", empty)).toBe(false);
+	});
+
+	it("keeps the focused node and its neighbors lit, dims the rest", () => {
+		const reveal = new Set(["a", "b", "c"]); // a focused, b/c neighbors
+		expect(isDimmed("a", reveal)).toBe(false);
+		expect(isDimmed("b", reveal)).toBe(false);
+		expect(isDimmed("c", reveal)).toBe(false);
+		expect(isDimmed("z", reveal)).toBe(true);
+	});
+});
+
+describe("isEdgeDimmed", () => {
+	it("dims no edge when nothing is focused", () => {
+		expect(isEdgeDimmed("a", "b", null)).toBe(false);
+		expect(isEdgeDimmed("x", "y", null)).toBe(false);
+	});
+
+	it("keeps edges touching the focused node lit (either endpoint), dims others", () => {
+		expect(isEdgeDimmed("a", "b", "a")).toBe(false); // a→b, a focused
+		expect(isEdgeDimmed("c", "a", "a")).toBe(false); // c→a, a focused (incoming)
+		expect(isEdgeDimmed("b", "d", "a")).toBe(true); // neither endpoint is a
+	});
+});
+
+describe("mergeFocusRender", () => {
+	it("is a copy of the culled set when nothing is revealed", () => {
+		const culled = new Set(["a", "b"]);
+		const merged = mergeFocusRender(culled, new Set());
+		expect([...merged].sort()).toEqual(["a", "b"]);
+		merged.add("c"); // returned set is independent of the input
+		expect(culled.has("c")).toBe(false);
+	});
+
+	it("adds focus-set ids the viewport culled away (off-screen neighbors survive)", () => {
+		const culled = new Set(["a"]); // only a is on-screen
+		const reveal = new Set(["a", "b", "c"]); // b, c are off-screen neighbors
+		expect([...mergeFocusRender(culled, reveal)].sort()).toEqual(["a", "b", "c"]);
+	});
+
+	it("does not mutate either input", () => {
+		const culled = new Set(["a"]);
+		const reveal = new Set(["b"]);
+		mergeFocusRender(culled, reveal);
+		expect([...culled]).toEqual(["a"]);
+		expect([...reveal]).toEqual(["b"]);
 	});
 });
 

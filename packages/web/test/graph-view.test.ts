@@ -6,8 +6,15 @@ import {
   clampToViewport,
   cullEdge,
   defaultEnabledTypes,
+  focusRevealSet,
+  isDimmed,
+  isEdgeDimmed,
   isInViewport,
+  radiusForTypeDegree,
+  typeClusterCenter,
+  typeSizeScale,
   viewportRect,
+  type FocusEdge,
   type ViewportRect,
 } from "../frontend/graph-view.js";
 
@@ -127,6 +134,68 @@ describe("cullEdge (graph-view)", () => {
       expect(res.ends.y1).toBe(20);
       expect(res.ends.x2).toBe(20); // visible target untouched
       expect(res.ends.y2).toBe(20);
+    }
+  });
+});
+
+describe("sticky click focus (graph-view)", () => {
+  // a→b, c→a, b→d; e isolated.
+  const edges: FocusEdge[] = [
+    { from: "a", to: "b" },
+    { from: "c", to: "a" },
+    { from: "b", to: "d" },
+  ];
+
+  it("focusRevealSet is empty with no focus", () => {
+    expect(focusRevealSet(null, edges).size).toBe(0);
+  });
+
+  it("focusRevealSet includes focused node + 1-hop neighbors both directions", () => {
+    expect([...focusRevealSet("a", edges)].sort()).toEqual(["a", "b", "c"]);
+    expect(focusRevealSet("a", edges).has("d")).toBe(false); // 2 hops away
+  });
+
+  it("focusRevealSet reveals only itself for an isolated node", () => {
+    expect([...focusRevealSet("e", edges)]).toEqual(["e"]);
+  });
+
+  it("isDimmed: nothing dims with empty reveal; non-members dim otherwise", () => {
+    expect(isDimmed("x", new Set())).toBe(false);
+    const reveal = new Set(["a", "b", "c"]);
+    expect(isDimmed("a", reveal)).toBe(false);
+    expect(isDimmed("z", reveal)).toBe(true);
+  });
+
+  it("isEdgeDimmed: only edges touching the focused node stay lit", () => {
+    expect(isEdgeDimmed("a", "b", null)).toBe(false); // no focus
+    expect(isEdgeDimmed("a", "b", "a")).toBe(false); // touches focus
+    expect(isEdgeDimmed("c", "a", "a")).toBe(false); // touches focus (incoming)
+    expect(isEdgeDimmed("b", "d", "a")).toBe(true); // does not touch focus
+  });
+});
+
+describe("type size + clustering (graph-view)", () => {
+  it("ranks concept largest, then domain, down to pending", () => {
+    expect(typeSizeScale("concept")).toBeGreaterThan(typeSizeScale("domain"));
+    expect(typeSizeScale("domain")).toBeGreaterThan(typeSizeScale("feature"));
+    expect(typeSizeScale("glossary")).toBeGreaterThan(typeSizeScale("pending"));
+    expect(typeSizeScale("unknown")).toBe(1);
+  });
+
+  it("radiusForTypeDegree scales the degree curve by type and grows with degree", () => {
+    expect(radiusForTypeDegree("concept", 9)).toBeGreaterThan(radiusForTypeDegree("glossary", 9));
+    expect(radiusForTypeDegree("feature", 16)).toBeGreaterThan(radiusForTypeDegree("feature", 1));
+  });
+
+  it("typeClusterCenter spreads types on a ring and centers unknowns", () => {
+    const types = ["a", "b", "c", "d"];
+    expect(typeClusterCenter("zzz", types, 800, 600)).toEqual({ x: 400, y: 300 });
+    const first = typeClusterCenter("a", types, 800, 600, 100);
+    expect(first.x).toBeCloseTo(400);
+    expect(first.y).toBeCloseTo(200); // first type sits directly above center
+    for (const t of types) {
+      const c = typeClusterCenter(t, types, 800, 600, 120);
+      expect(Math.hypot(c.x - 400, c.y - 300)).toBeCloseTo(120);
     }
   });
 });
