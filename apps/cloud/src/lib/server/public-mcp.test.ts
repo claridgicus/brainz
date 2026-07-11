@@ -11,7 +11,12 @@ import { MCP_TOOL_NAMES, PUBLIC_MCP_TOOL_NAMES, signupOutputSchema } from "@brai
 import { describe, expect, it } from "vitest";
 import { hashApiKey } from "./api-keys";
 import { SIGNUP_RATE_LIMIT } from "./rate-limit";
-import { buildPublicMcpServer, type ProvisionedSignup, type SignupDeps } from "./public-mcp";
+import {
+  buildPublicMcpServer,
+  isUniqueEmailViolation,
+  type ProvisionedSignup,
+  type SignupDeps,
+} from "./public-mcp";
 
 const NOW = new Date("2026-07-10T00:00:00.000Z");
 const LOGIN_URL = "https://brainz.brownmatter.ai/api/auth/magic-link/verify?token=abc&callbackURL=/dashboard";
@@ -19,10 +24,14 @@ const LOGIN_URL = "https://brainz.brownmatter.ai/api/auth/magic-link/verify?toke
 function fakeDeps(overrides: Partial<SignupDeps> = {}) {
   const persisted: ProvisionedSignup[] = [];
   const minted: string[] = [];
+  const attempts: { ip: string }[] = [];
   const deps: SignupDeps = {
     now: () => NOW,
     ip: "203.0.113.7",
-    countRecentSignups: async () => 0,
+    recordSignupAttempt: async (e) => {
+      attempts.push({ ip: e.ip });
+    },
+    countRecentSignups: async () => attempts.length,
     emailExists: async () => false,
     persistSignup: async (p) => {
       persisted.push(p);
@@ -33,7 +42,7 @@ function fakeDeps(overrides: Partial<SignupDeps> = {}) {
     },
     ...overrides,
   };
-  return { deps, persisted, minted };
+  return { deps, persisted, minted, attempts };
 }
 
 async function connect(deps: SignupDeps): Promise<Client> {
@@ -60,7 +69,7 @@ describe("public MCP server (unauthenticated surface)", () => {
   });
 
   it("signup provisions user + vault + key and returns a magic-link loginUrl", async () => {
-    const { deps, persisted, minted } = fakeDeps();
+    const { deps, persisted, minted, attempts } = fakeDeps();
     const client = await connect(deps);
     const result = await client.callTool({
       name: "signup",
@@ -89,7 +98,8 @@ describe("public MCP server (unauthenticated surface)", () => {
     // Only the key hash at rest — never the plaintext.
     expect(p.apiKey.keyHash).toBe(await hashApiKey(payload.apiKey));
     expect(JSON.stringify(p)).not.toContain(payload.apiKey);
-    expect(p.event.ip).toBe("203.0.113.7");
+    // The rate-limit attempt was recorded FIRST (before counting) for this IP.
+    expect(attempts).toEqual([{ ip: "203.0.113.7" }]);
   });
 
   it("returns a second guidance block documenting the loginUrl handoff-exposure model", async () => {
@@ -139,8 +149,10 @@ describe("public MCP server (unauthenticated surface)", () => {
   });
 
   it("6th signup in the window from one IP → rate-limit isError, nothing persisted", async () => {
+    // Insert-then-count: the count includes this attempt, so the window already
+    // at the cap makes the inclusive count SIGNUP_RATE_LIMIT + 1 → over.
     const { deps, persisted } = fakeDeps({
-      countRecentSignups: async () => SIGNUP_RATE_LIMIT,
+      countRecentSignups: async () => SIGNUP_RATE_LIMIT + 1,
     });
     const client = await connect(deps);
     const result = await client.callTool({
@@ -149,6 +161,69 @@ describe("public MCP server (unauthenticated surface)", () => {
     });
     expect(result.isError).toBe(true);
     expect(text(result)).toMatch(/rate limit/i);
+    expect(persisted).toHaveLength(0);
+  });
+
+  it("records the attempt BEFORE the rate-limit decision (TOCTOU-safe order)", async () => {
+    // Even a rate-limited attempt is recorded (attempts count toward the
+    // window). Model an already-full window via a fixed inclusive count.
+    const order: string[] = [];
+    const { deps, persisted } = fakeDeps({
+      recordSignupAttempt: async () => {
+        order.push("record");
+      },
+      countRecentSignups: async () => {
+        order.push("count");
+        return SIGNUP_RATE_LIMIT + 1;
+      },
+    });
+    const client = await connect(deps);
+    const result = await client.callTool({
+      name: "signup",
+      arguments: { email: "human@example.com" },
+    });
+    expect(result.isError).toBe(true);
+    expect(order).toEqual(["record", "count"]);
+    expect(persisted).toHaveLength(0);
+  });
+
+  it("the Nth-under-cap signup passes; the atomic count admits exactly SIGNUP_RATE_LIMIT", async () => {
+    // Shared attempts array across many signups from one IP models the durable
+    // counter; the fake's countRecentSignups returns the inclusive length.
+    const { deps, persisted } = fakeDeps();
+    let accepted = 0;
+    for (let i = 0; i < SIGNUP_RATE_LIMIT + 3; i++) {
+      const client = await connect(deps);
+      const result = await client.callTool({
+        name: "signup",
+        arguments: { email: `human${i}@example.com` },
+      });
+      if ((result.isError ?? false) === false) accepted++;
+    }
+    expect(accepted).toBe(SIGNUP_RATE_LIMIT);
+    expect(persisted).toHaveLength(SIGNUP_RATE_LIMIT);
+  });
+
+  it("unique-email RACE: constraint violation on insert → friendly already-exists result", async () => {
+    // The emailExists pre-check passes (returns false), but a concurrent signup
+    // won the race, so the user INSERT trips the unique(email) index. That
+    // opaque error must be mapped to the SAME friendly result, not surfaced raw.
+    const { deps, persisted } = fakeDeps({
+      emailExists: async () => false, // pre-check misses the racing winner
+      persistSignup: async () => {
+        throw new Error("D1_ERROR: UNIQUE constraint failed: user.email");
+      },
+    });
+    const client = await connect(deps);
+    const result = await client.callTool({
+      name: "signup",
+      arguments: { email: "human@example.com" },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("already exists");
+    expect(text(result)).toContain("/login");
+    // The opaque constraint text is NOT leaked to the caller.
+    expect(text(result)).not.toMatch(/UNIQUE constraint/i);
     expect(persisted).toHaveLength(0);
   });
 
@@ -178,6 +253,22 @@ describe("public MCP server (unauthenticated surface)", () => {
       arguments: { email: "human@example.com" },
     });
     expect(result.isError).toBe(true);
+    // A non-constraint failure is surfaced (NOT swallowed as already-exists).
     expect(text(result)).toContain("D1 exploded");
+    expect(text(result)).not.toContain("already exists");
+  });
+});
+
+describe("isUniqueEmailViolation", () => {
+  it("matches SQLite/D1 unique-constraint messages", () => {
+    expect(isUniqueEmailViolation(new Error("UNIQUE constraint failed: user.email"))).toBe(true);
+    expect(isUniqueEmailViolation(new Error("D1_ERROR: UNIQUE constraint failed"))).toBe(true);
+    expect(isUniqueEmailViolation("unique_constraint violation")).toBe(true);
+  });
+
+  it("does not match unrelated errors", () => {
+    expect(isUniqueEmailViolation(new Error("D1 exploded"))).toBe(false);
+    expect(isUniqueEmailViolation(new Error("network timeout"))).toBe(false);
+    expect(isUniqueEmailViolation(null)).toBe(false);
   });
 });

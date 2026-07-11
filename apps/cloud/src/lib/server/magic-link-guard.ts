@@ -32,9 +32,10 @@ export const MAGIC_LINK_REQUEST_PATH = "/api/auth/sign-in/magic-link";
 
 export interface GuardDeps {
   now(): Date;
+  /** Record this attempt FIRST — before counting (see guardMagicLinkRequest). */
+  record(event: { email: string; ip: string; at: Date }): Promise<void>;
   countRecentByEmail(email: string, since: Date): Promise<number>;
   countRecentByIp(ip: string, since: Date): Promise<number>;
-  record(event: { email: string; ip: string; at: Date }): Promise<void>;
 }
 
 export interface GuardResult {
@@ -43,7 +44,21 @@ export interface GuardResult {
 
 /**
  * Enforce the magic-link request limit for (email, ip). Returns whether the
- * request should be throttled; when allowed, records the attempt.
+ * request should be throttled.
+ *
+ * TOCTOU FIX (audit HIGH): the previous order — COUNT the window, decide, THEN
+ * INSERT — was a time-of-check/time-of-use race. Concurrent requests all read
+ * the SAME pre-insert count, all passed the cap check, and all inserted, so the
+ * per-email/per-IP caps were bypassable under parallelism. We now RECORD the
+ * attempt FIRST and only THEN count the window (which now includes this
+ * attempt), rejecting if the inclusive count is over the cap. Because every
+ * concurrent request commits its own row before any of them counts, at most
+ * `cap` requests can observe a count at or below the cap — the check is atomic
+ * with respect to the durable D1 counter. Counting this attempt makes the count
+ * 1-based (the Nth attempt sees N), so magicLinkThrottled uses the inclusive
+ * (count > limit) test and a cap of 5 still admits exactly 5 attempts. The
+ * recorded rows are self-healing: as the rolling window slides they fall out of
+ * the count and the address/IP recovers with no cleanup.
  */
 export async function guardMagicLinkRequest(
   deps: GuardDeps,
@@ -53,17 +68,15 @@ export async function guardMagicLinkRequest(
   const since = rateWindowStart(now);
   const email = args.email.trim().toLowerCase();
 
+  // Record first, then count the window (now inclusive of this attempt).
+  await deps.record({ email, ip: args.ip, at: now });
+
   const [emailInWindow, ipInWindow] = await Promise.all([
     deps.countRecentByEmail(email, since),
     deps.countRecentByIp(args.ip, since),
   ]);
 
-  if (magicLinkThrottled({ emailInWindow, ipInWindow })) {
-    return { throttled: true };
-  }
-
-  await deps.record({ email, ip: args.ip, at: now });
-  return { throttled: false };
+  return { throttled: magicLinkThrottled({ emailInWindow, ipInWindow }) };
 }
 
 /** Wire the guard to the D1 control plane. */

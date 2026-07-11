@@ -25,11 +25,13 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { apiError, requirePlatform } from "$lib/server/api-util";
+import { isProductionEnv } from "$lib/server/auth";
 import { createDb, schema } from "$lib/server/db";
 import { resolveApiKey } from "$lib/server/vault-access";
 import { buildMcpServer } from "$lib/server/mcp";
 import { magicLinkMinter } from "$lib/server/magic-link";
 import { buildPublicMcpServer, signupDepsFromDb } from "$lib/server/public-mcp";
+import { resolveRateLimitIp } from "$lib/server/rate-limit";
 import { vaultClient } from "$lib/server/vault-client";
 
 const handleMcp: RequestHandler = async (event) => {
@@ -39,9 +41,24 @@ const handleMcp: RequestHandler = async (event) => {
   if (event.request.headers.get("authorization") === null) {
     // Absent auth → public server (signup tool only). Invalid auth never
     // lands here — it still 401s below.
+    //
+    // Fail closed on a missing cf-connecting-ip in production (audit LOW): the
+    // signup rate limit is keyed on this IP, so header-less traffic must not
+    // pool into one shared "local" bucket a single actor could exhaust to block
+    // every other header-less signup. In dev the shared bucket is fine.
+    const resolvedIp = resolveRateLimitIp(
+      event.request.headers.get("cf-connecting-ip"),
+      isProductionEnv(platform.env),
+    );
+    if (!resolvedIp.ok) {
+      return new Response(
+        JSON.stringify({ error: "rate limited: missing client IP; retry through the edge" }),
+        { status: 429, headers: { "content-type": "application/json" } },
+      );
+    }
     server = buildPublicMcpServer(
       signupDepsFromDb(createDb(platform.env.DB), {
-        ip: event.request.headers.get("cf-connecting-ip") ?? "local",
+        ip: resolvedIp.ip,
         // Mint the human's loginUrl as a real Better Auth magic link. Its
         // origin comes from BETTER_AUTH_URL (production) or the request origin.
         createLoginLink: magicLinkMinter(platform.env, event.url.origin),

@@ -55,6 +55,28 @@ export const MAGIC_LINK_TTL_SECONDS = 15 * 60;
 export const AGENT_MAGIC_LINK_TTL_SECONDS = 10 * 60;
 
 /**
+ * The Better Auth magicLink-plugin endpoint that CONSUMES a magic-link token
+ * and creates the session — the only path that proves inbox control. In the
+ * databaseHooks.session.create.before hook, ctx.path is the endpoint path being
+ * handled (Better Auth sets it on the internal endpoint context), so comparing
+ * against this constant tells a magic-link sign-in apart from an OAuth callback
+ * or any other session-creating flow. Verified against better-auth 1.6.23
+ * (dist/plugins/magic-link/index.mjs registers `createAuthEndpoint("/magic-link/
+ * verify", …)`, and that endpoint is what mints the session on a successful
+ * verify).
+ */
+export const MAGIC_LINK_VERIFY_PATH = "/magic-link/verify";
+
+/**
+ * Is this session being created by the MAGIC-LINK verify endpoint (proven inbox
+ * control) rather than OAuth / any other flow? Reads ctx.path from the Better
+ * Auth endpoint context. Pure + exported for unit testing.
+ */
+export function isMagicLinkVerify(ctx: { path?: string } | null | undefined): boolean {
+  return ctx?.path === MAGIC_LINK_VERIFY_PATH;
+}
+
+/**
  * Idempotently decide whether a sign-in should flip `emailVerified` true.
  *
  * Clicking a magic link PROVES email ownership, so the first successful
@@ -64,19 +86,50 @@ export const AGENT_MAGIC_LINK_TTL_SECONDS = 10 * 60;
  * actually reached this account" from "an agent provisioned it and nobody showed
  * up".
  *
+ * CORRECTNESS (audit MEDIUM): this flip must happen ONLY on the magic-link
+ * verify path. A GitHub-OAuth session proves control of a GitHub account, NOT
+ * of the email address, so flipping emailVerified there is a FALSE "verified"
+ * signal. The session.create.before hook therefore gates on isMagicLinkVerify
+ * before consulting this predicate — OAuth session creation never flips it.
+ *
  * Returns true only when the user is currently unverified, so re-running is a
  * no-op (idempotent). Pure + exported for unit testing.
  *
  * NOTE: the installed Better Auth magicLink plugin ALSO flips emailVerified on
- * verify, but that is an undocumented library internal that has drifted across
- * versions. This hook makes the guarantee explicit in our own code and testable,
- * and is a safe no-op when the library has already done it.
+ * verify (better-auth 1.6.23 sets `emailVerified: true` on user creation and
+ * calls `updateUser(id, { emailVerified: true })` for an existing unverified
+ * user inside `/magic-link/verify`), but that is a library internal that has
+ * drifted across versions. This hook makes the guarantee explicit in our own
+ * code and testable, and is a safe no-op when the library has already done it.
+ *
+ * ENFORCEMENT: nothing hard-gates on emailVerified today, so it is an
+ * INFORMATIONAL signal ("a human has proven inbox control of this account") —
+ * useful for the onboarding handoff (agent provisions + onboards before the
+ * human verifies). If a capability ever needs to require a verified human, gate
+ * it by reading user.emailVerified at that boundary (e.g. in the /mcp route or a
+ * server load), rather than re-deriving verification. We deliberately do NOT add
+ * a hard email gate here — that would break the existing OAuth sign-in path.
  */
 export function shouldMarkEmailVerified(user: { emailVerified?: boolean | null }): boolean {
   return user.emailVerified !== true;
 }
 
 const DEV_SECRET_FALLBACK = "dev-insecure-secret-change-me";
+
+/**
+ * Is this request running in a production environment (as opposed to a genuine
+ * local dev build)? True whenever the origin is pinned to production OR this is
+ * a built/prod bundle (import.meta.env.DEV is false — it is true only under vite
+ * dev). This is the SAME fail-closed test resolveSecret uses, factored out so
+ * the rate limiter can decide whether a missing cf-connecting-ip is fatal (prod)
+ * or may fall back to a shared local bucket (dev only). Exported for testing.
+ */
+export function isProductionEnv(env: Pick<CloudEnv, "BETTER_AUTH_URL">): boolean {
+  const isProdOrigin = env.BETTER_AUTH_URL === PRODUCTION_ORIGIN;
+  // import.meta.env.DEV is true under vite dev; false in built/prod bundles.
+  const isDevBuild = Boolean(import.meta.env?.DEV) && !isProdOrigin;
+  return !isDevBuild;
+}
 
 /**
  * Resolve the auth secret, failing closed in production. If BETTER_AUTH_SECRET
@@ -86,10 +139,7 @@ const DEV_SECRET_FALLBACK = "dev-insecure-secret-change-me";
  */
 export function resolveSecret(env: CloudEnv): string {
   if (env.BETTER_AUTH_SECRET) return env.BETTER_AUTH_SECRET;
-  const isProdOrigin = env.BETTER_AUTH_URL === PRODUCTION_ORIGIN;
-  // import.meta.env.DEV is true under vite dev; false in built/prod bundles.
-  const isDev = Boolean(import.meta.env?.DEV) && !isProdOrigin;
-  if (!isDev) {
+  if (isProductionEnv(env)) {
     throw new Error(
       "BETTER_AUTH_SECRET is required in production — set it with `wrangler secret put BETTER_AUTH_SECRET`.",
     );
@@ -139,22 +189,23 @@ export function createAuth(
       ...(env.BETTER_AUTH_URL ? [env.BETTER_AUTH_URL] : []),
     ],
     database: drizzleAdapter(db, { provider: "sqlite", schema }),
-    // Flip emailVerified true the moment a session is created for a still-
-    // unverified user. A session only ever follows a proven credential — a
-    // magic-link verify or GitHub OAuth — so its creation is the honest signal
-    // that a human reached the account (see shouldMarkEmailVerified). Runs
+    // Flip emailVerified true ONLY when a session is created by the MAGIC-LINK
+    // verify path for a still-unverified user. Clicking an emailed magic link
+    // proves inbox control, so that is the honest moment to mark the account
+    // verified. Crucially this is gated on isMagicLinkVerify(ctx): a GitHub-OAuth
+    // session proves control of a GitHub account, NOT of the email address, so
+    // OAuth session creation must NOT flip it (audit MEDIUM — the previous hook
+    // flipped on EVERY session create, a false "verified" for OAuth). Runs
     // idempotently: no-op once the flag is already true, so repeat sign-ins and
-    // the library's own verify-time flip don't double-write.
+    // the plugin's own verify-time flip don't double-write.
     databaseHooks: {
       session: {
         create: {
           async before(session, ctx) {
-            // A session only ever follows a proven credential (magic-link verify
-            // or GitHub OAuth), so look up its user and flip emailVerified true
-            // if still false. findUserById + shouldMarkEmailVerified keep this
-            // reliable (no dependence on ctx.context.session being populated
-            // mid-creation) and idempotent (no-op once already verified).
-            if (ctx && session.userId) {
+            // Only the magic-link verify endpoint proves inbox control. On any
+            // other session-creating path (OAuth callback, etc.) leave
+            // emailVerified untouched.
+            if (ctx && isMagicLinkVerify(ctx) && session.userId) {
               const found = await ctx.context.internalAdapter.findUserById(session.userId);
               if (found && shouldMarkEmailVerified(found)) {
                 await ctx.context.internalAdapter.updateUser(session.userId, {

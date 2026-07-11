@@ -26,7 +26,7 @@ import {
 import { slugify } from "@brainz/engine";
 import { count, eq, gt, and } from "drizzle-orm";
 import { generateApiKey, hashApiKey, keyPrefixOf } from "./api-keys";
-import { exceedsSignupRateLimit, rateWindowStart } from "./rate-limit";
+import { exceedsSignupRateLimitInclusive, rateWindowStart } from "./rate-limit";
 import type { Db } from "./db";
 import { schema } from "./db";
 import { fail, guarded, ok, SERVER_NAME, SERVER_VERSION, type ToolResult } from "./mcp";
@@ -37,7 +37,34 @@ export interface ProvisionedSignup {
   user: typeof schema.user.$inferSelect;
   vault: typeof schema.vault.$inferSelect;
   apiKey: typeof schema.apiKey.$inferSelect;
-  event: typeof schema.signupEvent.$inferSelect;
+}
+
+/**
+ * The friendly, no-op-safe result for "this email already has an account".
+ * Returned both by the fast-path emailExists pre-check AND when a concurrent
+ * signup wins the race and our user insert hits the unique(email) constraint —
+ * one authoritative message either way, pointing the human at /login. Reveals
+ * only existence (the pre-check reveals that too), never any other account
+ * detail.
+ */
+function alreadyExistsResult(email: string): ToolResult {
+  return fail(
+    `an account for ${email} already exists — your human can sign in at the /login page ` +
+      "(enter this email, click the magic link) and create an API key from a vault's settings page instead",
+  );
+}
+
+/**
+ * Does `err` look like a SQLite/D1 UNIQUE-constraint violation on the user
+ * email? The unique index is the integrity backstop for concurrent same-email
+ * signups; when the emailExists pre-check races and loses, the user INSERT
+ * throws this instead of an opaque failure. D1/libSQL surface it as a message
+ * containing "UNIQUE constraint failed" (optionally naming user.email); we match
+ * defensively on the stable "unique constraint" phrase.
+ */
+export function isUniqueEmailViolation(err: unknown): boolean {
+  const message = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return message.includes("unique constraint") || message.includes("unique_constraint");
 }
 
 /** Persistence + environment port for the signup flow (drizzle in prod, fakes in tests). */
@@ -45,9 +72,20 @@ export interface SignupDeps {
   now(): Date;
   /** Client IP (CF-Connecting-IP), the rate-limit key. */
   ip: string;
+  /**
+   * Record this signup ATTEMPT (one signup_events row) — called BEFORE
+   * countRecentSignups so the count that follows includes it. See the
+   * insert-then-count TOCTOU note in handleSignup.
+   */
+  recordSignupAttempt(event: typeof schema.signupEvent.$inferSelect): Promise<void>;
   countRecentSignups(ip: string, since: Date): Promise<number>;
   emailExists(email: string): Promise<boolean>;
-  /** Persist the account rows atomically. */
+  /**
+   * Persist the account rows (user + vault + key) atomically. Throws a
+   * UNIQUE-constraint error if the email was taken by a racing signup between
+   * the emailExists pre-check and here; handleSignup maps that to the friendly
+   * already-exists result (isUniqueEmailViolation).
+   */
   persistSignup(p: ProvisionedSignup): Promise<void>;
   /**
    * Mint a one-time magic sign-in link for this email that lands on /dashboard.
@@ -72,18 +110,29 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
     const email = parsed.data.email.trim().toLowerCase();
     const now = deps.now();
 
-    // Per-IP rate limit: 5 signups per rolling hour.
-    const recent = await deps.countRecentSignups(deps.ip, rateWindowStart(now));
-    if (exceedsSignupRateLimit(recent)) {
-      return fail(
-        "rate limit exceeded: at most 5 signups per hour from one IP — wait and try again later",
-      );
+    // Fast path: reject a known-taken email before doing any provisioning work
+    // (and before consuming a rate-limit slot — a duplicate isn't a fresh
+    // signup). Best-effort: the unique(email) index is the authoritative backstop
+    // (see the persist catch below), which also covers the race where a
+    // concurrent signup for the same email slips past this SELECT.
+    if (await deps.emailExists(email)) {
+      return alreadyExistsResult(email);
     }
 
-    if (await deps.emailExists(email)) {
+    // Per-IP rate limit: 5 signups per rolling hour. TOCTOU-safe (audit HIGH):
+    // RECORD this attempt FIRST, then count the window (now inclusive of it) and
+    // reject if over the cap. Recording before counting means concurrent signups
+    // each commit their own row before any counts, so at most `cap` requests can
+    // observe a count at or below the cap — the check is atomic w.r.t. the
+    // durable D1 counter, not the old bypassable count-then-insert. (A racing
+    // duplicate that slips past the pre-check above still burns a slot here, but
+    // that same race is caught by the unique-email backstop and returns the
+    // friendly result — so it never provisions.)
+    await deps.recordSignupAttempt({ id: crypto.randomUUID(), ip: deps.ip, createdAt: now });
+    const recent = await deps.countRecentSignups(deps.ip, rateWindowStart(now));
+    if (exceedsSignupRateLimitInclusive(recent)) {
       return fail(
-        `an account for ${email} already exists — your human can sign in at the /login page ` +
-          "(enter this email, click the magic link) and create an API key from a vault's settings page instead",
+        "rate limit exceeded: at most 5 signups per hour from one IP — wait and try again later",
       );
     }
 
@@ -98,35 +147,47 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
 
     // Better Auth-compatible user row: emailVerified false and NO credential
     // account row — the human signs in via a magic link, never a password.
-    await deps.persistSignup({
-      user: {
-        id: userId,
-        name: email.split("@")[0] || email,
-        email,
-        emailVerified: false,
-        image: null,
-        createdAt: now,
-        updatedAt: now,
-      },
-      vault: {
-        id: vaultId,
-        ownerId: userId,
-        slug: vaultSlug,
-        name: vaultName,
-        createdAt: now,
-        onboardedAt: null,
-      },
-      apiKey: {
-        id: crypto.randomUUID(),
-        vaultId,
-        name: "agent-signup",
-        keyHash: await hashApiKey(apiKey),
-        keyPrefix: keyPrefixOf(apiKey),
-        createdAt: now,
-        lastUsedAt: null,
-      },
-      event: { id: crypto.randomUUID(), ip: deps.ip, createdAt: now },
-    });
+    try {
+      await deps.persistSignup({
+        user: {
+          id: userId,
+          name: email.split("@")[0] || email,
+          email,
+          emailVerified: false,
+          image: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+        vault: {
+          id: vaultId,
+          ownerId: userId,
+          slug: vaultSlug,
+          name: vaultName,
+          createdAt: now,
+          onboardedAt: null,
+        },
+        apiKey: {
+          id: crypto.randomUUID(),
+          vaultId,
+          name: "agent-signup",
+          keyHash: await hashApiKey(apiKey),
+          keyPrefix: keyPrefixOf(apiKey),
+          createdAt: now,
+          lastUsedAt: null,
+        },
+      });
+    } catch (err) {
+      // Unique-email race: a concurrent signup for the same email won between
+      // our emailExists pre-check and this insert, tripping the unique(email)
+      // index. Data integrity held (one row wins); map the loser's constraint
+      // error to the SAME friendly already-exists result the pre-check returns,
+      // not an opaque failure. Any other error is a genuine failure — rethrow so
+      // guarded() surfaces it as an isError result.
+      if (isUniqueEmailViolation(err)) {
+        return alreadyExistsResult(email);
+      }
+      throw err;
+    }
 
     // Mint the human's one-time sign-in link now that the user exists.
     const loginUrl = await deps.createLoginLink(email);
@@ -205,6 +266,11 @@ export function signupDepsFromDb(
     now: () => new Date(),
     ip: opts.ip,
     createLoginLink: opts.createLoginLink,
+    // Record the rate-limit attempt FIRST (its own commit) so the count that
+    // follows includes it — the TOCTOU-safe insert-then-count order.
+    recordSignupAttempt: async (event) => {
+      await db.insert(schema.signupEvent).values(event);
+    },
     countRecentSignups: async (ip, since) => {
       const rows = await db
         .select({ n: count() })
@@ -220,12 +286,14 @@ export function signupDepsFromDb(
         .limit(1);
       return rows.length > 0;
     },
+    // Account rows only (user + vault + key); the signup_events row was already
+    // recorded by recordSignupAttempt. A racing same-email signup trips the
+    // unique(email) index here — handleSignup maps that to the friendly result.
     persistSignup: async (p) => {
       await db.batch([
         db.insert(schema.user).values(p.user),
         db.insert(schema.vault).values(p.vault),
         db.insert(schema.apiKey).values(p.apiKey),
-        db.insert(schema.signupEvent).values(p.event),
       ]);
     },
   };
