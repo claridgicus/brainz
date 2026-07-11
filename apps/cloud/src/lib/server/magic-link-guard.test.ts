@@ -116,6 +116,38 @@ describe("guardMagicLinkRequest", () => {
     expect(rows).toHaveLength(N);
   });
 
+  it("treats case-variants of one email as the SAME rate-limit bucket", async () => {
+    // James@X.com and james@x.com must fill ONE bucket: mixed-case can never
+    // open a second bucket that dodges the per-email cap. Send exactly cap
+    // requests spread across case-variants (distinct IPs so only the email cap
+    // can trip), then one more variant — it must be throttled.
+    const { deps, rows } = fakeStore();
+    const variants = [
+      "James@X.com",
+      "james@x.com",
+      "JAMES@X.COM",
+      "  James@x.COM ",
+      "jAmEs@X.com",
+    ];
+    // MAGIC_LINK_EMAIL_LIMIT is 5; the array has exactly that many variants.
+    expect(variants).toHaveLength(MAGIC_LINK_EMAIL_LIMIT);
+    const accepted: boolean[] = [];
+    for (let i = 0; i < variants.length; i++) {
+      const { throttled } = await guardMagicLinkRequest(deps, {
+        email: variants[i],
+        ip: `ip-${i}`,
+      });
+      accepted.push(!throttled);
+    }
+    // All cap requests accepted — they share one bucket that fills to exactly cap.
+    expect(accepted.every(Boolean)).toBe(true);
+    // The next case-variant (same bucket) is over cap → throttled.
+    const extra = await guardMagicLinkRequest(deps, { email: "James@X.COM", ip: "ip-x" });
+    expect(extra.throttled).toBe(true);
+    // Every recorded row landed under the ONE canonical key.
+    expect(rows.every((r) => r.email === "james@x.com")).toBe(true);
+  });
+
   it("normalizes the email before counting", async () => {
     let seen = "";
     const deps: GuardDeps = {

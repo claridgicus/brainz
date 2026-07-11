@@ -20,6 +20,7 @@
 import { and, count, eq, gt } from "drizzle-orm";
 import type { Db } from "./db";
 import { schema } from "./db";
+import { normalizeEmail } from "./email";
 import {
   MAGIC_LINK_EMAIL_LIMIT,
   MAGIC_LINK_IP_LIMIT,
@@ -66,7 +67,10 @@ export async function guardMagicLinkRequest(
 ): Promise<GuardResult> {
   const now = deps.now();
   const since = rateWindowStart(now);
-  const email = args.email.trim().toLowerCase();
+  // Canonicalize once: the SAME normalized email keys BOTH the record (write)
+  // and the count (read), so case-variants land in one bucket (mixed-case can
+  // never open a second bucket that dodges the cap).
+  const email = normalizeEmail(args.email);
 
   // Record first, then count the window (now inclusive of this attempt).
   await deps.record({ email, ip: args.ip, at: now });
@@ -94,12 +98,16 @@ export function guardDepsFromDb(db: Db): GuardDeps {
   };
   return {
     now: () => new Date(),
-    countRecentByEmail: (email, since) => countSince(schema.magicLinkEvent.email, email, since),
+    // Normalize on BOTH the count and the record so the email bucket is keyed
+    // canonically even if a caller reaches these directly (belt-and-suspenders
+    // on top of guardMagicLinkRequest, which already normalizes).
+    countRecentByEmail: (email, since) =>
+      countSince(schema.magicLinkEvent.email, normalizeEmail(email), since),
     countRecentByIp: (ip, since) => countSince(schema.magicLinkEvent.ip, ip, since),
     record: async ({ email, ip, at }) => {
       await db.insert(schema.magicLinkEvent).values({
         id: crypto.randomUUID(),
-        email,
+        email: normalizeEmail(email),
         ip,
         createdAt: at,
       });

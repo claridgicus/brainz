@@ -49,6 +49,7 @@ import { slugify } from "@brainz/engine";
 import { count, eq, gt, and } from "drizzle-orm";
 import { generateApiKey, hashApiKey, keyPrefixOf } from "./api-keys";
 import { placeholderEmail, SIGNUP_EXPIRY_MS, UNCLAIMED_WORKSPACE_NAME } from "./claim";
+import { normalizeEmail } from "./email";
 import { exceedsSignupRateLimitInclusive, rateWindowStart } from "./rate-limit";
 import type { Db } from "./db";
 import { schema } from "./db";
@@ -169,7 +170,7 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
     // human — never returned here). claimEmailSent is true whenever an email
     // was supplied, regardless of eligibility or delivery: reporting anything
     // finer would be an account-existence oracle.
-    const email = parsed.data.email?.trim().toLowerCase();
+    const email = parsed.data.email ? normalizeEmail(parsed.data.email) : undefined;
     if (email) {
       try {
         await deps.requestClaim({ userId, email });
@@ -233,7 +234,7 @@ export async function handleSignIn(
     if (!parsed.success) {
       return fail(`invalid sign_in input: ${parsed.error.issues[0]?.message ?? "bad arguments"}`);
     }
-    const email = parsed.data.email.trim().toLowerCase();
+    const email = normalizeEmail(parsed.data.email);
 
     const { throttled } = await deps.requestSignIn({ email });
     if (throttled) {

@@ -241,6 +241,26 @@ describe("requestClaim", () => {
     expect(state.claims).toHaveLength(0);
   });
 
+  it("a MIXED-CASE address matches an already-registered (lowercase) account — no fork", async () => {
+    // The account was stored canonically (lowercase). A claim requested with a
+    // case-variant of it must normalize BEFORE the emailRegistered lookup, so
+    // it resolves to the SAME account: notice email only, no new token/claim.
+    const { db, state } = fakeDb({ registeredEmails: new Set(["human@example.com"]) });
+    const { mailer, sent } = fakeMailer();
+    const result = await requestClaim(deps(db, mailer), {
+      userId: "user-1",
+      email: "  Human@Example.COM ",
+    });
+    expect(result.ok).toBe(true);
+    // Detected as already-registered (matched across case) → notice, no token.
+    expect(sent).toEqual([{ kind: "notice", to: "human@example.com" }]);
+    expect(state.claims).toHaveLength(0);
+    // The rate-limit event is keyed on the normalized form (shared bucket).
+    expect(state.magicLinkEvents).toEqual([
+      { email: "human@example.com", ip: "203.0.113.7", at: NOW },
+    ]);
+  });
+
   it("throttled by the email window → error result, nothing sent (attempt still recorded)", async () => {
     // TOCTOU-safe guard (record-before-count, inclusive `count > limit`): the
     // inclusive window count already PAST the email cap trips the throttle. The

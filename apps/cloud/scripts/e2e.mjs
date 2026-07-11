@@ -1315,6 +1315,69 @@ async function main() {
       rlSixth.status === 429 && !/exist|found/i.test(JSON.stringify(rlBody)),
       `status ${rlSixth.status}`,
     );
+    // A MIXED-CASE variant of that SAME at-cap address is ALSO throttled — proof
+    // the rate-limit bucket is keyed on the NORMALIZED email, so case-variants
+    // share ONE bucket (a fresh bucket would reset the count and return 200).
+    const rlVariant = rlEmail.toUpperCase();
+    const rlVariantRes = await fetch(`${BASE}/api/auth/sign-in/magic-link`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE },
+      body: JSON.stringify({ email: rlVariant, callbackURL: "/dashboard" }),
+    });
+    step(
+      "magic-link: a MIXED-CASE variant of the at-cap address is ALSO throttled → 429 (SHARED bucket)",
+      rlVariantRes.status === 429,
+      `variant ${rlVariant} → status ${rlVariantRes.status}`,
+    );
+
+    // ================================================================
+    // 19b. EMAIL NORMALIZATION — mixed-case round-trip. Signing in with a
+    // MIXED-CASE address must (a) store/return the email lowercase and (b)
+    // resolve a subsequent LOWERCASE request to the SAME account (no fork).
+    // This proves the system-wide lowercase invariant end to end; the
+    // shared-rate-limit-bucket dimension is asserted just above (§19) and
+    // exhaustively in the magic-link-guard unit test.
+    // ================================================================
+    const mixedLocal = `norm-${Date.now()}`;
+    const mixedCase = `${mixedLocal}@Example.COM`;
+    const lowerCase = `${mixedLocal}@example.com`;
+
+    // (a) sign in with the MIXED-CASE address → follow the link → session.
+    const mixedJar = new Map();
+    const mixedLogin = await signInViaMagicLink(mixedCase, mixedJar);
+    step(
+      "normalization: sign-in with a MIXED-CASE email succeeds",
+      mixedLogin.ok && mixedJar.size > 0,
+      mixedLogin.ok ? "" : `failed at ${mixedLogin.reason} (status ${mixedLogin.status})`,
+    );
+    // The stored/returned email is LOWERCASE (Better Auth stores what our layer
+    // normalized before handing it over).
+    const mixedSession = await fetch(`${BASE}/api/auth/get-session`, {
+      headers: { origin: BASE, cookie: cookieHeader(mixedJar) },
+    });
+    const mixedSessionJson = await mixedSession.json().catch(() => null);
+    step(
+      "normalization: the stored/returned email is lowercase (not the mixed-case input)",
+      mixedSessionJson?.user?.email === lowerCase,
+      `stored=${mixedSessionJson?.user?.email} (input ${mixedCase})`,
+    );
+    const mixedUserId = mixedSessionJson?.user?.id;
+
+    // (b) a subsequent LOWERCASE request resolves to the SAME account — no fork.
+    const lowerJar = new Map();
+    const lowerLogin = await signInViaMagicLink(lowerCase, lowerJar);
+    const lowerSession = await fetch(`${BASE}/api/auth/get-session`, {
+      headers: { origin: BASE, cookie: cookieHeader(lowerJar) },
+    });
+    const lowerSessionJson = await lowerSession.json().catch(() => null);
+    step(
+      "normalization: a lowercase sign-in hits the SAME account (same user id — no fork)",
+      lowerLogin.ok &&
+        Boolean(mixedUserId) &&
+        lowerSessionJson?.user?.id === mixedUserId &&
+        lowerSessionJson?.user?.email === lowerCase,
+      `mixed=${mixedUserId} lower=${lowerSessionJson?.user?.id}`,
+    );
 
     // ================================================================
     // 20. EXPIRY ENFORCEMENT (Wave G) — signup → never claim → clock past
