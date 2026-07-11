@@ -11,6 +11,13 @@ import {
   type SimulationNodeDatum,
 } from "d3-force";
 import { filterGraph, neighborhood } from "./graph-data.js";
+import {
+  cullEdge,
+  defaultEnabledTypes,
+  isInViewport,
+  viewportRect,
+  type ViewportRect,
+} from "./graph-view.js";
 import { renderMarkdown, escapeHtml } from "./markdown.js";
 import type {
   ApiEdge,
@@ -40,6 +47,10 @@ const TYPE_COLORS: Record<string, string> = {
 const ALL_TYPES = Object.keys(TYPE_COLORS);
 const SVG_NS = "http://www.w3.org/2000/svg";
 
+// Extra graph-space padding (~1 viewport-ish) so nodes just off the edge stay
+// in the DOM and pans don't visibly pop elements in and out.
+const CULL_PAD = 120;
+
 interface SimNode extends SimulationNodeDatum {
   id: string;
   data: ApiNode;
@@ -63,17 +74,26 @@ const emptyHint = $("empty-hint");
 // ---------------------------------------------------------------- state
 
 let graph: GraphPayload = { nodes: [], edges: [] };
-const enabledTypes = new Set(ALL_TYPES);
+const enabledTypes = defaultEnabledTypes();
 let focusId: string | null = null;
 let selectedId: string | null = null;
+let hoverId: string | null = null;
+let hoverNbrs: Set<string> = new Set();
 
 const simNodes = new Map<string, SimNode>(); // persists positions across re-renders
 let sim: Simulation<SimNode, SimLink> | null = null;
 let viewport: SVGGElement;
 let edgesG: SVGGElement;
 let nodesG: SVGGElement;
+
+// The force sim runs on the full (type-filtered) set; the DOM only holds the
+// culled viewport subset. `nodeEls`/`lineEls` map ids to *currently mounted*
+// elements; `simNodeList`/`simLinks` are the full layout inputs.
+let simNodeList: SimNode[] = [];
+let simLinks: SimLink[] = [];
+const layoutIds = new Set<string>(); // ids currently in the type/focus-filtered layout
 const nodeEls = new Map<string, SVGGElement>();
-const lineEls: { el: SVGLineElement; link: SimLink }[] = [];
+const lineEls = new Map<SimLink, SVGLineElement>();
 
 const view = { x: 0, y: 0, k: 1 };
 
@@ -100,6 +120,8 @@ function setupSvg(): void {
 function applyView(): void {
   viewport.setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`);
   svg.classList.toggle("labels-hidden", view.k < 0.45);
+  // Pan/zoom changes the visible viewport — re-cull the DOM (rAF-throttled).
+  scheduleCull();
 }
 
 const toGraphCoords = (cx: number, cy: number): [number, number] => {
@@ -122,7 +144,7 @@ function renderGraph(): void {
   const height = svg.clientHeight || 600;
 
   // Reuse sim nodes so positions survive filter changes.
-  const nodeList: SimNode[] = nodes.map((n) => {
+  simNodeList = nodes.map((n) => {
     let sn = simNodes.get(n.id);
     if (!sn) {
       sn = { id: n.id, data: n, r: radiusFor(n.degree) };
@@ -132,13 +154,17 @@ function renderGraph(): void {
     sn.r = radiusFor(n.degree);
     return sn;
   });
-  const links: SimLink[] = edges.map((e) => ({ source: e.from, target: e.to, relation: e.relation }));
+  simLinks = edges.map((e) => ({ source: e.from, target: e.to, relation: e.relation }));
+  layoutIds.clear();
+  for (const sn of simNodeList) layoutIds.add(sn.id);
 
+  // The force sim runs on the *full* type-filtered set (layout is correct even
+  // for nodes the viewport culls out of the DOM).
   sim?.stop();
-  sim = forceSimulation<SimNode, SimLink>(nodeList)
+  sim = forceSimulation<SimNode, SimLink>(simNodeList)
     .force(
       "link",
-      forceLink<SimNode, SimLink>(links)
+      forceLink<SimNode, SimLink>(simLinks)
         .id((d) => d.id)
         .distance(85)
         .strength(0.4),
@@ -152,73 +178,159 @@ function renderGraph(): void {
     .alphaDecay(0.035)
     .on("tick", tick);
 
-  // (Re)build DOM.
+  // Drop every mounted element; the cull pass re-mounts only the viewport subset.
   edgesG.innerHTML = "";
   nodesG.innerHTML = "";
   nodeEls.clear();
-  lineEls.length = 0;
-
-  for (const link of links) {
-    const line = document.createElementNS(SVG_NS, "line");
-    if (link.relation !== "references") {
-      line.classList.add("typed");
-    }
-    line.addEventListener("pointerenter", (ev) => showTooltip(ev, link.relation));
-    line.addEventListener("pointermove", (ev) => showTooltip(ev, link.relation));
-    line.addEventListener("pointerleave", hideTooltip);
-    edgesG.append(line);
-    lineEls.push({ el: line, link });
-  }
-
-  for (const sn of nodeList) {
-    const g = document.createElementNS(SVG_NS, "g");
-    g.classList.add("node");
-    if (sn.data.pending) g.classList.add("pending");
-    if (sn.id === selectedId) g.classList.add("selected");
-    g.dataset["id"] = sn.id;
-
-    const circle = document.createElementNS(SVG_NS, "circle");
-    circle.setAttribute("r", String(sn.r));
-    circle.setAttribute("fill", TYPE_COLORS[sn.data.type] ?? TYPE_COLORS["pending"]!);
-
-    const label = document.createElementNS(SVG_NS, "text");
-    label.textContent = sn.data.title;
-    label.setAttribute("dy", String(sn.r + 13));
-
-    const title = document.createElementNS(SVG_NS, "title");
-    title.textContent = `${sn.data.title} (${sn.data.type}${sn.data.pending ? ", pending" : ""})`;
-
-    g.append(circle, label, title);
-    attachNodeEvents(g, sn);
-    nodesG.append(g);
-    nodeEls.set(sn.id, g);
-  }
-  tick();
+  lineEls.clear();
+  cullRender();
 }
 
 const linkId = (end: SimLink["source"]): string =>
   typeof end === "object" ? end.id : String(end);
 
-function tick(): void {
-  for (const { el, link } of lineEls) {
+// -------- element factories (mounted lazily by the viewport cull) --------
+
+function createNodeEl(sn: SimNode): SVGGElement {
+  const g = document.createElementNS(SVG_NS, "g");
+  g.classList.add("node");
+  if (sn.data.pending) g.classList.add("pending");
+  if (sn.id === selectedId) g.classList.add("selected");
+  g.dataset["id"] = sn.id;
+
+  const circle = document.createElementNS(SVG_NS, "circle");
+  circle.setAttribute("r", String(sn.r));
+  circle.setAttribute("fill", TYPE_COLORS[sn.data.type] ?? TYPE_COLORS["pending"]!);
+
+  const label = document.createElementNS(SVG_NS, "text");
+  label.textContent = sn.data.title;
+  label.setAttribute("dy", String(sn.r + 13));
+
+  const title = document.createElementNS(SVG_NS, "title");
+  title.textContent = `${sn.data.title} (${sn.data.type}${sn.data.pending ? ", pending" : ""})`;
+
+  g.append(circle, label, title);
+  attachNodeEvents(g, sn);
+  return g;
+}
+
+function createLineEl(link: SimLink): SVGLineElement {
+  const line = document.createElementNS(SVG_NS, "line");
+  if (link.relation !== "references") line.classList.add("typed");
+  line.addEventListener("pointerenter", (ev) => showTooltip(ev, link.relation));
+  line.addEventListener("pointermove", (ev) => showTooltip(ev, link.relation));
+  line.addEventListener("pointerleave", hideTooltip);
+  return line;
+}
+
+// -------- viewport culling: only in-viewport elements live in the DOM --------
+
+let cullScheduled = false;
+
+/** rAF-throttled re-cull, used on pan/zoom where positions don't change but the viewport does. */
+function scheduleCull(): void {
+  if (cullScheduled) return;
+  cullScheduled = true;
+  requestAnimationFrame(() => {
+    cullScheduled = false;
+    cullRender();
+  });
+}
+
+function currentViewport(): ViewportRect {
+  const width = svg.clientWidth || 900;
+  const height = svg.clientHeight || 600;
+  return viewportRect(width, height, view, CULL_PAD);
+}
+
+/**
+ * Reconcile the DOM against the current viewport: mount visible-type nodes that
+ * fall inside the viewport, unmount those that leave it, and draw each edge in
+ * full / as a stub / not at all per `cullEdge`. The force sim keeps running on
+ * the full set, so unmounting a node never disturbs layout.
+ */
+function cullRender(): void {
+  const vp = currentViewport();
+
+  // Nodes: mount/unmount by viewport membership, keeping element identity.
+  const visible = new Set<string>();
+  for (const sn of simNodeList) {
+    const x = sn.x ?? 0;
+    const y = sn.y ?? 0;
+    const inView = isInViewport(x, y, sn.r, vp);
+    let g = nodeEls.get(sn.id);
+    if (inView) {
+      visible.add(sn.id);
+      if (!g) {
+        g = createNodeEl(sn);
+        nodeEls.set(sn.id, g);
+        nodesG.append(g);
+        if (hoverId !== null) applyHoverClass(sn.id, g);
+      }
+      g.setAttribute("transform", `translate(${x},${y})`);
+    } else if (g) {
+      g.remove();
+      nodeEls.delete(sn.id);
+    }
+  }
+
+  // Edges: draw only those with at least one visible endpoint; stub the ones
+  // that run off to an unmounted node.
+  for (const link of simLinks) {
     const s = link.source as SimNode;
     const t = link.target as SimNode;
-    if (typeof s !== "object" || typeof t !== "object") continue;
-    const dx = (t.x ?? 0) - (s.x ?? 0);
-    const dy = (t.y ?? 0) - (s.y ?? 0);
+    let line = lineEls.get(link);
+    if (typeof s !== "object" || typeof t !== "object") {
+      if (line) {
+        line.remove();
+        lineEls.delete(link);
+      }
+      continue;
+    }
+    const sx = s.x ?? 0;
+    const sy = s.y ?? 0;
+    const tx = t.x ?? 0;
+    const ty = t.y ?? 0;
+    const res = cullEdge(
+      { x: sx, y: sy },
+      { x: tx, y: ty },
+      visible.has(s.id),
+      visible.has(t.id),
+      vp,
+    );
+    if (res.kind === "drop") {
+      if (line) {
+        line.remove();
+        lineEls.delete(link);
+      }
+      continue;
+    }
+    if (!line) {
+      line = createLineEl(link);
+      lineEls.set(link, line);
+      edgesG.append(line);
+      if (hoverId !== null && (s.id === hoverId || t.id === hoverId)) line.classList.add("hl");
+    }
+    // Trim ends so full lines meet circle borders and arrowheads stay visible;
+    // stub ends terminate at the viewport edge and are left untrimmed.
+    const { x1, y1, x2, y2 } = res.ends;
+    const dx = x2 - x1;
+    const dy = y2 - y1;
     const dist = Math.hypot(dx, dy) || 1;
     const ux = dx / dist;
     const uy = dy / dist;
-    // Trim ends so lines meet circle borders and arrowheads stay visible.
-    el.setAttribute("x1", String((s.x ?? 0) + ux * (s.r + 1)));
-    el.setAttribute("y1", String((s.y ?? 0) + uy * (s.r + 1)));
-    el.setAttribute("x2", String((t.x ?? 0) - ux * (t.r + 3)));
-    el.setAttribute("y2", String((t.y ?? 0) - uy * (t.r + 3)));
+    const trimS = res.kind === "full" || res.ends.x1 === sx && res.ends.y1 === sy ? s.r + 1 : 0;
+    const trimT = res.kind === "full" || res.ends.x2 === tx && res.ends.y2 === ty ? t.r + 3 : 0;
+    line.setAttribute("x1", String(x1 + ux * trimS));
+    line.setAttribute("y1", String(y1 + uy * trimS));
+    line.setAttribute("x2", String(x2 - ux * trimT));
+    line.setAttribute("y2", String(y2 - uy * trimT));
   }
-  for (const [id, g] of nodeEls) {
-    const sn = simNodes.get(id);
-    if (sn) g.setAttribute("transform", `translate(${sn.x ?? 0},${sn.y ?? 0})`);
-  }
+}
+
+function tick(): void {
+  // Positions moved; re-evaluate which elements belong in the DOM.
+  cullRender();
 }
 
 // ---------------------------------------------------------------- hover / tooltip
@@ -233,20 +345,25 @@ function hideTooltip(): void {
   tooltip.hidden = true;
 }
 
+/** Apply the current hover highlight to a single (freshly mounted) node element. */
+function applyHoverClass(id: string, g: SVGGElement): void {
+  g.classList.toggle("active", id === hoverId);
+  g.classList.toggle("nbr", id !== hoverId && hoverNbrs.has(id));
+}
+
 function setHover(id: string | null): void {
+  hoverId = id;
   if (id === null) {
+    hoverNbrs = new Set();
     svg.classList.remove("hovering");
     for (const g of nodeEls.values()) g.classList.remove("active", "nbr");
-    for (const { el } of lineEls) el.classList.remove("hl");
+    for (const el of lineEls.values()) el.classList.remove("hl");
     return;
   }
   svg.classList.add("hovering");
-  const nbrs = neighborhood(graph.edges, id, 1);
-  for (const [nid, g] of nodeEls) {
-    g.classList.toggle("active", nid === id);
-    g.classList.toggle("nbr", nid !== id && nbrs.has(nid));
-  }
-  for (const { el, link } of lineEls) {
+  hoverNbrs = neighborhood(graph.edges, id, 1);
+  for (const [nid, g] of nodeEls) applyHoverClass(nid, g);
+  for (const [link, el] of lineEls) {
     el.classList.toggle("hl", linkId(link.source) === id || linkId(link.target) === id);
   }
 }
@@ -473,8 +590,8 @@ function setupSearch(): void {
     close();
     searchInput.blur();
     const id = hit.concept.id;
-    if (!simNodes.has(id) || !nodeEls.has(id)) {
-      // Node hidden by filter/focus — reset focus so it can be shown.
+    if (!layoutIds.has(id)) {
+      // Node hidden by filter/focus — reset focus and enable its type so it renders.
       setFocus(null);
       enabledTypes.add(hit.concept.type);
       syncFilterCheckboxes();
@@ -554,13 +671,20 @@ function syncFilterCheckboxes(): void {
 
 function setupFilters(): void {
   const wrap = $("filters");
-  wrap.innerHTML = ALL_TYPES.map(
+  // Only default-on types are checked on first load; off types render nothing
+  // until toggled. "All" / "Reset" toggle the whole set.
+  const checkboxes = ALL_TYPES.map(
     (t) => `<label class="filter">
-      <input type="checkbox" checked data-type="${t}" />
+      <input type="checkbox"${enabledTypes.has(t) ? " checked" : ""} data-type="${t}" />
       <span class="dot" style="background:${TYPE_COLORS[t]}"></span>
       <span class="label">${t}</span>
     </label>`,
   ).join("");
+  wrap.innerHTML =
+    checkboxes +
+    `<button id="filter-all" class="filter-action" title="Show every node type">All</button>` +
+    `<button id="filter-reset" class="filter-action" title="Reset to default node types">Reset</button>`;
+
   wrap.addEventListener("change", (ev) => {
     const input = ev.target as HTMLInputElement;
     const type = input.dataset["type"];
@@ -569,6 +693,17 @@ function setupFilters(): void {
     else enabledTypes.delete(type);
     renderGraph();
   });
+
+  const setTypes = (types: Iterable<string>): void => {
+    enabledTypes.clear();
+    for (const t of types) enabledTypes.add(t);
+    syncFilterCheckboxes();
+    renderGraph();
+  };
+  $<HTMLButtonElement>("filter-all").addEventListener("click", () => setTypes(ALL_TYPES));
+  $<HTMLButtonElement>("filter-reset").addEventListener("click", () =>
+    setTypes(defaultEnabledTypes()),
+  );
 }
 
 // ---------------------------------------------------------------- boot

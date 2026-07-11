@@ -115,6 +115,15 @@ button:hover { border-color: var(--accent); }
 .filter .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .filter input:checked ~ .label { color: var(--text); }
 
+.filter-action {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.filter-action:hover { color: var(--text); border-color: var(--accent); }
+
 #focus-chip {
   background: rgb(79 156 249 / 0.15);
   border-color: var(--accent);
