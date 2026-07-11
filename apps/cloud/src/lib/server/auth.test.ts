@@ -9,7 +9,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // called by resolveSecret, so a no-op mock is enough to import the module.
 vi.mock("$app/server", () => ({ getRequestEvent: () => ({}) }));
 
-import { PRODUCTION_ORIGIN, resolveSecret } from "./auth";
+import {
+  AGENT_MAGIC_LINK_TTL_SECONDS,
+  MAGIC_LINK_TTL_SECONDS,
+  PRODUCTION_ORIGIN,
+  resolveSecret,
+  shouldMarkEmailVerified,
+} from "./auth";
 import type { CloudEnv } from "../../app.d";
 
 // resolveSecret only reads BETTER_AUTH_SECRET + BETTER_AUTH_URL; DB is a stub.
@@ -52,5 +58,31 @@ describe("resolveSecret (fail-closed secret)", () => {
     expect(() => resolveSecret(make({ BETTER_AUTH_URL: PRODUCTION_ORIGIN }))).toThrow(
       /BETTER_AUTH_SECRET is required/,
     );
+  });
+});
+
+describe("shouldMarkEmailVerified (verify-email-on-signin)", () => {
+  it("flips an unverified account (false)", () => {
+    expect(shouldMarkEmailVerified({ emailVerified: false })).toBe(true);
+  });
+
+  it("treats missing/null emailVerified as unverified (flip)", () => {
+    expect(shouldMarkEmailVerified({})).toBe(true);
+    expect(shouldMarkEmailVerified({ emailVerified: null })).toBe(true);
+  });
+
+  it("is a no-op once already verified (idempotent)", () => {
+    expect(shouldMarkEmailVerified({ emailVerified: true })).toBe(false);
+  });
+});
+
+describe("agent-minted magic link TTL (agent-loginurl-hardening)", () => {
+  it("is strictly shorter than the emailed default", () => {
+    expect(AGENT_MAGIC_LINK_TTL_SECONDS).toBeLessThan(MAGIC_LINK_TTL_SECONDS);
+  });
+
+  it("is a positive, realistic hand-off window (<= 10 min)", () => {
+    expect(AGENT_MAGIC_LINK_TTL_SECONDS).toBeGreaterThan(0);
+    expect(AGENT_MAGIC_LINK_TTL_SECONDS).toBeLessThanOrEqual(10 * 60);
   });
 });

@@ -34,6 +34,48 @@ export const PRODUCTION_ORIGIN = "https://brainz.brownmatter.ai";
 /** Magic links expire quickly — single-use handoff, not a standing credential. */
 export const MAGIC_LINK_TTL_SECONDS = 15 * 60;
 
+/**
+ * Agent-minted links (the signup tool's `loginUrl`) get a DISTINCT, SHORTER TTL
+ * than an emailed link.
+ *
+ * HANDOFF-EXPOSURE MODEL: an emailed magic link proves inbox control and lands
+ * only in the human's mailbox. An agent-minted link is returned in an MCP TOOL
+ * RESULT that many orchestrators log — so a full, session-granting URL can sit
+ * in orchestrator logs, proving nothing about the human. Shrinking its lifetime
+ * shrinks that exposure window. Single-use is already enforced by Better Auth
+ * (the token is consumed atomically on first verify — see the minter notes), so
+ * the residual risk is a leaked-but-unopened link; a shorter TTL bounds it.
+ *
+ * 10 min (< the 15-min emailed default) is short enough to bound the exposure
+ * yet long enough for a realistic agent→human hand-off. Per-request expiry is
+ * NOT supported by the installed magicLink plugin (`expiresIn` is plugin-level
+ * only), so the minter builds a separate auth instance pinned to this TTL — see
+ * createAuth's `magicLinkTtlSeconds` override.
+ */
+export const AGENT_MAGIC_LINK_TTL_SECONDS = 10 * 60;
+
+/**
+ * Idempotently decide whether a sign-in should flip `emailVerified` true.
+ *
+ * Clicking a magic link PROVES email ownership, so the first successful
+ * magic-link sign-in is the honest moment to mark the account verified. Accounts
+ * are provisioned with `emailVerified: false` (public-mcp.ts) and previously
+ * nothing ever flipped it — so there was no signal distinguishing "a human
+ * actually reached this account" from "an agent provisioned it and nobody showed
+ * up".
+ *
+ * Returns true only when the user is currently unverified, so re-running is a
+ * no-op (idempotent). Pure + exported for unit testing.
+ *
+ * NOTE: the installed Better Auth magicLink plugin ALSO flips emailVerified on
+ * verify, but that is an undocumented library internal that has drifted across
+ * versions. This hook makes the guarantee explicit in our own code and testable,
+ * and is a safe no-op when the library has already done it.
+ */
+export function shouldMarkEmailVerified(user: { emailVerified?: boolean | null }): boolean {
+  return user.emailVerified !== true;
+}
+
 const DEV_SECRET_FALLBACK = "dev-insecure-secret-change-me";
 
 /**
@@ -59,10 +101,19 @@ export function resolveSecret(env: CloudEnv): string {
  * @param mailerOverride When set, the magic-link callback delivers through this
  *   mailer instead of the env-selected one. The signup flow passes a capturing
  *   mailer so it can return the link as `loginUrl` rather than emailing it.
+ * @param opts.magicLinkTtlSeconds Overrides the magic-link `expiresIn`. The
+ *   agent-signup minter passes AGENT_MAGIC_LINK_TTL_SECONDS (shorter than the
+ *   emailed default) — see the handoff-exposure model above. Defaults to
+ *   MAGIC_LINK_TTL_SECONDS for the normal emailed flow.
  */
-export function createAuth(env: CloudEnv, mailerOverride?: Mailer) {
+export function createAuth(
+  env: CloudEnv,
+  mailerOverride?: Mailer,
+  opts?: { magicLinkTtlSeconds?: number },
+) {
   const db = createDb(env.DB);
   const mailer = mailerOverride ?? createMailer(env);
+  const magicLinkTtlSeconds = opts?.magicLinkTtlSeconds ?? MAGIC_LINK_TTL_SECONDS;
   const github =
     env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET
       ? {
@@ -88,10 +139,38 @@ export function createAuth(env: CloudEnv, mailerOverride?: Mailer) {
       ...(env.BETTER_AUTH_URL ? [env.BETTER_AUTH_URL] : []),
     ],
     database: drizzleAdapter(db, { provider: "sqlite", schema }),
+    // Flip emailVerified true the moment a session is created for a still-
+    // unverified user. A session only ever follows a proven credential — a
+    // magic-link verify or GitHub OAuth — so its creation is the honest signal
+    // that a human reached the account (see shouldMarkEmailVerified). Runs
+    // idempotently: no-op once the flag is already true, so repeat sign-ins and
+    // the library's own verify-time flip don't double-write.
+    databaseHooks: {
+      session: {
+        create: {
+          async before(session, ctx) {
+            // A session only ever follows a proven credential (magic-link verify
+            // or GitHub OAuth), so look up its user and flip emailVerified true
+            // if still false. findUserById + shouldMarkEmailVerified keep this
+            // reliable (no dependence on ctx.context.session being populated
+            // mid-creation) and idempotent (no-op once already verified).
+            if (ctx && session.userId) {
+              const found = await ctx.context.internalAdapter.findUserById(session.userId);
+              if (found && shouldMarkEmailVerified(found)) {
+                await ctx.context.internalAdapter.updateUser(session.userId, {
+                  emailVerified: true,
+                });
+              }
+            }
+            // Return nothing → the session is created unchanged.
+          },
+        },
+      },
+    },
     socialProviders: github,
     plugins: [
       magicLink({
-        expiresIn: MAGIC_LINK_TTL_SECONDS,
+        expiresIn: magicLinkTtlSeconds,
         // Hash tokens at rest — the plaintext exists only inside the emailed URL.
         storeToken: "hashed",
         sendMagicLink: async ({ email, url }) => {
