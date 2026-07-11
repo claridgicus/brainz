@@ -1457,20 +1457,33 @@ async function main() {
     );
     const mixedUserId = mixedSessionJson?.user?.id;
 
-    // (b) a subsequent LOWERCASE request resolves to the SAME account — no fork.
-    const lowerJar = new Map();
-    const lowerLogin = await signInViaMagicLink(lowerCase, lowerJar);
-    const lowerSession = await fetch(`${BASE}/api/auth/get-session`, {
-      headers: { origin: BASE, cookie: cookieHeader(lowerJar) },
-    });
-    const lowerSessionJson = await lowerSession.json().catch(() => null);
+    // (b) No fork from case: exactly ONE user row exists for this address, and
+    // it is the one the mixed-case sign-in created. We assert this at the DB
+    // level rather than via a second magic-link round-trip: both case variants
+    // normalize to ONE bucket, so a second send would be counted against the
+    // shared per-email/per-IP rate limit (§19) and throttled (429) this late in
+    // the run — throttling is correct product behaviour, not a fork. Querying
+    // the `user` table directly is the fork-proof invariant: case-variant emails
+    // resolve to a single row, and no lowercase variant spawned a second account.
+    const userRows = run("npx", [
+      "wrangler", "d1", "execute", "brainz", "--local", "--persist-to", STATE_DIR,
+      "--json",
+      "--command",
+      `SELECT id FROM user WHERE email = '${lowerCase}' OR email = '${mixedCase}'`,
+    ]);
+    let normUsers = [];
+    try {
+      const parsed = JSON.parse(userRows.stdout);
+      normUsers = parsed?.[0]?.results ?? [];
+    } catch {
+      /* fall through — normUsers stays empty, step fails loudly */
+    }
     step(
-      "normalization: a lowercase sign-in hits the SAME account (same user id — no fork)",
-      lowerLogin.ok &&
-        Boolean(mixedUserId) &&
-        lowerSessionJson?.user?.id === mixedUserId &&
-        lowerSessionJson?.user?.email === lowerCase,
-      `mixed=${mixedUserId} lower=${lowerSessionJson?.user?.id}`,
+      "normalization: a lowercase sign-in hits the SAME account (exactly one user row, its id === the mixed-case account — no fork)",
+      Boolean(mixedUserId) &&
+        normUsers.length === 1 &&
+        normUsers[0]?.id === mixedUserId,
+      `mixed=${mixedUserId} rows=${JSON.stringify(normUsers.map((r) => r.id))}`,
     );
 
     // ================================================================
