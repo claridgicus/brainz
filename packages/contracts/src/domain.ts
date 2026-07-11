@@ -79,8 +79,14 @@ export const CONCEPT_STATUSES = [
 
 export const SEARCH_MODES = ["hybrid", "keyword", "semantic"] as const;
 
-/** Vault embedding availability, as reported by stats/reindex surfaces. */
-export const EMBEDDING_STATUSES = ["ready", "unavailable"] as const;
+/**
+ * Vault embedding availability, as reported by stats/reindex surfaces.
+ * - `ready`        — the embedding model answered and vectors are stored.
+ * - `unavailable`  — no AI binding, or a call failed; search is keyword-only.
+ * - `rate-limited` — the per-vault rolling-hour embed cap was hit, so embeds
+ *   are skipped and search degrades to keyword-only until the window clears.
+ */
+export const EMBEDDING_STATUSES = ["ready", "unavailable", "rate-limited"] as const;
 
 export const conceptTypeSchema = z.enum(CONCEPT_TYPES);
 export const conceptStatusSchema = z.enum(CONCEPT_STATUSES);

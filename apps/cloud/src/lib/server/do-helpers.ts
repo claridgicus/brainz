@@ -30,6 +30,45 @@ export function compactMeta(meta: ConceptMeta): ToolConceptMeta {
   };
 }
 
+// ------------------------------------------------- embedding rate cap
+
+/**
+ * Is the vault at/over its rolling-window embedding cap? `timestamps` are the
+ * epoch-ms times of prior embed calls; only those within `windowMs` of `now`
+ * count. Returns true once `<count within window> >= cap` — i.e. the next call
+ * would exceed the cap and must be skipped. Pure so it unit-tests without a DO.
+ */
+export function isEmbedRateLimited(
+  timestamps: number[],
+  now: number,
+  windowMs: number,
+  cap: number,
+): boolean {
+  const cutoff = now - windowMs;
+  let count = 0;
+  for (const t of timestamps) if (t > cutoff) count++;
+  return count >= cap;
+}
+
+// ------------------------------------------------------- claim staleness
+
+/**
+ * Is a `taken` claim stale — held longer than the TTL and thus reclaimable?
+ * `takenAt` is an ISO instant (or null/undefined for a task never taken).
+ * A missing/unparseable `takenAt` is NOT stale (fail closed: don't reclaim a
+ * task we can't reason about). Pure + deterministic (caller passes `now`).
+ */
+export function isClaimStale(
+  takenAt: string | null | undefined,
+  now: number,
+  ttlMs: number,
+): boolean {
+  if (!takenAt) return false;
+  const t = Date.parse(takenAt);
+  if (Number.isNaN(t)) return false;
+  return now - t >= ttlMs;
+}
+
 // ------------------------------------------------------- keyword fallback
 
 /** Tokenize a query the same way core does before FTS (letters/digits/underscore). */
