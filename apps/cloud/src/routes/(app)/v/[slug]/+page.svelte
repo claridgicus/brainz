@@ -4,7 +4,12 @@
 	import type { ApiConcept, GraphNode, GraphPayload } from "@brainz/contracts";
 	import { ApiError, createApi, roleOf, type UpsertConceptBody, type VaultStats } from "$lib/api";
 	import { ALL_TYPES, TYPE_COLORS } from "$lib/graph-data";
-	import { defaultVisibleTypes } from "$lib/graph-view";
+	import {
+		defaultVisibleTypes,
+		filterModeStorageKey,
+		parseFilterMode,
+		type FilterMode,
+	} from "$lib/graph-view";
 	import ConceptEditor from "$lib/components/ConceptEditor.svelte";
 	import ConceptPanel from "$lib/components/ConceptPanel.svelte";
 	import Graph from "$lib/components/Graph.svelte";
@@ -80,23 +85,78 @@
 		}
 	});
 
-	const allEnabled = $derived(enabledTypes.length === ALL_TYPES.length);
+	// -------------------------------------------------------- LOD filter mode
+	// Semantic zoom LOD is the DEFAULT ("auto"): the Graph derives the visible-type
+	// set from the zoom scale and progressively reveals lower-signal types as you
+	// zoom in. The moment the user toggles a chip we flip to "manual" and the chips
+	// take over (today's behaviour). "Reset graph" and the Auto affordance return
+	// to "auto". Mode is persisted per-vault alongside the type prefs.
+	const modeKey = $derived(filterModeStorageKey(vault.id));
+	function loadFilterMode(key: string): FilterMode {
+		if (typeof localStorage === "undefined") return "auto";
+		try {
+			return parseFilterMode(localStorage.getItem(key));
+		} catch {
+			return "auto";
+		}
+	}
+	// svelte-ignore state_referenced_locally
+	let filterMode = $state<FilterMode>(loadFilterMode(modeKey));
+	$effect(() => {
+		filterMode = loadFilterMode(modeKey);
+	});
+	$effect(() => {
+		void filterMode;
+		if (!hydrated || typeof localStorage === "undefined") return;
+		try {
+			localStorage.setItem(modeKey, filterMode);
+		} catch {
+			/* storage full/disabled — in-memory mode still authoritative */
+		}
+	});
+
+	// The type set the Graph is actually showing right now: in auto mode this is
+	// the LOD-driven set the Graph reports via onlodchange; in manual it's the
+	// chip selection. Chips render their on/off state against this.
+	// svelte-ignore state_referenced_locally
+	let lodVisibleTypes = $state<string[]>([...enabledTypes]);
+	const activeTypes = $derived(filterMode === "auto" ? lodVisibleTypes : enabledTypes);
+	const isTypeShown = (t: string): boolean => activeTypes.includes(t);
+
+	const allEnabled = $derived(filterMode === "manual" && enabledTypes.length === ALL_TYPES.length);
 	function toggleType(t: string) {
+		// First manual touch flips out of auto-LOD: seed the manual selection from
+		// whatever the LOD is currently showing, then apply the toggle so the click
+		// reads naturally (the type you clicked flips relative to the visible set).
+		if (filterMode === "auto") {
+			const base = new Set(lodVisibleTypes);
+			if (base.has(t)) base.delete(t);
+			else base.add(t);
+			enabledTypes = ALL_TYPES.filter((x) => base.has(x));
+			filterMode = "manual";
+			return;
+		}
 		enabledTypes = enabledTypes.includes(t)
 			? enabledTypes.filter((x) => x !== t)
 			: [...enabledTypes, t];
 	}
 	function showAllTypes() {
 		enabledTypes = [...ALL_TYPES];
+		filterMode = "manual";
 	}
-	// One clear "Reset graph": restore default type filters AND clear the drag
-	// anchors (un-pin + re-layout, handled inside Graph.resetGraph). Confirm first
-	// since it discards the user's manual node placements.
+	/** Return to auto-LOD without a full reset (keeps anchors/focus/positions). */
+	function enableAuto() {
+		filterMode = "auto";
+	}
+	// One clear "Reset graph": restore default type filters, return to auto-LOD, AND
+	// clear the drag anchors (un-pin + re-layout, handled inside Graph.resetGraph).
+	// Confirm first since it discards the user's manual node placements.
 	function resetGraph() {
-		if (typeof confirm === "function" && !confirm("Reset the graph? This clears pinned node positions and restores the default type filters.")) {
+		if (typeof confirm === "function" && !confirm("Reset the graph? This clears pinned node positions and restores the default (auto) zoom view.")) {
 			return;
 		}
 		enabledTypes = defaultVisibleTypes();
+		filterMode = "auto";
 		graphRef?.resetGraph();
 	}
 
@@ -193,12 +253,28 @@
 		<SearchBox search={(q) => api.search(vault.id, q)} onpick={navigate} />
 
 		<div class="filters" role="group" aria-label="Filter by type">
+			<button
+				type="button"
+				class="chip chip-mode"
+				class:active={filterMode === "auto"}
+				onclick={enableAuto}
+				aria-pressed={filterMode === "auto"}
+				title={filterMode === "auto"
+					? "Auto (semantic zoom): node types reveal as you zoom in. Toggle a type to switch to manual."
+					: "Manual filtering. Click to return to auto — types reveal by zoom level."}
+			>
+				<span class="mode-dot" class:live={filterMode === "auto"}></span>{filterMode === "auto" ? "Auto zoom" : "Auto"}
+			</button>
 			{#each ALL_TYPES as t (t)}
 				<button
 					type="button"
 					class="chip"
-					class:off={!enabledTypes.includes(t)}
+					class:off={!isTypeShown(t)}
+					class:lod={filterMode === "auto"}
 					onclick={() => toggleType(t)}
+					title={filterMode === "auto"
+						? (isTypeShown(t) ? `${t} — shown at this zoom (click to filter manually)` : `${t} — hidden; zoom in to reveal, or click to filter manually`)
+						: t}
 				>
 					<span class="dot" style="background:{TYPE_COLORS[t]}; color:{TYPE_COLORS[t]}"></span>{t}
 				</button>
@@ -208,7 +284,7 @@
 					type="button"
 					class="chip chip-action"
 					onclick={showAllTypes}
-					title="Render every concept type"
+					title="Render every concept type (switches to manual)"
 				>
 					Show all
 				</button>
@@ -217,7 +293,7 @@
 				type="button"
 				class="chip chip-action"
 				onclick={resetGraph}
-				title="Restore default type filters and clear pinned node positions"
+				title="Restore the default (auto) zoom view and clear pinned node positions"
 			>
 				Reset graph
 			</button>
@@ -256,9 +332,11 @@
 					{graph}
 					{enabledTypes}
 					vaultId={vault.id}
+					{filterMode}
 					{focusId}
 					{selectedId}
 					onselect={(id) => void select(id)}
+					onlodchange={(types) => (lodVisibleTypes = types)}
 				/>
 			{/if}
 
@@ -401,6 +479,32 @@
 	.chip-action {
 		color: var(--text-dim);
 		font-weight: 600;
+	}
+
+	/* Auto/LOD mode indicator — reads as a live toggle when active. */
+	.chip-mode {
+		font-weight: 600;
+	}
+	.chip-mode.active {
+		border-color: var(--accent);
+		color: var(--text);
+		background: color-mix(in srgb, var(--accent) 16%, var(--bg-overlay));
+	}
+	.chip-mode .mode-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--text-dim);
+	}
+	.chip-mode .mode-dot.live {
+		background: var(--accent);
+		box-shadow: 0 0 6px var(--accent);
+	}
+	/* In auto mode a chip that's off is LOD-hidden (revealed by zoom), not a manual
+	   filter — show it faded but not fully dimmed so users see it's zoom-gated. */
+	.chip.lod.off {
+		opacity: 0.55;
+		border-style: dashed;
 	}
 
 	.stage {

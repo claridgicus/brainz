@@ -42,6 +42,84 @@ export function allEnabledTypes(): Set<string> {
   return new Set<string>(ALL_NODE_TYPES);
 }
 
+// -------------------------------------------------------- semantic zoom LOD
+// Level-of-detail as you zoom: furthest out shows only the top-signal type
+// (domains); zooming in progressively unfolds lower-signal tiers. Mirrors the
+// cloud app's pure LOD logic (apps/cloud/src/lib/graph-view.ts) so both viewers
+// share one ranking + threshold curve. NOTE: the static web viewer's main.ts
+// does not yet wire this into its zoom handler / add an auto-mode toggle — only
+// the pure function is mirrored here (the interactive wiring is cloud-only).
+//
+// SIGNAL RANKING (rank 0 = highest signal, shown at min zoom):
+//   0: domain · 1: feature, spec, constraint · 2: story, workflow, pattern,
+//   decision · 3: glossary, concept, task · 4: pending (lowest).
+// THRESHOLD CURVE: a rank r becomes visible once scale crosses a threshold
+// spaced linearly across [LOD_MIN_SCALE, LOD_MAX_SCALE]; a ±LOD_HYSTERESIS
+// dead-band (using the previous set) stops flicker at a boundary. Monotonic:
+// zooming in only ever adds types.
+
+export const TYPE_SIGNAL_RANK: Record<string, number> = {
+  domain: 0,
+  feature: 1,
+  spec: 1,
+  constraint: 1,
+  story: 2,
+  workflow: 2,
+  pattern: 2,
+  decision: 2,
+  glossary: 3,
+  concept: 3,
+  task: 3,
+  pending: 4,
+};
+
+export const MAX_SIGNAL_RANK = 4;
+
+/** Signal rank for a type (unknown → MAX_SIGNAL_RANK: revealed last, never never). */
+export function signalRank(type: string): number {
+  return TYPE_SIGNAL_RANK[type] ?? MAX_SIGNAL_RANK;
+}
+
+export const LOD_MIN_SCALE = 0.3;
+export const LOD_MAX_SCALE = 2.2;
+export const LOD_HYSTERESIS = 0.1;
+
+/** Scale threshold at which a given rank first becomes eligible. */
+export function lodThresholdForRank(rank: number, maxRank = MAX_SIGNAL_RANK): number {
+  if (maxRank <= 0) return LOD_MIN_SCALE;
+  const clamped = Math.max(0, Math.min(maxRank, rank));
+  return LOD_MIN_SCALE + (clamped / maxRank) * (LOD_MAX_SCALE - LOD_MIN_SCALE);
+}
+
+/**
+ * Types visible at a given d3 zoom `scale`, derived from the signal ranking +
+ * threshold curve. Domains-only at/below LOD_MIN_SCALE; all types once zoomed
+ * past LOD_MAX_SCALE; monotonic in scale. Pass `prev` (the previously-visible
+ * set) for hysteresis so a small wiggle at a threshold doesn't toggle a type.
+ */
+export function typesVisibleAtZoom(
+  scale: number,
+  opts: { types?: readonly string[]; prev?: Set<string> | null } = {},
+): Set<string> {
+  const types = opts.types ?? ALL_NODE_TYPES;
+  const prev = opts.prev ?? null;
+  const out = new Set<string>();
+  for (const type of types) {
+    const rank = signalRank(type);
+    if (rank <= 0) {
+      out.add(type); // domains are the always-on baseline
+      continue;
+    }
+    const threshold = lodThresholdForRank(rank);
+    const wasOn = prev?.has(type) ?? false;
+    const on = wasOn
+      ? scale >= threshold * (1 - LOD_HYSTERESIS)
+      : scale >= threshold * (1 + LOD_HYSTERESIS);
+    if (on) out.add(type);
+  }
+  return out;
+}
+
 /** Axis-aligned viewport rectangle in *graph* coordinates (post-transform inverse). */
 export interface ViewportRect {
   minX: number;

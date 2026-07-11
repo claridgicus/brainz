@@ -6,25 +6,35 @@ import {
 	clearAnchorsFromNodes,
 	defaultVisibleTypes,
 	deserializeAnchors,
+	effectiveVisibleTypes,
+	filterModeStorageKey,
 	focusRevealSet,
 	isDimmed,
 	isEdgeDimmed,
 	isNodeInViewport,
+	LOD_MAX_SCALE,
+	LOD_MIN_SCALE,
+	lodThresholdForRank,
+	MAX_SIGNAL_RANK,
 	mergeFocusRender,
 	nodesInViewport,
+	parseFilterMode,
 	planEdges,
 	radiusForTypeDegree,
 	serializeAnchors,
 	setAnchor,
+	signalRank,
 	stubEdgesFor,
 	toScreen,
 	typeClusterCenter,
+	typesVisibleAtZoom,
 	typeSizeScale,
 	type AnchorableNode,
 	type AnchorMap,
 	type PositionedNode,
 	type ViewTransform,
 } from "./graph-view";
+import { ALL_TYPES } from "./graph-data";
 
 const rect = { width: 100, height: 100 };
 const identity: ViewTransform = { x: 0, y: 0, k: 1 };
@@ -43,6 +53,119 @@ describe("defaultVisibleTypes", () => {
 		const a = defaultVisibleTypes();
 		a.push("mutated");
 		expect(defaultVisibleTypes()).not.toContain("mutated");
+	});
+});
+
+describe("signalRank / lodThresholdForRank", () => {
+	it("ranks domain highest (0), pending lowest (MAX)", () => {
+		expect(signalRank("domain")).toBe(0);
+		expect(signalRank("feature")).toBeLessThan(signalRank("story"));
+		expect(signalRank("story")).toBeLessThan(signalRank("task"));
+		expect(signalRank("pending")).toBe(MAX_SIGNAL_RANK);
+	});
+	it("treats unknown types as the lowest rank (revealed last, never never)", () => {
+		expect(signalRank("totally-made-up")).toBe(MAX_SIGNAL_RANK);
+	});
+	it("maps rank 0 to min scale and max rank to max scale, monotonic between", () => {
+		expect(lodThresholdForRank(0)).toBeCloseTo(LOD_MIN_SCALE);
+		expect(lodThresholdForRank(MAX_SIGNAL_RANK)).toBeCloseTo(LOD_MAX_SCALE);
+		expect(lodThresholdForRank(1)).toBeGreaterThan(lodThresholdForRank(0));
+		expect(lodThresholdForRank(2)).toBeGreaterThan(lodThresholdForRank(1));
+	});
+	it("clamps out-of-range ranks", () => {
+		expect(lodThresholdForRank(-5)).toBeCloseTo(LOD_MIN_SCALE);
+		expect(lodThresholdForRank(999)).toBeCloseTo(LOD_MAX_SCALE);
+	});
+});
+
+describe("typesVisibleAtZoom", () => {
+	it("shows only domains at (and below) min zoom", () => {
+		const atMin = typesVisibleAtZoom(LOD_MIN_SCALE);
+		expect([...atMin]).toEqual(["domain"]);
+		const wayOut = typesVisibleAtZoom(0.05);
+		expect([...wayOut]).toEqual(["domain"]);
+	});
+	it("shows every type once zoomed in past max scale", () => {
+		// At exactly LOD_MAX_SCALE the lowest rank sits on its threshold; a
+		// decisive zoom past it (the wheel goes to 8) reveals everything.
+		const atMax = typesVisibleAtZoom(LOD_MAX_SCALE * 1.2);
+		expect([...atMax].sort()).toEqual([...ALL_TYPES].sort());
+		const wayIn = typesVisibleAtZoom(8);
+		expect([...wayIn].sort()).toEqual([...ALL_TYPES].sort());
+	});
+	it("reveals tiers progressively as scale grows (rank 0 ⊂ rank1 ⊂ ...)", () => {
+		const t0 = typesVisibleAtZoom(LOD_MIN_SCALE);
+		const t1 = typesVisibleAtZoom(lodThresholdForRank(1) * 1.2);
+		const t2 = typesVisibleAtZoom(lodThresholdForRank(2) * 1.2);
+		expect(t1.has("feature")).toBe(true);
+		expect(t1.has("story")).toBe(false); // rank 2 not yet in at rank-1 scale
+		expect(t2.has("story")).toBe(true);
+		// each tier is a superset of the previous
+		for (const t of t0) expect(t1.has(t)).toBe(true);
+		for (const t of t1) expect(t2.has(t)).toBe(true);
+	});
+	it("is monotonic in scale — zooming in never removes a type", () => {
+		let prev = new Set<string>();
+		for (let s = 0.1; s <= 4; s += 0.05) {
+			const cur = typesVisibleAtZoom(s);
+			for (const t of prev) expect(cur.has(t)).toBe(true); // no type dropped as scale rises
+			prev = cur;
+		}
+	});
+	it("hysteresis: a tiny wiggle around a threshold does not toggle a type", () => {
+		const thr = lodThresholdForRank(1); // feature/spec/constraint boundary
+		// Establish "on" just above the upper band, then wiggle down slightly.
+		const on = typesVisibleAtZoom(thr * 1.15);
+		expect(on.has("feature")).toBe(true);
+		// Carry the previous set: sitting right at the threshold stays ON (dead-band).
+		const wiggleDown = typesVisibleAtZoom(thr * 0.98, { prev: on });
+		expect(wiggleDown.has("feature")).toBe(true);
+		// Establish "off" just below the lower band, then wiggle up slightly.
+		const off = typesVisibleAtZoom(thr * 0.8);
+		expect(off.has("feature")).toBe(false);
+		const wiggleUp = typesVisibleAtZoom(thr * 1.02, { prev: off });
+		expect(wiggleUp.has("feature")).toBe(false); // still off — hasn't cleared upper band
+	});
+	it("clears the dead-band eventually — a decisive zoom flips the type", () => {
+		const thr = lodThresholdForRank(1);
+		const off = typesVisibleAtZoom(thr * 0.8);
+		const clearlyIn = typesVisibleAtZoom(thr * 1.5, { prev: off });
+		expect(clearlyIn.has("feature")).toBe(true);
+	});
+	it("honours a custom type list", () => {
+		const vis = typesVisibleAtZoom(LOD_MAX_SCALE, { types: ["domain", "task"] });
+		expect([...vis].sort()).toEqual(["domain", "task"]);
+	});
+});
+
+describe("effectiveVisibleTypes", () => {
+	const lod = new Set(["domain", "feature"]);
+	const manual = new Set(["task", "glossary", "domain"]);
+	it("uses the LOD set in auto mode (chips ignored)", () => {
+		expect(effectiveVisibleTypes("auto", lod, manual)).toEqual(["domain", "feature"]);
+	});
+	it("uses the manual chip set in manual mode (LOD ignored)", () => {
+		// order follows ALL_TYPES, not insertion order
+		const eff = effectiveVisibleTypes("manual", lod, manual);
+		expect(new Set(eff)).toEqual(new Set(["domain", "task", "glossary"]));
+	});
+	it("returns a stable ALL_TYPES-ordered array", () => {
+		const eff = effectiveVisibleTypes("auto", new Set(ALL_TYPES), new Set());
+		expect(eff).toEqual([...ALL_TYPES]);
+	});
+});
+
+describe("filterMode storage", () => {
+	it("namespaces the key per vault", () => {
+		expect(filterModeStorageKey("v1")).toBe("brainz:graph:filter-mode:v1");
+		expect(filterModeStorageKey("v2")).not.toBe(filterModeStorageKey("v1"));
+	});
+	it("parses valid modes and defaults everything else to auto", () => {
+		expect(parseFilterMode("manual")).toBe("manual");
+		expect(parseFilterMode("auto")).toBe("auto");
+		expect(parseFilterMode(null)).toBe("auto");
+		expect(parseFilterMode(undefined)).toBe("auto");
+		expect(parseFilterMode("garbage")).toBe("auto");
 	});
 });
 

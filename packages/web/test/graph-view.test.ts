@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   ALL_NODE_TYPES,
   DEFAULT_ON_TYPES,
+  LOD_MAX_SCALE,
+  LOD_MIN_SCALE,
+  MAX_SIGNAL_RANK,
   allEnabledTypes,
   clampToViewport,
   cullEdge,
@@ -10,13 +13,50 @@ import {
   isDimmed,
   isEdgeDimmed,
   isInViewport,
+  lodThresholdForRank,
   radiusForTypeDegree,
+  signalRank,
   typeClusterCenter,
   typeSizeScale,
+  typesVisibleAtZoom,
   viewportRect,
   type FocusEdge,
   type ViewportRect,
 } from "../frontend/graph-view.js";
+
+describe("semantic zoom LOD (mirror of cloud graph-view)", () => {
+  it("ranks domain highest, pending lowest, unknown → lowest", () => {
+    expect(signalRank("domain")).toBe(0);
+    expect(signalRank("feature")).toBeLessThan(signalRank("story"));
+    expect(signalRank("pending")).toBe(MAX_SIGNAL_RANK);
+    expect(signalRank("made-up")).toBe(MAX_SIGNAL_RANK);
+  });
+  it("maps rank 0 → min scale, max rank → max scale", () => {
+    expect(lodThresholdForRank(0)).toBeCloseTo(LOD_MIN_SCALE);
+    expect(lodThresholdForRank(MAX_SIGNAL_RANK)).toBeCloseTo(LOD_MAX_SCALE);
+  });
+  it("shows only domains at min zoom, all types past max zoom", () => {
+    expect([...typesVisibleAtZoom(LOD_MIN_SCALE)]).toEqual(["domain"]);
+    expect([...typesVisibleAtZoom(LOD_MAX_SCALE * 1.2)].sort()).toEqual(
+      [...ALL_NODE_TYPES].sort(),
+    );
+  });
+  it("is monotonic in scale — zooming in never removes a type", () => {
+    let prev = new Set<string>();
+    for (let s = 0.1; s <= 3; s += 0.1) {
+      const cur = typesVisibleAtZoom(s);
+      for (const t of prev) expect(cur.has(t)).toBe(true);
+      prev = cur;
+    }
+  });
+  it("hysteresis: a wiggle around a threshold keeps the previous state", () => {
+    const thr = lodThresholdForRank(1);
+    const on = typesVisibleAtZoom(thr * 1.15);
+    expect(typesVisibleAtZoom(thr * 0.98, { prev: on }).has("feature")).toBe(true);
+    const off = typesVisibleAtZoom(thr * 0.8);
+    expect(typesVisibleAtZoom(thr * 1.02, { prev: off }).has("feature")).toBe(false);
+  });
+});
 
 describe("default node-type loading (graph-view)", () => {
   it("defaults on the high-signal structural types only", () => {
