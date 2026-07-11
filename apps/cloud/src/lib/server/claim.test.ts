@@ -329,20 +329,24 @@ describe("requestClaim", () => {
     expect(sent[0].url).toMatch(new RegExp(`^${ORIGIN}/claim/[0-9a-f]{64}$`));
   });
 
-  it("a MIXED-CASE address matches an already-registered (lowercase) account — no fork", async () => {
+  it("a MIXED-CASE address matches an already-registered (lowercase) account — normalizes before lookup", async () => {
     // The account was stored canonically (lowercase). A claim requested with a
-    // case-variant of it must normalize BEFORE the emailRegistered lookup, so
-    // it resolves to the SAME account: notice email only, no new token/claim.
-    const { db, state } = fakeDb({ registeredEmails: new Set(["human@example.com"]) });
+    // case-variant of it must normalize BEFORE the findUserByEmail lookup so it
+    // resolves to the SAME account. An already-registered email still gets a
+    // real approval token (the human's click is the consent to reconcile the
+    // provisional workspace into their existing account).
+    const { db, state } = fakeDb({ registeredUsers: new Map([["human@example.com", { id: "existing-human" }]]) });
     const { mailer, sent } = fakeMailer();
     const result = await requestClaim(deps(db, mailer), {
       userId: "user-1",
       email: "  Human@Example.COM ",
     });
     expect(result.ok).toBe(true);
-    // Detected as already-registered (matched across case) → notice, no token.
-    expect(sent).toEqual([{ kind: "notice", to: "human@example.com" }]);
-    expect(state.claims).toHaveLength(0);
+    // Matched across case → an approval link is sent to the normalized address.
+    expect(sent).toHaveLength(1);
+    expect(sent[0].kind).toBe("approval");
+    expect(sent[0].to).toBe("human@example.com");
+    expect(state.claims).toHaveLength(1);
     // The rate-limit event is keyed on the normalized form (shared bucket).
     expect(state.magicLinkEvents).toEqual([
       { email: "human@example.com", ip: "203.0.113.7", at: NOW },

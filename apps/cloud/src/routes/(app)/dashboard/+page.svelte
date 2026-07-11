@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
-	import { createApi, autoSlug, ApiError } from "$lib/api";
+	import { createApi, autoSlug, roleOf, ApiError } from "$lib/api";
 
 	let { data } = $props();
 	const api = createApi(fetch);
@@ -60,11 +60,16 @@
 					</a>
 					<div class="meta-row">
 						<span class="muted created">Created {fmtDate(v.createdAt)}</span>
-						{#if (data.openTasks?.[v.id] ?? 0) > 0}
-							<a class="task-chip" href="/v/{v.slug}/board" title="Open tasks — view the board">
-								{data.openTasks[v.id]} open {data.openTasks[v.id] === 1 ? "task" : "tasks"}
-							</a>
-						{/if}
+						<span class="chips">
+							{#if roleOf(v) !== "owner"}
+								<span class="badge role-{roleOf(v)}" title="Your role on this vault">{roleOf(v)}</span>
+							{/if}
+							{#if (data.openTasks?.[v.id] ?? 0) > 0}
+								<a class="task-chip" href="/v/{v.slug}/board" title="Open tasks — view the board">
+									{data.openTasks[v.id]} open {data.openTasks[v.id] === 1 ? "task" : "tasks"}
+								</a>
+							{/if}
+						</span>
 					</div>
 				</div>
 			{/each}
@@ -159,6 +164,11 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 8px;
+	}
+	.chips {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
 	}
 	.task-chip {
 		font-size: 11.5px;

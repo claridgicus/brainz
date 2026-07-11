@@ -38,8 +38,11 @@ async function loadEmailMessageCtor(): Promise<
 export interface Mailer {
   /** Deliver a magic sign-in link to `to`. */
   sendMagicLink(args: { to: string; url: string }): Promise<void>;
-  /** Deliver a project-invite link (Wave P uses this; optional for now). */
-  sendInvite?(args: { to: string; url: string; projectName: string }): Promise<void>;
+  /**
+   * Deliver a vault-invite link (Wave M): `url` is the one-time
+   * `/invite/<token>` link, `role` the role the invite grants.
+   */
+  sendInvite?(args: { to: string; url: string; vaultName: string; role: string }): Promise<void>;
   /**
    * Deliver a claim-approval link (Wave G): an agent provisioned a workspace
    * and wants to attach it to this email — the human reviews and approves at
@@ -167,17 +170,18 @@ export function claimNoticeTemplate(): Template {
   });
 }
 
-export function inviteTemplate(url: string, projectName: string): Template {
+export function inviteTemplate(args: { url: string; vaultName: string; role: string }): Template {
   return brandedEmail({
-    subject: `You've been invited to ${projectName} on Brainz`,
-    preheader: `Join ${projectName} on Brainz.`,
-    heading: `Join ${projectName}`,
+    subject: `You've been invited to ${args.vaultName} on Brainz as ${args.role}`,
+    preheader: `Join ${args.vaultName} on Brainz as ${args.role}.`,
+    heading: `Join ${args.vaultName}`,
     intro:
-      `You've been invited to collaborate on the ${projectName} knowledge graph on Brainz. ` +
-      "Click below to accept and sign in — no password needed.",
+      `You've been invited to the ${args.vaultName} knowledge graph on Brainz as ${args.role}. ` +
+      "Click below to accept and sign in — no password needed. " +
+      "This link works once and expires in 14 days.",
     buttonLabel: "Accept invite",
-    url,
-    footnote: "If you weren't expecting this, you can ignore it.",
+    url: args.url,
+    footnote: "If you weren't expecting this, you can ignore it — nothing happens without accepting.",
   });
 }
 
@@ -241,8 +245,8 @@ export class MailChannelsMailer implements Mailer {
     await this.send(to, magicLinkTemplate(url));
   }
 
-  async sendInvite({ to, url, projectName }: { to: string; url: string; projectName: string }): Promise<void> {
-    await this.send(to, inviteTemplate(url, projectName));
+  async sendInvite(args: { to: string; url: string; vaultName: string; role: string }): Promise<void> {
+    await this.send(args.to, inviteTemplate(args));
   }
 
   async sendClaimApproval(args: {
@@ -292,10 +296,20 @@ export class DevMailer implements Mailer {
     console.error(`[DevMailer] magic link for ${to}: ${url}`);
   }
 
-  async sendInvite({ to, url, projectName }: { to: string; url: string; projectName: string }): Promise<void> {
+  async sendInvite({
+    to,
+    url,
+    vaultName,
+    role,
+  }: {
+    to: string;
+    url: string;
+    vaultName: string;
+    role: string;
+  }): Promise<void> {
     this.lastLink = { to, url };
     // eslint-disable-next-line no-console
-    console.error(`[DevMailer] invite for ${to} to ${projectName}: ${url}`);
+    console.error(`[DevMailer] invite for ${to} to ${vaultName} as ${role}: ${url}`);
   }
 
   async sendClaimApproval({

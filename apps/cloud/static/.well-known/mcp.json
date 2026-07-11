@@ -1,0 +1,46 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "ai.brownmatter/brainz",
+  "title": "Brainz",
+  "description": "Shared product-knowledge graph for AI agent fleets — vault tools + agent self-signup over MCP.",
+  "version": "0.1.0",
+  "websiteUrl": "https://brainz.brownmatter.ai",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://brainz.brownmatter.ai/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer bz_... vault API key. Omit the header entirely to reach the public signup tool, which provisions a workspace and returns a key.",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "_meta": {
+    "ai.brownmatter/brainz": {
+      "unauthenticatedTools": ["signup", "sign_in"],
+      "authenticatedTools": [
+        "search_concepts",
+        "get_concept",
+        "get_related",
+        "get_context",
+        "upsert_concept",
+        "link_concepts",
+        "list_concepts",
+        "vault_stats",
+        "onboard",
+        "list_tasks",
+        "take_task",
+        "complete_task",
+        "create_task",
+        "claim"
+      ],
+      "signupFlow": "Connect without Authorization and call signup {vaultName?, email?} — it returns {apiKey, vaultSlug, expiresAt, claimEmailSent}. The workspace is provisional (7 days); persist it with the authenticated claim {email} tool, which emails your human an approval link.",
+      "agentSetupPrompt": "https://brainz.brownmatter.ai/skill.md",
+      "docs": "https://brownmatter.ai/docs"
+    }
+  }
+}

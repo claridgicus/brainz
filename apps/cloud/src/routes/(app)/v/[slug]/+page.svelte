@@ -2,7 +2,7 @@
 	// The vault workspace: force-directed graph + concept panel + editor +
 	// search + type filters + stats bar.
 	import type { ApiConcept, GraphNode, GraphPayload } from "@brainz/contracts";
-	import { ApiError, createApi, type UpsertConceptBody, type VaultStats } from "$lib/api";
+	import { ApiError, createApi, roleOf, type UpsertConceptBody, type VaultStats } from "$lib/api";
 	import { ALL_TYPES, TYPE_COLORS } from "$lib/graph-data";
 	import { defaultVisibleTypes } from "$lib/graph-view";
 	import ConceptEditor from "$lib/components/ConceptEditor.svelte";
@@ -14,6 +14,9 @@
 	let { data } = $props();
 	const api = createApi(fetch);
 	const vault = $derived(data.vault);
+	/** Viewers browse read-only: no create/edit/delete affordances (the server
+	 * enforces the role too — this only hides the controls). */
+	const canEdit = $derived(roleOf(data.vault) !== "viewer");
 
 	// ------------------------------------------------------------ live data
 	// Seeded from the server load once; the $effect below re-syncs on nav.
@@ -220,9 +223,13 @@
 		</div>
 
 		<div class="right">
-			<button type="button" class="btn btn-primary btn-sm" onclick={() => (editing = "new")}>
-				+ New concept
-			</button>
+			{#if canEdit}
+				<button type="button" class="btn btn-primary btn-sm" onclick={() => (editing = "new")}>
+					+ New concept
+				</button>
+			{:else}
+				<span class="badge role-viewer" title="You have read-only access to this vault">viewer</span>
+			{/if}
 		</div>
 	</div>
 
@@ -236,9 +243,11 @@
 						Create your first concept here, or point your orchestrator at this vault's MCP URL
 						(see <a href="/v/{vault.slug}/settings">settings</a>) and let your agents fill it.
 					</p>
-					<button type="button" class="btn btn-primary" onclick={() => (editing = "new")}>
-						+ New concept
-					</button>
+					{#if canEdit}
+						<button type="button" class="btn btn-primary" onclick={() => (editing = "new")}>
+							+ New concept
+						</button>
+					{/if}
 				</div>
 			{:else}
 				<Graph
@@ -282,6 +291,7 @@
 				error={conceptError}
 				edges={selectedEdges}
 				{titleFor}
+				readonly={!canEdit}
 				focused={focusId !== null && focusId === selectedId}
 				onfocustoggle={() => (focusId = focusId === selectedId ? null : selectedId)}
 				onnavigate={navigate}

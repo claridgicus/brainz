@@ -1,16 +1,129 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
-	import type { ApiKey } from "@brainz/contracts";
-	import { ApiError, createApi } from "$lib/api";
+	import type { ApiKey, VaultInvite, VaultMember, VaultRole } from "@brainz/contracts";
+	import { ApiError, createApi, roleOf } from "$lib/api";
 	import CopyButton from "$lib/components/CopyButton.svelte";
 	import Modal from "$lib/components/Modal.svelte";
 
 	let { data } = $props();
 	const api = createApi(fetch);
 	const vault = $derived(data.vault);
+	const role = $derived(roleOf(data.vault));
+	const isOwner = $derived(role === "owner");
+	const me = $derived(data.user.id);
 
 	const errMsg = (err: unknown, fallback: string) =>
 		err instanceof ApiError ? err.message : fallback;
+
+	const ROLES: VaultRole[] = ["owner", "editor", "viewer"];
+
+	// --------------------------------------------------------------- members
+	// svelte-ignore state_referenced_locally
+	let members = $state<VaultMember[] | null>(data.members);
+	let memberError = $state<string | null>(null);
+	let memberBusyId = $state<string | null>(null);
+	let removeMemberTarget = $state<VaultMember | null>(null);
+	let removingMember = $state(false);
+	let removeMemberError = $state<string | null>(null);
+
+	const ownerCount = $derived((members ?? []).filter((m) => m.role === "owner").length);
+	const isLastOwner = (m: VaultMember) => m.role === "owner" && ownerCount <= 1;
+
+	/** Optimistic role change with rollback — the server's error message (e.g.
+	 * the last-owner guard) is surfaced verbatim. */
+	async function changeRole(m: VaultMember, next: VaultRole) {
+		if (!members || next === m.role) return;
+		const snapshot = members;
+		memberError = null;
+		memberBusyId = m.userId;
+		members = members.map((x) => (x.userId === m.userId ? { ...x, role: next } : x));
+		try {
+			const updated = await api.updateMemberRole(vault.id, m.userId, next);
+			members = (members ?? []).map((x) => (x.userId === m.userId ? updated : x));
+		} catch (err) {
+			members = snapshot;
+			memberError = errMsg(err, "Failed to change role.");
+		} finally {
+			memberBusyId = null;
+		}
+	}
+
+	async function confirmRemoveMember() {
+		if (!removeMemberTarget) return;
+		const target = removeMemberTarget;
+		removingMember = true;
+		removeMemberError = null;
+		try {
+			await api.removeMember(vault.id, target.userId);
+			if (target.userId === me) {
+				await goto("/dashboard");
+				return;
+			}
+			members = (members ?? []).filter((x) => x.userId !== target.userId);
+			removeMemberTarget = null;
+		} catch (err) {
+			removeMemberError = errMsg(err, "Failed to remove member.");
+		} finally {
+			removingMember = false;
+		}
+	}
+
+	// --------------------------------------------------------------- invites
+	// svelte-ignore state_referenced_locally
+	let invites = $state<VaultInvite[] | null>(data.invites);
+	let inviteEmail = $state("");
+	let inviteRole = $state<VaultRole>("editor");
+	let sendingInvite = $state(false);
+	let inviteError = $state<string | null>(null);
+	/** One-time invite URL, straight from the create/resend response. */
+	let freshInvite = $state<{ email: string; url: string } | null>(null);
+	let inviteBusy = $state<{ id: string; action: "resend" | "revoke" } | null>(null);
+
+	async function sendInvite(ev: SubmitEvent) {
+		ev.preventDefault();
+		sendingInvite = true;
+		inviteError = null;
+		try {
+			const created = await api.createInvite(vault.id, {
+				email: inviteEmail.trim(),
+				role: inviteRole,
+			});
+			freshInvite = { email: created.invite.email, url: created.url };
+			inviteEmail = "";
+			invites = await api.listInvites(vault.id);
+		} catch (err) {
+			inviteError = errMsg(err, "Failed to send invite.");
+		} finally {
+			sendingInvite = false;
+		}
+	}
+
+	async function resendInvite(inv: VaultInvite) {
+		inviteBusy = { id: inv.id, action: "resend" };
+		inviteError = null;
+		try {
+			const sent = await api.resendInvite(vault.id, inv.id);
+			freshInvite = { email: sent.invite.email, url: sent.url };
+			invites = (invites ?? []).map((x) => (x.id === inv.id ? sent.invite : x));
+		} catch (err) {
+			inviteError = errMsg(err, "Failed to resend invite.");
+		} finally {
+			inviteBusy = null;
+		}
+	}
+
+	async function revokeInvite(inv: VaultInvite) {
+		inviteBusy = { id: inv.id, action: "revoke" };
+		inviteError = null;
+		try {
+			await api.revokeInvite(vault.id, inv.id);
+			invites = (invites ?? []).filter((x) => x.id !== inv.id);
+		} catch (err) {
+			inviteError = errMsg(err, "Failed to revoke invite.");
+		} finally {
+			inviteBusy = null;
+		}
+	}
 
 	// ---------------------------------------------------------------- rename
 	// Intentionally seeded once from the load — this is an edit buffer.
@@ -123,22 +236,174 @@
 		<a href="/v/{vault.slug}">← {vault.name}</a>
 	</nav>
 	<h1>Vault settings</h1>
+	{#if !isOwner}
+		<p class="muted role-note">
+			You're {role === "editor" ? "an editor" : "a viewer"} on this vault — only owners can rename
+			it, manage API keys, or invite members.
+		</p>
+	{/if}
 
-	<!-- ------------------------------------------------------------ rename -->
+	{#if isOwner}
+		<!-- ---------------------------------------------------------- rename -->
+		<section class="card">
+			<h2>Vault name</h2>
+			<form onsubmit={rename} class="row">
+				<input class="input grow" bind:value={name} aria-label="Vault name" required />
+				<button type="submit" class="btn" disabled={renaming || !name.trim() || name.trim() === vault.name}>
+					{#if renaming}<span class="spinner"></span>{/if}
+					Rename
+				</button>
+			</form>
+			{#if renameError}<p class="error-text" role="alert">{renameError}</p>{/if}
+			{#if renamed}<p class="ok-text" role="status">Renamed.</p>{/if}
+			<p class="muted note">Slug stays <code>{vault.slug}</code> — it's part of your URLs.</p>
+		</section>
+	{/if}
+
+	<!-- ----------------------------------------------------------- members -->
 	<section class="card">
-		<h2>Vault name</h2>
-		<form onsubmit={rename} class="row">
-			<input class="input grow" bind:value={name} aria-label="Vault name" required />
-			<button type="submit" class="btn" disabled={renaming || !name.trim() || name.trim() === vault.name}>
-				{#if renaming}<span class="spinner"></span>{/if}
-				Rename
-			</button>
-		</form>
-		{#if renameError}<p class="error-text" role="alert">{renameError}</p>{/if}
-		{#if renamed}<p class="ok-text" role="status">Renamed.</p>{/if}
-		<p class="muted note">Slug stays <code>{vault.slug}</code> — it's part of your URLs.</p>
+		<h2>Members</h2>
+		{#if members === null}
+			<p class="error-text" role="alert">Couldn't load members — reload the page to try again.</p>
+		{:else}
+			{#if memberError}<p class="error-text" role="alert">{memberError}</p>{/if}
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Member</th><th>Role</th><th>Joined</th><th></th></tr>
+					</thead>
+					<tbody>
+						{#each members as m (m.userId)}
+							<tr>
+								<td>
+									<div class="who-cell">
+										<span>{m.name}{m.userId === me ? " (you)" : ""}</span>
+										<span class="muted who-email">{m.email}</span>
+									</div>
+								</td>
+								<td>
+									{#if isOwner}
+										<span title={isLastOwner(m) ? "The last owner can't be demoted." : undefined}>
+											<select
+												class="select role-select"
+												value={m.role}
+												disabled={isLastOwner(m) || memberBusyId !== null}
+												onchange={(e) => void changeRole(m, e.currentTarget.value as VaultRole)}
+												aria-label="Role for {m.email}"
+											>
+												{#each ROLES as r (r)}<option value={r}>{r}</option>{/each}
+											</select>
+										</span>
+									{:else}
+										<span class="badge role-{m.role}">{m.role}</span>
+									{/if}
+								</td>
+								<td>{fmtDate(m.createdAt)}</td>
+								<td class="ta-right">
+									{#if isOwner}
+										<span title={isLastOwner(m) ? "The last owner can't leave or be removed." : undefined}>
+											<button
+												type="button"
+												class="btn btn-danger btn-sm"
+												disabled={isLastOwner(m) || memberBusyId !== null}
+												onclick={() => { removeMemberError = null; removeMemberTarget = m; }}
+											>
+												{m.userId === me ? "Leave" : "Remove"}
+											</button>
+										</span>
+									{:else if m.userId === me}
+										<button
+											type="button"
+											class="btn btn-danger btn-sm"
+											onclick={() => { removeMemberError = null; removeMemberTarget = m; }}
+										>
+											Leave vault
+										</button>
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{/if}
 	</section>
 
+	{#if isOwner}
+		<!-- --------------------------------------------------------- invites -->
+		<section class="card">
+			<h2>Invites</h2>
+			<p class="muted">
+				Invite a teammate by email — they get a link that signs them in and adds them to this
+				vault with the role you pick. Invites expire after 14 days.
+			</p>
+			<form onsubmit={sendInvite} class="row">
+				<input
+					class="input grow"
+					type="email"
+					bind:value={inviteEmail}
+					placeholder="teammate@example.com"
+					aria-label="Invite email"
+					required
+				/>
+				<select class="select role-select" bind:value={inviteRole} aria-label="Invite role">
+					{#each ROLES as r (r)}<option value={r}>{r}</option>{/each}
+				</select>
+				<button type="submit" class="btn btn-primary" disabled={sendingInvite || !inviteEmail.trim()}>
+					{#if sendingInvite}<span class="spinner"></span>{/if}
+					Send invite
+				</button>
+			</form>
+			{#if inviteError}<p class="error-text" role="alert">{inviteError}</p>{/if}
+
+			{#if invites === null}
+				<p class="error-text" role="alert">Couldn't load pending invites — reload the page to try again.</p>
+			{:else if invites.length === 0}
+				<p class="muted">No pending invites.</p>
+			{:else}
+				<div class="table-wrap">
+					<table>
+						<thead>
+							<tr><th>Email</th><th>Role</th><th>Expires</th><th></th></tr>
+						</thead>
+						<tbody>
+							{#each invites as inv (inv.id)}
+								<tr>
+									<td>{inv.email}</td>
+									<td><span class="badge role-{inv.role}">{inv.role}</span></td>
+									<td>{fmtDate(inv.expiresAt)}</td>
+									<td class="ta-right">
+										<div class="row-actions">
+											<button
+												type="button"
+												class="btn btn-sm"
+												onclick={() => void resendInvite(inv)}
+												disabled={inviteBusy !== null}
+											>
+												{#if inviteBusy?.id === inv.id && inviteBusy.action === "resend"}<span class="spinner"></span>{/if}
+												Resend
+											</button>
+											<button
+												type="button"
+												class="btn btn-danger btn-sm"
+												onclick={() => void revokeInvite(inv)}
+												disabled={inviteBusy !== null}
+											>
+												{#if inviteBusy?.id === inv.id && inviteBusy.action === "revoke"}<span class="spinner"></span>{/if}
+												Revoke
+											</button>
+										</div>
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			{/if}
+		</section>
+	{/if}
+
+	{#if isOwner}
 	<!-- ---------------------------------------------------------- api keys -->
 	<section class="card">
 		<h2>API keys</h2>
@@ -189,6 +454,7 @@
 			</div>
 		{/if}
 	</section>
+	{/if}
 
 	<!-- --------------------------------------------------------- mcp setup -->
 	<section class="card">
@@ -224,6 +490,7 @@
 		</p>
 	</section>
 
+	{#if isOwner}
 	<!-- -------------------------------------------------------- danger zone -->
 	<section class="card danger-zone">
 		<h2>Danger zone</h2>
@@ -242,6 +509,7 @@
 			</button>
 		</form>
 	</section>
+	{/if}
 </main>
 
 <!-- Plaintext key: the ONE time it's visible. -->
@@ -256,6 +524,48 @@
 			<CopyButton text={freshKey.key} />
 		</div>
 		<button type="button" class="btn" onclick={() => (freshKey = null)}>Done — I copied it</button>
+	</Modal>
+{/if}
+
+<!-- Invite URL: the ONE time it's visible (same one-shot treatment as keys). -->
+{#if freshInvite}
+	<Modal title="Invite sent" onclose={() => (freshInvite = null)}>
+		<p>
+			An invite email is on its way to <strong>{freshInvite.email}</strong>. You can also share
+			this link directly — copy it now. <strong>You won't see it again.</strong>
+		</p>
+		<div class="key-row">
+			<code class="key">{freshInvite.url}</code>
+			<CopyButton text={freshInvite.url} />
+		</div>
+		<button type="button" class="btn" onclick={() => (freshInvite = null)}>Done — I copied it</button>
+	</Modal>
+{/if}
+
+{#if removeMemberTarget}
+	<Modal
+		title={removeMemberTarget.userId === me ? "Leave vault" : "Remove member"}
+		onclose={() => (removeMemberTarget = null)}
+	>
+		<p>
+			{#if removeMemberTarget.userId === me}
+				Leave <strong>{vault.name}</strong>? You lose access immediately — an owner would have to
+				invite you back.
+			{:else}
+				Remove <strong>{removeMemberTarget.name}</strong> ({removeMemberTarget.email})? They lose
+				access immediately.
+			{/if}
+		</p>
+		{#if removeMemberError}<p class="error-text" role="alert">{removeMemberError}</p>{/if}
+		<div class="row">
+			<button type="button" class="btn btn-danger" onclick={confirmRemoveMember} disabled={removingMember}>
+				{#if removingMember}<span class="spinner"></span>{/if}
+				{removeMemberTarget.userId === me ? "Leave vault" : "Remove"}
+			</button>
+			<button type="button" class="btn" onclick={() => (removeMemberTarget = null)} disabled={removingMember}>
+				Cancel
+			</button>
+		</div>
 	</Modal>
 {/if}
 
@@ -370,6 +680,31 @@
 
 	.danger-zone {
 		border-color: rgb(248 113 113 / 0.35);
+	}
+
+	.role-note {
+		font-size: 13.5px;
+		margin: -8px 0 0;
+	}
+	.who-cell {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		line-height: 1.35;
+	}
+	.who-email {
+		font-size: 12px;
+	}
+	.role-select {
+		width: auto;
+		min-width: 108px;
+		padding-top: 5px;
+		padding-bottom: 5px;
+		font-size: 13px;
+	}
+	.row-actions {
+		display: inline-flex;
+		gap: 6px;
 	}
 
 	.key-row {

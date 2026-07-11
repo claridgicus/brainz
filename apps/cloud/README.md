@@ -133,8 +133,14 @@ Account-specific steps, in order:
      sends through Cloudflare's own Email Service. Same binding, same DNS.
    - Also **delete the stale `brain.brownmatter.ai` DNS record** if it still
      exists (the app moved to `brainz.brownmatter.ai`; `brain.*` currently 530s).
-7. `npm run deploy`
-8. Verify: sign in at https://brainz.brownmatter.ai (enter your email, open the
+7. **MCP Registry (one-time)**: install `mcp-publisher` and run the
+   `login dns --domain=brownmatter.ai` domain verification (exact steps in
+   "MCP discovery & registry publication" below) so deploys can publish
+   `server.json` to registry.modelcontextprotocol.io. Skippable — deploys
+   just warn until it's done.
+8. `npm run deploy` — builds, deploys the Worker, then auto-publishes
+   `server.json` to the MCP Registry when its version is new.
+9. Verify: sign in at https://brainz.brownmatter.ai (enter your email, open the
    magic link), create a vault + API key,
    then:
    ```sh
@@ -156,6 +162,51 @@ Account-specific steps, in order:
 
 Config validation without an account: `npx wrangler deploy --dry-run`
 (run `npm run build` first).
+
+## MCP discovery & registry publication
+
+The server advertises itself for auto-discovery; keep all three artifacts in
+sync (`src/lib/server/discovery.test.ts` enforces it):
+
+- `static/.well-known/mcp.json` — well-known discovery document (server-card /
+  SEP-2127 lineage), served at `https://brainz.brownmatter.ai/.well-known/mcp.json`.
+  Uses the MCP Registry `server.json` schema plus a namespaced `_meta` block
+  listing the public (`signup`, `sign_in`) and authenticated toolsets.
+- `static/.well-known/mcp/server-card.json` — identical content at the
+  SEP-1649 alias path some clients probe.
+- `server.json` (this directory) — the MCP Registry publish artifact
+  (same document minus `_meta`; the registry caps `description` at 100 chars).
+
+**Registry publication is part of `npm run deploy`**: after `wrangler deploy`,
+`scripts/publish-registry.mjs` compares `server.json`'s version against the
+live registry and publishes only when it's new — already-published versions
+skip instantly, and a missing CLI/login warns loudly without failing the
+deploy (set `MCP_PUBLISH_STRICT=1` in CI to hard-fail instead). Manual run:
+`npm run registry:publish`.
+
+One-time setup before the first publish can succeed (needs brownmatter.ai DNS
+access; registry is in preview — see
+https://modelcontextprotocol.io/registry/remote-servers):
+
+1. Install the publisher CLI: `brew install mcp-publisher` (or download from
+   github.com/modelcontextprotocol/registry releases).
+2. Generate an ed25519 keypair and verify the `ai.brownmatter/*` namespace —
+   either DNS:
+   ```
+   brownmatter.ai. IN TXT "v=MCPv1; k=ed25519; p=<PUBLIC_KEY>"
+   mcp-publisher login dns --domain=brownmatter.ai --private-key=<HEX_KEY>
+   ```
+   or HTTP (host the same `v=MCPv1; k=ed25519; p=<PUBLIC_KEY>` string at
+   `https://brownmatter.ai/.well-known/mcp-registry-auth`, which lives in the
+   marketing app):
+   ```
+   mcp-publisher login http --domain=brownmatter.ai --private-key=<HEX_KEY>
+   ```
+3. Verify after the next deploy:
+   `curl https://registry.modelcontextprotocol.io/v0/servers?search=brainz`
+
+Bump `version` in `server.json` and the two well-known files alongside
+`SERVER_VERSION` when the surface changes — the next deploy re-publishes.
 
 ## File map (backend / UI ownership)
 

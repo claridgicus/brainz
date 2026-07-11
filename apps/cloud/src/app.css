@@ -311,6 +311,19 @@ pre code {
 	flex: none;
 }
 
+/* Vault-membership role badges (dashboard cards, settings member/invite lists). */
+.badge.role-owner {
+	color: var(--accent);
+	border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.badge.role-editor {
+	color: #60a5fa;
+	border-color: color-mix(in srgb, #60a5fa 45%, transparent);
+}
+.badge.role-viewer {
+	color: var(--text-dim);
+}
+
 .error-text {
 	color: var(--danger);
 	font-size: 13.5px;

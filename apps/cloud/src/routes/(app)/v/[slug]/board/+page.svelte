@@ -4,7 +4,7 @@
 	// priority / owner). Polls GET /tasks every 4s and diff-animates; card
 	// moves issue take/complete/reopen mutations with an optimistic update.
 	import type { ApiConcept, GraphNode, GraphPayload, TaskMeta } from "@brainz/contracts";
-	import { ApiError, createApi } from "$lib/api";
+	import { ApiError, createApi, roleOf } from "$lib/api";
 	import { TYPE_COLORS } from "$lib/graph-data";
 	import ConceptPanel from "$lib/components/ConceptPanel.svelte";
 	import { onMount } from "svelte";
@@ -21,6 +21,8 @@
 	let { data } = $props();
 	const api = createApi(fetch);
 	const vault = $derived(data.vault);
+	/** Viewers watch the board live but can't move cards (server enforces too). */
+	const canEdit = $derived(roleOf(data.vault) !== "viewer");
 
 	// svelte-ignore state_referenced_locally
 	let tasks = $state<TaskMeta[]>(data.tasks);
@@ -96,6 +98,7 @@
 	}
 
 	async function moveTo(task: TaskMeta, target: Status) {
+		if (!canEdit) return;
 		const from = statusOf(task);
 		if (from === target) return;
 		busyId = task.id;

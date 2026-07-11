@@ -13,6 +13,7 @@
 		edges,
 		titleFor,
 		focused,
+		readonly: isReadonly = false,
 		onfocustoggle,
 		onnavigate,
 		onedit,
@@ -29,6 +30,8 @@
 		titleFor: (id: string) => string;
 		/** Whether the graph is currently focused on this node's neighborhood. */
 		focused: boolean;
+		/** Viewer role: hide the Edit/Delete affordances (server enforces too). */
+		readonly?: boolean;
 		onfocustoggle: () => void;
 		onnavigate: (id: string) => void;
 		onedit: () => void;
@@ -66,7 +69,7 @@
 			>
 				{focused ? "Unfocus" : "Focus"}
 			</button>
-			{#if !node.pending}
+			{#if !node.pending && !isReadonly}
 				<button type="button" class="btn btn-ghost btn-sm" onclick={onedit}>Edit</button>
 				<button type="button" class="btn btn-ghost btn-sm danger" onclick={ondelete}>Delete</button>
 			{/if}

@@ -22,6 +22,20 @@
 	<p class="pitch-link muted">
 		New here? <a href="https://brownmatter.ai" rel="noopener">Read the pitch at brownmatter.ai</a>
 	</p>
+
+	<section class="mcp" aria-label="MCP endpoint">
+		<p class="mcp-label">
+			Remote MCP endpoint — auto-discoverable at
+			<a href="/.well-known/mcp.json"><code>/.well-known/mcp.json</code></a>, or wire it by hand:
+		</p>
+		<pre><code>claude mcp add --transport http brainz https://brainz.brownmatter.ai/mcp \
+  --header "Authorization: Bearer bz_..."</code></pre>
+		<p class="mcp-note muted">
+			No account yet? Connect <em>without</em> the header — the public <code>signup</code> tool
+			provisions a workspace on the spot. Full wiring in the
+			<a href="https://brownmatter.ai/docs" rel="noopener">docs</a>.
+		</p>
+	</section>
 </main>
 
 <style>
@@ -66,5 +80,28 @@
 	}
 	.pitch-link {
 		font-size: 13.5px;
+	}
+	.mcp {
+		margin-top: 40px;
+		max-width: 560px;
+		text-align: left;
+	}
+	.mcp-label {
+		font-size: 13px;
+		color: var(--text-dim);
+		margin-bottom: 8px;
+	}
+	.mcp pre {
+		background: rgb(255 255 255 / 0.04);
+		border: 1px solid rgb(255 255 255 / 0.08);
+		border-radius: 10px;
+		padding: 14px 16px;
+		overflow-x: auto;
+		font-size: 12.5px;
+		line-height: 1.5;
+	}
+	.mcp-note {
+		font-size: 12.5px;
+		margin-top: 8px;
 	}
 </style>

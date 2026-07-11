@@ -94,6 +94,64 @@ export const vault = sqliteTable(
   (t) => [uniqueIndex("vault_owner_slug_unique").on(t.ownerId, t.slug)],
 );
 
+// -------------------------------------------------- vault membership (Wave M)
+
+/**
+ * Vault membership — the ACCESS SOURCE OF TRUTH for session users (Wave M).
+ * Roles: "owner" | "editor" | "viewer" (vaultRoleSchema in @brainz/contracts).
+ * Every vault creator gets an `owner` row at creation (backfilled for
+ * pre-Wave-M vaults in the migration); `vault.owner_id` remains the canonical
+ * creator marker but access checks go through THIS table.
+ */
+export const vaultMember = sqliteTable(
+  "vault_member",
+  {
+    id: text("id").primaryKey(),
+    vaultId: text("vault_id")
+      .notNull()
+      .references(() => vault.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    role: text("role").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("vault_member_vault_id_user_id_unique").on(t.vaultId, t.userId),
+    index("vault_member_user_id").on(t.userId),
+  ],
+);
+
+/**
+ * Email invites to a vault (Wave M). `email` is normalized-lowercase (the
+ * shared normalizeEmail choke-point); only the SHA-256 hash of the 32-byte
+ * token is stored (the one-time URL is shown at create/resend and emailed);
+ * tokens live 14 days; `accepted_at` stamps consumption (single-use). A new
+ * invite for the same (vault, email) supersedes the pending one.
+ */
+export const vaultInvite = sqliteTable(
+  "vault_invite",
+  {
+    id: text("id").primaryKey(),
+    vaultId: text("vault_id")
+      .notNull()
+      .references(() => vault.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    role: text("role").notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    invitedBy: text("invited_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+    acceptedAt: integer("accepted_at", { mode: "timestamp_ms" }),
+  },
+  (t) => [
+    index("vault_invite_vault_id").on(t.vaultId),
+    index("vault_invite_email").on(t.email),
+  ],
+);
+
 // -------------------------------------------------------- magic-link events
 
 /**

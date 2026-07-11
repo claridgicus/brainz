@@ -16,7 +16,11 @@ import {
   statsResponseSchema,
   taskListResponseSchema,
   taskMoveResponseSchema,
+  vaultInviteCreateResponseSchema,
+  vaultInviteListResponseSchema,
   vaultListResponseSchema,
+  vaultMemberListResponseSchema,
+  vaultMemberSchema,
   vaultSchema,
   type ApiConcept,
   type ApiKey,
@@ -24,6 +28,9 @@ import {
   type TaskMeta,
   type TaskMoveRequest,
   type Vault,
+  type VaultInvite,
+  type VaultMember,
+  type VaultRole,
 } from "@brainz/contracts";
 import { slugify } from "@brainz/engine";
 
@@ -86,6 +93,9 @@ export interface VaultStats {
 }
 
 export type Task = TaskMeta;
+
+/** POST create/resend invite response: the ONLY place the invite URL appears. */
+export type InviteWithUrl = z.infer<typeof vaultInviteCreateResponseSchema>;
 
 export type SearchHit = z.infer<typeof searchResponseSchema>["hits"][number];
 
@@ -221,6 +231,52 @@ export function createApi(fetchFn: Fetch) {
       });
     },
 
+    // ------------------------------------------------------------- members
+    async listMembers(vaultId: string): Promise<VaultMember[]> {
+      return (await request(vaultMemberListResponseSchema, `/api/vaults/${enc(vaultId)}/members`))
+        .members;
+    },
+    updateMemberRole(vaultId: string, userId: string, role: VaultRole): Promise<VaultMember> {
+      return request(vaultMemberSchema, `/api/vaults/${enc(vaultId)}/members/${enc(userId)}`, {
+        method: "PATCH",
+        body: { role },
+      });
+    },
+    /** Remove a member — also the self-leave path (userId = the caller). */
+    async removeMember(vaultId: string, userId: string): Promise<void> {
+      await expectNoContent(
+        await fetchFn(`/api/vaults/${enc(vaultId)}/members/${enc(userId)}`, { method: "DELETE" }),
+      );
+    },
+
+    // ------------------------------------------------------------- invites
+    async listInvites(vaultId: string): Promise<VaultInvite[]> {
+      return (await request(vaultInviteListResponseSchema, `/api/vaults/${enc(vaultId)}/invites`))
+        .invites;
+    },
+    /** The returned `url` is shown exactly once — never listed again. */
+    createInvite(vaultId: string, body: { email: string; role: VaultRole }): Promise<InviteWithUrl> {
+      return request(vaultInviteCreateResponseSchema, `/api/vaults/${enc(vaultId)}/invites`, {
+        method: "POST",
+        body,
+      });
+    },
+    /** Re-send the invite email; returns a fresh one-time URL. */
+    resendInvite(vaultId: string, inviteId: string): Promise<InviteWithUrl> {
+      return request(
+        vaultInviteCreateResponseSchema,
+        `/api/vaults/${enc(vaultId)}/invites/${enc(inviteId)}/resend`,
+        { method: "POST" },
+      );
+    },
+    async revokeInvite(vaultId: string, inviteId: string): Promise<void> {
+      await expectNoContent(
+        await fetchFn(`/api/vaults/${enc(vaultId)}/invites/${enc(inviteId)}`, {
+          method: "DELETE",
+        }),
+      );
+    },
+
     // ------------------------------------------------------------ api keys
     async listKeys(vaultId: string): Promise<ApiKey[]> {
       return (await request(apiKeyListResponseSchema, `/api/vaults/${enc(vaultId)}/keys`)).keys;
@@ -238,6 +294,12 @@ export function createApi(fetchFn: Fetch) {
 }
 
 export type Api = ReturnType<typeof createApi>;
+
+/** The caller's role on a vault (from GET /api/vaults); defaults to "owner"
+ * so a response predating the membership rollout keeps today's behavior. */
+export function roleOf(vault: Vault): VaultRole {
+  return vault.role ?? "owner";
+}
 
 /** slug → vault. REST routes take the vault *id*; slugs only exist in URLs. */
 export function vaultBySlug(vaults: Vault[], slug: string): Vault | null {

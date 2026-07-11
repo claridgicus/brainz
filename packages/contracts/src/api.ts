@@ -31,11 +31,24 @@ export type ApiError = z.infer<typeof apiErrorSchema>;
 
 // ------------------------------------------------------------------- vaults
 
+/**
+ * Vault membership roles (Wave M):
+ * - owner  — everything: rename/delete vault, manage keys, members, invites.
+ * - editor — read + write concepts/tasks; no keys/members/invites/delete/rename.
+ * - viewer — read-only: browse/search/context; no writes of any kind.
+ */
+export const vaultRoleSchema = z.enum(["owner", "editor", "viewer"]);
+export type VaultRole = z.infer<typeof vaultRoleSchema>;
+
 export const vaultSchema = z.object({
   id: z.string(),
   slug: z.string(),
   name: z.string(),
   createdAt: z.string(),
+  /** The CALLER's role on this vault (bearer-key access reports "editor"). */
+  role: vaultRoleSchema,
+  /** Total members (cheap D1 count; may be omitted where not computed). */
+  memberCount: z.number().int().optional(),
 });
 export type Vault = z.infer<typeof vaultSchema>;
 
@@ -48,6 +61,72 @@ export const vaultUpdateRequestSchema = z.object({
   slug: z.string().min(1).optional(),
 });
 export const vaultListResponseSchema = z.object({ vaults: z.array(vaultSchema) });
+
+// ---------------------------------------------------------- members (Wave M)
+
+/** One vault member — GET /api/vaults/:id/members list item. */
+export const vaultMemberSchema = z.object({
+  userId: z.string(),
+  email: z.string(),
+  name: z.string(),
+  role: vaultRoleSchema,
+  createdAt: z.string(),
+});
+export type VaultMember = z.infer<typeof vaultMemberSchema>;
+
+export const memberListResponseSchema = z.object({ members: z.array(vaultMemberSchema) });
+
+/** PATCH /api/vaults/:id/members/:userId body (owner-only role change). */
+export const memberUpdateRequestSchema = z.object({ role: vaultRoleSchema });
+/** PATCH response: the updated member. */
+export const memberUpdateResponseSchema = vaultMemberSchema;
+
+// ---------------------------------------------------------- invites (Wave M)
+
+/**
+ * A pending email invite. `invitedBy` is the INVITER's display name (not a
+ * user id — it feeds the "invited by …" line in the UI and invite page).
+ * NOTE: the shape never carries the invite URL — tokens are SHA-256-hashed at
+ * rest, so the one-time URL exists only in the create/resend responses.
+ */
+export const vaultInviteSchema = z.object({
+  id: z.string(),
+  email: z.string(),
+  role: vaultRoleSchema,
+  createdAt: z.string(),
+  expiresAt: z.string(),
+  invitedBy: z.string(),
+});
+export type VaultInvite = z.infer<typeof vaultInviteSchema>;
+
+/** GET /api/vaults/:id/invites — pending (unaccepted, unexpired) only. */
+export const inviteListResponseSchema = z.object({ invites: z.array(vaultInviteSchema) });
+
+/** POST /api/vaults/:id/invites body (owner-only). */
+export const inviteCreateRequestSchema = z.object({
+  email: z.string().email(),
+  role: vaultRoleSchema,
+});
+
+/**
+ * POST /api/vaults/:id/invites (and .../invites/:inviteId/resend) response.
+ * `url` is the ONE-TIME invite link (`<origin>/invite/<token>`) — shown
+ * exactly here and emailed; the list endpoint can never reproduce it because
+ * only the token's hash is stored.
+ */
+export const inviteCreateResponseSchema = z.object({
+  invite: vaultInviteSchema,
+  url: z.string(),
+});
+
+/** POST /api/invites/:token/accept response — where to go next. */
+export const inviteAcceptResponseSchema = z.object({
+  vaultId: z.string(),
+  slug: z.string(),
+  role: vaultRoleSchema,
+  /** True when the acceptor was already a member (idempotent success). */
+  alreadyMember: z.boolean(),
+});
 
 // ----------------------------------------------------------------- concepts
 

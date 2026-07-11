@@ -125,11 +125,48 @@ describe("templates", () => {
     expect(tpl.html).toContain("https://x/verify?token=a&amp;b=c");
   });
 
-  it("invite template names the project", () => {
-    const tpl = inviteTemplate("https://x/invite/tok", "Acme Brain");
-    expect(tpl.subject).toContain("Acme Brain");
+  it("invite template names the vault and the granted role", () => {
+    const tpl = inviteTemplate({ url: "https://x/invite/tok", vaultName: "Acme Brain", role: "editor" });
+    expect(tpl.subject).toBe("You've been invited to Acme Brain on Brainz as editor");
     expect(tpl.html).toContain("Acme Brain");
+    expect(tpl.html).toContain("editor");
     expect(tpl.html).toContain("https://x/invite/tok");
+    expect(tpl.text).toContain("https://x/invite/tok");
+    expect(tpl.html).toMatch(/14 days/);
+    // Exactly one action button.
+    expect((tpl.html.match(/<a /g) ?? []).length).toBe(1);
+  });
+
+  it("invite emails ride the mailers: raw MIME in prod, lastLink capture in dev", async () => {
+    const send = vi.fn().mockResolvedValue({ messageId: "x" });
+    const binding = { send } as unknown as SendEmail;
+    await new MailChannelsMailer(binding).sendInvite({
+      to: "colleague@example.com",
+      url: "https://brainz.brownmatter.ai/invite/deadbeef",
+      vaultName: "Acme Brain",
+      role: "viewer",
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    const msg = send.mock.calls[0][0] as { from: string; to: string; raw: string };
+    expect(msg.from).toBe(FROM_ADDRESS);
+    expect(msg.to).toBe("colleague@example.com");
+    expect(msg.raw).toContain("Acme Brain");
+    expect(msg.raw).toContain("/invite/deadbeef");
+
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const dev = new DevMailer();
+    await dev.sendInvite({
+      to: "colleague@example.com",
+      url: "http://localhost:8788/invite/deadbeef",
+      vaultName: "Acme Brain",
+      role: "viewer",
+    });
+    expect(dev.lastLink).toEqual({
+      to: "colleague@example.com",
+      url: "http://localhost:8788/invite/deadbeef",
+    });
+    expect(spy.mock.calls[0].join(" ")).toContain("/invite/deadbeef");
+    spy.mockRestore();
   });
 
   it("claim-approval template shows what's being approved: agent framing, vault, key prefix, 24h", () => {

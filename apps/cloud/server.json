@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "ai.brownmatter/brainz",
+  "title": "Brainz",
+  "description": "Shared product-knowledge graph for AI agent fleets — vault tools + agent self-signup over MCP.",
+  "version": "0.1.0",
+  "websiteUrl": "https://brainz.brownmatter.ai",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://brainz.brownmatter.ai/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer bz_... vault API key. Omit the header entirely to reach the public signup tool, which provisions a workspace and returns a key.",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
