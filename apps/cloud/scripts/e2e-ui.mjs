@@ -294,6 +294,22 @@ async function main() {
     step("board SSR renders the task card", board.html.includes("Ship the board"));
     step("board SSR carries the group-by control", board.html.includes("Group by"));
 
+    // A concept-linked task exercises the graph→lane path: the board load pulls
+    // the concept graph (source of lane labels / card titles) alongside tasks,
+    // and the client then keeps it fresh via a low-cadence graph re-fetch.
+    const linkedTask = await api("POST", `/api/vaults/${vault.id}/tasks`, {
+      body: {
+        title: "Rework auth flow",
+        body: "Touches the auth concept.",
+        tags: ["medium"],
+        domain: "auth-system",
+      },
+    });
+    step("create concept-linked task via REST → 201", linkedTask.status === 201, `status ${linkedTask.status}`);
+    const board2 = await page("/v/ui-vault/board");
+    step("board SSR renders after loading the concept graph", board2.status === 200, `status ${board2.status}`);
+    step("board SSR renders both task cards", board2.html.includes("Ship the board") && board2.html.includes("Rework auth flow"));
+
     // Dashboard shows the open-task chip now that a task exists.
     const dash2 = await page("/dashboard");
     step("dashboard shows the open-task chip", dash2.html.includes("open task"));
