@@ -174,6 +174,13 @@ main { position: relative; height: calc(100% - 52px); }
   marker-end: url(#arrow-hl);
 }
 
+/* sticky click-focus: spotlight the focused node + its 1-hop neighbors, dim the
+   rest (nodes + edges tagged .dim). Independent of hover. */
+#graph.focusing .node.dim { opacity: 0.12; }
+#graph.focusing line.dim { stroke-opacity: 0.08; }
+#graph.focusing .node.focused circle { stroke: #fff; stroke-width: 2.5; }
+#graph.focusing .node.focused text { fill: var(--text); }
+
 #empty-hint {
   position: absolute;
   top: 50%;

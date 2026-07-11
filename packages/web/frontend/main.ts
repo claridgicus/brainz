@@ -14,7 +14,12 @@ import { filterGraph, neighborhood } from "./graph-data.js";
 import {
   cullEdge,
   defaultEnabledTypes,
+  focusRevealSet,
+  isDimmed,
+  isEdgeDimmed,
   isInViewport,
+  radiusForTypeDegree,
+  typeClusterCenter,
   viewportRect,
   type ViewportRect,
 } from "./graph-view.js";
@@ -58,7 +63,6 @@ interface SimNode extends SimulationNodeDatum {
 }
 type SimLink = SimulationLinkDatum<SimNode> & { relation: string };
 
-const radiusFor = (degree: number): number => 6 + Math.sqrt(degree) * 2.4;
 
 // ---------------------------------------------------------------- dom refs
 
@@ -79,6 +83,12 @@ let focusId: string | null = null;
 let selectedId: string | null = null;
 let hoverId: string | null = null;
 let hoverNbrs: Set<string> = new Set();
+// Sticky click-focus (distinct from `focusId`, the 2-hop panel focus filter, and
+// from hover): clicking a node dims non-neighbors and reveals its 1-hop
+// neighbors across the type filter. Cleared by empty-canvas click / Escape /
+// clicking the focused node again.
+let stickyFocusId: string | null = null;
+let stickyReveal: Set<string> = new Set();
 
 const simNodes = new Map<string, SimNode>(); // persists positions across re-renders
 let sim: Simulation<SimNode, SimLink> | null = null;
@@ -133,7 +143,17 @@ const toGraphCoords = (cx: number, cy: number): [number, number] => {
 
 function visibleGraph(): GraphPayload {
   const focus = focusId ? neighborhood(graph.edges, focusId, 2) : null;
-  return filterGraph(graph, { types: enabledTypes, focus });
+  const filtered = filterGraph(graph, { types: enabledTypes, focus });
+  // Sticky click-focus reveals the focused node's 1-hop neighbors even if their
+  // type is off — union them back in so the sim + DOM can show (dimly) them.
+  if (stickyReveal.size === 0) return filtered;
+  const kept = new Set(filtered.nodes.map((n) => n.id));
+  const extra = graph.nodes.filter((n) => stickyReveal.has(n.id) && !kept.has(n.id));
+  if (extra.length === 0) return filtered;
+  const nodes = [...filtered.nodes, ...extra];
+  const ids = new Set(nodes.map((n) => n.id));
+  const edges = graph.edges.filter((e) => ids.has(e.from) && ids.has(e.to));
+  return { nodes, edges };
 }
 
 function renderGraph(): void {
@@ -145,18 +165,26 @@ function renderGraph(): void {
 
   // Reuse sim nodes so positions survive filter changes.
   simNodeList = nodes.map((n) => {
+    const r = radiusForTypeDegree(n.type, n.degree);
     let sn = simNodes.get(n.id);
     if (!sn) {
-      sn = { id: n.id, data: n, r: radiusFor(n.degree) };
+      sn = { id: n.id, data: n, r };
       simNodes.set(n.id, sn);
     }
     sn.data = n;
-    sn.r = radiusFor(n.degree);
+    sn.r = r;
     return sn;
   });
   simLinks = edges.map((e) => ({ source: e.from, target: e.to, relation: e.relation }));
   layoutIds.clear();
   for (const sn of simNodeList) layoutIds.add(sn.id);
+
+  // Drop sticky focus if its node vanished from the data.
+  if (stickyFocusId && !graph.nodes.some((n) => n.id === stickyFocusId)) {
+    stickyFocusId = null;
+    stickyReveal = new Set();
+    svg.classList.remove("focusing");
+  }
 
   // The force sim runs on the *full* type-filtered set (layout is correct even
   // for nodes the viewport culls out of the DOM).
@@ -172,9 +200,12 @@ function renderGraph(): void {
         .strength(0.4),
     )
     .force("charge", forceManyBody().strength(-520).distanceMax(900))
-    .force("center", forceCenter(width / 2, height / 2).strength(0.06))
-    .force("x", forceX(width / 2).strength(0.045))
-    .force("y", forceY(height / 2).strength(0.045))
+    .force("center", forceCenter(width / 2, height / 2).strength(0.02))
+    // Type clustering: pull each node toward its concept type's cluster center
+    // so same-type nodes form discrete clouds; cross-type edges pull clouds to
+    // overlap Venn-style (mirrors apps/cloud Graph.svelte).
+    .force("x", forceX<SimNode>((d) => typeClusterCenter(d.data.type, ALL_TYPES, width, height).x).strength(0.09))
+    .force("y", forceY<SimNode>((d) => typeClusterCenter(d.data.type, ALL_TYPES, width, height).y).strength(0.09))
     .force(
       "collide",
       forceCollide<SimNode>()
@@ -261,11 +292,13 @@ function cullRender(): void {
   const vp = currentViewport();
 
   // Nodes: mount/unmount by viewport membership, keeping element identity.
+  // While focused, the reveal set (focused node + 1-hop neighbors) is forced
+  // into the mounted set so off-screen neighbors aren't culled away.
   const visible = new Set<string>();
   for (const sn of simNodeList) {
     const x = sn.x ?? 0;
     const y = sn.y ?? 0;
-    const inView = isInViewport(x, y, sn.r, vp);
+    const inView = isInViewport(x, y, sn.r, vp) || stickyReveal.has(sn.id);
     let g = nodeEls.get(sn.id);
     if (inView) {
       visible.add(sn.id);
@@ -275,6 +308,7 @@ function cullRender(): void {
         nodesG.append(g);
         if (hoverId !== null) applyHoverClass(sn.id, g);
       }
+      if (stickyFocusId !== null) applyFocusClass(sn.id, g);
       g.setAttribute("transform", `translate(${x},${y})`);
     } else if (g) {
       g.remove();
@@ -319,6 +353,7 @@ function cullRender(): void {
       edgesG.append(line);
       if (hoverId !== null && (s.id === hoverId || t.id === hoverId)) line.classList.add("hl");
     }
+    if (stickyFocusId !== null) line.classList.toggle("dim", isEdgeDimmed(s.id, t.id, stickyFocusId));
     // Trim ends so full lines meet circle borders and arrowheads stay visible;
     // stub ends terminate at the viewport edge and are left untrimmed.
     const { x1, y1, x2, y2 } = res.ends;
@@ -376,6 +411,32 @@ function setHover(id: string | null): void {
   }
 }
 
+// ---------------------------------------------------------------- sticky click focus
+
+/** Apply the sticky-focus classes to a single (freshly mounted) node element. */
+function applyFocusClass(id: string, g: SVGGElement): void {
+  g.classList.toggle("dim", isDimmed(id, stickyReveal));
+  g.classList.toggle("focused", id === stickyFocusId);
+}
+
+/**
+ * Set (or clear) the sticky click-focus. Clicking the already-focused node
+ * clears it. Recomputes the reveal set and re-renders so newly-revealed
+ * off-type neighbors enter the sim/DOM; the cull pass paints the dim.
+ */
+function setStickyFocus(id: string | null): void {
+  const next = id !== null && id === stickyFocusId ? null : id;
+  if (next === stickyFocusId) return;
+  stickyFocusId = next;
+  stickyReveal = focusRevealSet(next, graph.edges);
+  svg.classList.toggle("focusing", next !== null);
+  if (next === null) {
+    for (const g of nodeEls.values()) g.classList.remove("dim", "focused");
+    for (const el of lineEls.values()) el.classList.remove("dim");
+  }
+  renderGraph();
+}
+
 // ---------------------------------------------------------------- node drag + click
 
 function attachNodeEvents(g: SVGGElement, sn: SimNode): void {
@@ -408,6 +469,8 @@ function attachNodeEvents(g: SVGGElement, sn: SimNode): void {
         // cloud graph's drag-to-anchor). No per-vault localStorage persistence
         // here — the static web viewer has no vault-id/toolbar to key or reset.
       } else {
+        // A click (no drag): open the panel AND toggle sticky focus on this node.
+        setStickyFocus(sn.id);
         void selectNode(sn.id);
       }
     };
@@ -424,8 +487,11 @@ function setupPanZoom(): void {
     if (ev.button !== 0) return;
     svg.classList.add("panning");
     svg.setPointerCapture(ev.pointerId);
+    const [sx, sy] = [ev.clientX, ev.clientY];
     let [px, py] = [ev.clientX, ev.clientY];
+    let moved = false;
     const onMove = (mv: PointerEvent): void => {
+      if (!moved && Math.hypot(mv.clientX - sx, mv.clientY - sy) >= 4) moved = true;
       view.x += mv.clientX - px;
       view.y += mv.clientY - py;
       [px, py] = [mv.clientX, mv.clientY];
@@ -436,6 +502,9 @@ function setupPanZoom(): void {
       svg.removeEventListener("pointermove", onMove);
       svg.removeEventListener("pointerup", onUp);
       svg.removeEventListener("pointercancel", onUp);
+      // A click on empty canvas (no pan) clears any sticky focus. Node clicks
+      // stopPropagation on pointerdown, so this only fires for the background.
+      if (!moved && stickyFocusId !== null) setStickyFocus(null);
     };
     svg.addEventListener("pointermove", onMove);
     svg.addEventListener("pointerup", onUp);
@@ -737,7 +806,8 @@ function setupGlobalKeys(): void {
       searchInput.focus();
       searchInput.select();
     } else if (ev.key === "Escape" && document.activeElement !== searchInput) {
-      if (focusId !== null) setFocus(null);
+      if (stickyFocusId !== null) setStickyFocus(null);
+      else if (focusId !== null) setFocus(null);
       else closePanel();
     }
   });

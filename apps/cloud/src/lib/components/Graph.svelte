@@ -15,16 +15,22 @@
 		type SimulationNodeDatum,
 	} from "d3-force";
 	import type { Edge, GraphNode, GraphPayload } from "@brainz/contracts";
-	import { filterGraph, neighborhood, radiusFor, TYPE_COLORS } from "$lib/graph-data";
+	import { ALL_TYPES, filterGraph, neighborhood, TYPE_COLORS } from "$lib/graph-data";
 	import {
 		anchorStorageKey,
 		applyAnchors,
 		clearAnchorsFromNodes,
 		deserializeAnchors,
+		focusRevealSet,
+		isDimmed,
+		isEdgeDimmed,
+		mergeFocusRender,
 		nodesInViewport,
 		planEdges,
+		radiusForTypeDegree,
 		serializeAnchors,
 		setAnchor,
+		typeClusterCenter,
 		type AnchorMap,
 		type EdgeRenderPlan,
 		type PositionedNode,
@@ -74,6 +80,12 @@
 	let simNodeList: SimNode[] = [];
 	let simLinks: SimLink[] = [];
 	let hovered: string | null = null; // survives cull passes so re-mounted nodes re-highlight
+	// Sticky click-focus (distinct from transient hover): clicking a node dims all
+	// non-neighbors and reveals its 1-hop neighbors across the type filter. Cleared
+	// by clicking empty canvas, Escape, clicking the focused node again, or Reset.
+	// `focusReveal` caches the reveal set so cull/dim passes don't recompute it.
+	let focused = $state<string | null>(null);
+	let focusReveal = new Set<string>();
 	const nodeEls = new Map<string, SVGGElement>();
 	const edgeEls = new Map<string, { el: SVGLineElement; link: SimLink; plan: EdgeRenderPlan }>();
 
@@ -135,7 +147,19 @@
 
 	function visibleGraph(): GraphPayload {
 		const focus = focusId ? neighborhood(graph.edges, focusId, 2) : null;
-		return filterGraph(graph, { types: new Set(enabledTypes), focus });
+		const filtered = filterGraph(graph, { types: new Set(enabledTypes), focus });
+		// Sticky click-focus reveals the focused node's 1-hop neighbors even if
+		// their type is toggled off — union those revealed nodes (and the edges
+		// among the resulting set) back in so the sim + DOM can show them. When
+		// nothing is focused (empty reveal), this is a no-op.
+		if (focusReveal.size === 0) return filtered;
+		const kept = new Set(filtered.nodes.map((n) => n.id));
+		const extra = graph.nodes.filter((n) => focusReveal.has(n.id) && !kept.has(n.id));
+		if (extra.length === 0) return filtered;
+		const nodes = [...filtered.nodes, ...extra];
+		const ids = new Set(nodes.map((n) => n.id));
+		const edges = graph.edges.filter((e) => ids.has(e.from) && ids.has(e.to));
+		return { nodes, edges };
 	}
 
 	function renderGraph(): void {
@@ -146,13 +170,14 @@
 		const height = svg.clientHeight || 600;
 
 		const nodeList: SimNode[] = nodes.map((n) => {
+			const r = radiusForTypeDegree(n.type, n.degree);
 			let sn = simNodes.get(n.id);
 			if (!sn) {
-				sn = { id: n.id, data: n, r: radiusFor(n.degree) };
+				sn = { id: n.id, data: n, r };
 				simNodes.set(n.id, sn);
 			}
 			sn.data = n;
-			sn.r = radiusFor(n.degree);
+			sn.r = r;
 			return sn;
 		});
 		const links: SimLink[] = edges.map((e) => ({
@@ -184,9 +209,14 @@
 					.strength(0.4),
 			)
 			.force("charge", forceManyBody().strength(-520).distanceMax(900))
-			.force("center", forceCenter(width / 2, height / 2).strength(0.06))
-			.force("x", forceX(width / 2).strength(0.045))
-			.force("y", forceY(height / 2).strength(0.045))
+			.force("center", forceCenter(width / 2, height / 2).strength(0.02))
+			// Type clustering: each node is pulled toward its concept type's cluster
+			// center (types spread around a circle), so same-type nodes form discrete
+			// clouds. Cross-type edges (the link force) pull two clouds to overlap
+			// Venn-style — the more connections, the more they merge. A slightly
+			// stronger pull than the old single-center gravity to keep clouds distinct.
+			.force("x", forceX<SimNode>((d) => typeClusterCenter(d.data.type, ALL_TYPES, width, height).x).strength(0.09))
+			.force("y", forceY<SimNode>((d) => typeClusterCenter(d.data.type, ALL_TYPES, width, height).y).strength(0.09))
 			.force(
 				"collide",
 				forceCollide<SimNode>()
@@ -205,6 +235,12 @@
 		edgeEls.clear();
 		// Drop hover state that references now-gone nodes.
 		if (hovered && !simNodes.has(hovered)) hovered = null;
+		// Drop sticky focus if its node vanished from the data (e.g. deleted). Guard
+		// against the persistent simNodes cache lingering: check the live graph.
+		if (focused && !graph.nodes.some((n) => n.id === focused)) {
+			focused = null;
+			focusReveal = new Set();
+		}
 		cull();
 	}
 
@@ -259,7 +295,13 @@
 			y: sn.y ?? 0,
 			r: sn.r,
 		}));
-		const visibleIds = nodesInViewport(positioned, view, rect, CULL_MARGIN);
+		// While focused, force the reveal set (focused node + 1-hop neighbors) into
+		// the mounted set so off-screen neighbors aren't culled away and the edges
+		// from the focused node to them always render. Everything else still culls.
+		const visibleIds = mergeFocusRender(
+			nodesInViewport(positioned, view, rect, CULL_MARGIN),
+			focusReveal,
+		);
 		const allIds = new Set(simNodeList.map((sn) => sn.id));
 
 		// --- nodes: mount newly-visible, drop newly-hidden.
@@ -313,6 +355,7 @@
 		}
 
 		reapplyHover();
+		reapplyFocus();
 		positionElements();
 	}
 
@@ -390,6 +433,44 @@
 		}
 	}
 
+	// ----------------------------------------------------- sticky click focus
+
+	// Apply the sticky-focus dim to whatever elements are mounted now (called on
+	// focus changes AND after each cull, so re-mounted neighbours keep the right
+	// opacity). Independent of hover — both can be active at once.
+	function reapplyFocus(): void {
+		if (focused === null) {
+			svg.classList.remove("focusing");
+			for (const g of nodeEls.values()) {
+				g.classList.remove("dim", "focused");
+			}
+			for (const { el } of edgeEls.values()) el.classList.remove("dim");
+			return;
+		}
+		svg.classList.add("focusing");
+		for (const [nid, g] of nodeEls) {
+			g.classList.toggle("dim", isDimmed(nid, focusReveal));
+			g.classList.toggle("focused", nid === focused);
+		}
+		for (const { el, link } of edgeEls.values()) {
+			el.classList.toggle("dim", isEdgeDimmed(linkId(link.source), linkId(link.target), focused));
+		}
+	}
+
+	// Set (or clear) the sticky focus. Recomputes the reveal set, then re-renders
+	// so the sim/DOM pick up any newly-revealed off-type neighbors, and re-applies
+	// the dim. Clicking the already-focused node clears focus.
+	function setFocus(id: string | null): void {
+		const next = id !== null && id === focused ? null : id;
+		if (next === focused) return;
+		focused = next;
+		focusReveal = focusRevealSet(next, graph.edges);
+		// A new/removed reveal set changes which nodes belong in the sim (off-type
+		// neighbors appear/disappear), so relayout via renderGraph; it ends in a
+		// cull() that calls reapplyFocus.
+		renderGraph();
+	}
+
 	// ------------------------------------------------- node drag + click
 
 	function attachNodeEvents(g: SVGGElement, sn: SimNode): void {
@@ -428,6 +509,9 @@
 					saveAnchors();
 					g.classList.add("pinned");
 				} else {
+					// A click (no drag): open the concept panel AND toggle sticky focus
+					// on this node (clicking the focused node again clears it).
+					setFocus(sn.id);
 					onselect(sn.id);
 				}
 			};
@@ -443,8 +527,11 @@
 		if (ev.button !== 0) return;
 		svg.classList.add("panning");
 		svg.setPointerCapture(ev.pointerId);
+		const [sx, sy] = [ev.clientX, ev.clientY];
 		let [px, py] = [ev.clientX, ev.clientY];
+		let moved = false;
 		const onMove = (mv: PointerEvent): void => {
+			if (!moved && Math.hypot(mv.clientX - sx, mv.clientY - sy) >= 4) moved = true;
 			view.x += mv.clientX - px;
 			view.y += mv.clientY - py;
 			[px, py] = [mv.clientX, mv.clientY];
@@ -455,6 +542,9 @@
 			svg.removeEventListener("pointermove", onMove);
 			svg.removeEventListener("pointerup", onUp);
 			svg.removeEventListener("pointercancel", onUp);
+			// A click on empty canvas (no pan) clears any sticky focus. Node clicks
+			// stopPropagation on pointerdown, so this only fires for the background.
+			if (!moved && focused !== null) setFocus(null);
 		};
 		svg.addEventListener("pointermove", onMove);
 		svg.addEventListener("pointerup", onUp);
@@ -492,6 +582,9 @@
 		// Un-pin the live sim nodes and drop the pinned cue from mounted elements.
 		clearAnchorsFromNodes(simNodeList);
 		for (const g of nodeEls.values()) g.classList.remove("pinned");
+		// Clear any sticky focus so the dim + off-type reveal don't survive a reset.
+		focused = null;
+		focusReveal = new Set();
 		// Re-layout from scratch.
 		renderGraph();
 	}
@@ -569,8 +662,15 @@
 			resizeTimer = setTimeout(renderGraph, 200);
 		};
 		window.addEventListener("resize", onResize);
+		// Escape clears sticky focus (only when it's active — otherwise let other
+		// handlers, e.g. closing the concept panel, own the key).
+		const onKeyDown = (ev: KeyboardEvent): void => {
+			if (ev.key === "Escape" && focused !== null) setFocus(null);
+		};
+		window.addEventListener("keydown", onKeyDown);
 		return () => {
 			window.removeEventListener("resize", onResize);
+			window.removeEventListener("keydown", onKeyDown);
 			sim?.stop();
 		};
 	});
@@ -728,5 +828,24 @@
 	}
 	svg:global(.hovering) :global(line.hl) {
 		opacity: 1;
+	}
+
+	/* Sticky click-focus: spotlight the focused node + its 1-hop neighbors,
+	   dropping everything else (nodes AND edges tagged .dim) to a low opacity.
+	   Independent of hover — a transient hover highlight still applies on top. */
+	svg:global(.focusing) :global(g.node.dim) {
+		opacity: 0.12;
+	}
+	svg:global(.focusing) :global(line.dim) {
+		opacity: 0.08;
+	}
+	/* The focused node reads as selected already; give it a touch more presence. */
+	svg:global(.focusing) :global(g.node.focused circle) {
+		stroke: var(--accent);
+		stroke-width: 2;
+		filter: url(#node-glow-strong);
+	}
+	svg:global(.focusing) :global(g.node.focused text) {
+		fill: var(--text);
 	}
 </style>

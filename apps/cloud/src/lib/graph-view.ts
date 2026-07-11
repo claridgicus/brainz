@@ -25,6 +25,73 @@ export function defaultVisibleTypes(): string[] {
 	return DEFAULT_VISIBLE_TYPES.filter((t) => all.has(t));
 }
 
+// ------------------------------------------------------- type size + clustering
+// Nodes are sized by concept type (generality) so the graph reads as nested
+// scopes: broad, structural types are large; leaf/detail types are small. Same-
+// type nodes also share a cluster center so each type forms a discrete "cloud";
+// cross-type edges pull two clouds to overlap Venn-diagram style. Both are pure
+// so they can be unit-tested and mirrored to the static viewer.
+
+/**
+ * Per-type size rank — a multiplier on the degree-driven base radius. Larger =
+ * more general/structural scope. `concept` (the broadest, catch-all knowledge
+ * node) is biggest; `domain` next; then the feature/story/spec/workflow layer;
+ * then leaf detail types (task/decision/constraint/pattern/glossary); `pending`
+ * stubs are smallest. Unknown types fall back to 1.0.
+ */
+export const TYPE_SIZE_SCALE: Record<string, number> = {
+	concept: 1.9,
+	domain: 1.6,
+	feature: 1.3,
+	story: 1.2,
+	spec: 1.2,
+	workflow: 1.1,
+	task: 1.0,
+	decision: 1.0,
+	constraint: 0.95,
+	pattern: 0.95,
+	glossary: 0.9,
+	pending: 0.8,
+};
+
+/** Size multiplier for a concept type (1.0 for anything unranked). */
+export function typeSizeScale(type: string): number {
+	return TYPE_SIZE_SCALE[type] ?? 1;
+}
+
+/**
+ * Node radius from BOTH its type (base scope) and its degree (connectedness).
+ * Keeps the existing degree curve (`6 + sqrt(degree)*2.4`) but scales it by the
+ * type rank, so a highly-connected `concept` dwarfs a lone `glossary` entry.
+ */
+export function radiusForTypeDegree(type: string, degree: number): number {
+	return (6 + Math.sqrt(Math.max(0, degree)) * 2.4) * typeSizeScale(type);
+}
+
+/**
+ * Cluster center (in graph coords) for a concept type: types are spread evenly
+ * around a circle centered on the canvas so each type's nodes gravitate into a
+ * distinct cloud. `types` fixes the ordering (index → angle); a type absent from
+ * the list, or an empty list, falls back to the canvas center. `radius` defaults
+ * to ~35% of the smaller canvas dimension so clouds sit apart but overlap when
+ * cross-type edges pull them together.
+ */
+export function typeClusterCenter(
+	type: string,
+	types: string[],
+	width: number,
+	height: number,
+	radius?: number,
+): { x: number; y: number } {
+	const cx = width / 2;
+	const cy = height / 2;
+	const i = types.indexOf(type);
+	if (i < 0 || types.length <= 1) return { x: cx, y: cy };
+	const r = radius ?? Math.min(width, height) * 0.35;
+	const angle = (i / types.length) * Math.PI * 2 - Math.PI / 2; // first type at top
+	return { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r };
+}
+
 /** A viewport rectangle in *screen* (SVG-client) pixels. */
 export interface ViewportRect {
 	width: number;
@@ -137,6 +204,63 @@ export function stubEdgesFor(
 	allIds: Set<string>,
 ): EdgeRenderPlan[] {
 	return planEdges(edges, visibleIds, allIds).filter((p) => p.stub);
+}
+
+// ------------------------------------------------------------- click focus
+// Sticky node focus (distinct from the transient hover-neighborhood highlight):
+// clicking a node "focuses" it — the focused node and its DIRECT (1-hop)
+// neighbors stay full opacity while everything else dims, and those neighbors
+// are REVEALED even if their concept type is toggled off in the type filter.
+// These pure helpers compute the reveal set and the dim predicates; the Svelte
+// side owns the opacity classes + the render-set merge with viewport culling.
+
+/**
+ * The focus-reveal set for a focused node: the focused id plus every node one
+ * undirected hop away (edges are followed in BOTH directions). Returns an empty
+ * set when nothing is focused. An isolated node (no edges) reveals only itself.
+ */
+export function focusRevealSet(focusedId: string | null, edges: Edge[]): Set<string> {
+	const set = new Set<string>();
+	if (!focusedId) return set;
+	set.add(focusedId);
+	for (const e of edges) {
+		if (e.from === focusedId) set.add(e.to);
+		if (e.to === focusedId) set.add(e.from);
+	}
+	return set;
+}
+
+/**
+ * Is a node dimmed under the current focus? Nothing is dimmed when no node is
+ * focused (empty reveal set). While focused, a node dims iff it is NOT in the
+ * reveal set (i.e. not the focused node and not a direct neighbor).
+ */
+export function isDimmed(id: string, revealSet: Set<string>): boolean {
+	if (revealSet.size === 0) return false;
+	return !revealSet.has(id);
+}
+
+/**
+ * Is an edge dimmed under the current focus? While focused, an edge stays full
+ * opacity only if it directly connects the focused node to one of its neighbors
+ * (i.e. the focused id is one of its endpoints); every other edge dims. Nothing
+ * dims when no node is focused.
+ */
+export function isEdgeDimmed(from: string, to: string, focusedId: string | null): boolean {
+	if (!focusedId) return false;
+	return from !== focusedId && to !== focusedId;
+}
+
+/**
+ * Merge the viewport-culled id set with the focus-reveal set so focused-node
+ * neighbors are never culled away (and off-type revealed neighbors render even
+ * though the type filter would otherwise drop them). Returns a new set; the
+ * inputs are untouched. With no focus this is just a copy of the culled set.
+ */
+export function mergeFocusRender(culledIds: Set<string>, revealSet: Set<string>): Set<string> {
+	const out = new Set(culledIds);
+	for (const id of revealSet) out.add(id);
+	return out;
 }
 
 // ---------------------------------------------------------------- drag anchors

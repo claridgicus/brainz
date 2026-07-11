@@ -99,6 +99,102 @@ export function clampToViewport(x: number, y: number, vp: ViewportRect): [number
   ];
 }
 
+// ------------------------------------------------------- type size + clustering
+// Nodes are sized by concept type (generality) and same-type nodes share a
+// cluster center so each type forms a discrete cloud that overlaps others as
+// cross-type edges pull them together. Mirrors apps/cloud/src/lib/graph-view.ts.
+
+/** Per-type size rank — a multiplier on the degree-driven base radius. */
+export const TYPE_SIZE_SCALE: Record<string, number> = {
+  concept: 1.9,
+  domain: 1.6,
+  feature: 1.3,
+  story: 1.2,
+  spec: 1.2,
+  workflow: 1.1,
+  task: 1.0,
+  decision: 1.0,
+  constraint: 0.95,
+  pattern: 0.95,
+  glossary: 0.9,
+  pending: 0.8,
+};
+
+/** Size multiplier for a concept type (1.0 for anything unranked). */
+export function typeSizeScale(type: string): number {
+  return TYPE_SIZE_SCALE[type] ?? 1;
+}
+
+/** Node radius from BOTH concept type (base scope) and degree (connectedness). */
+export function radiusForTypeDegree(type: string, degree: number): number {
+  return (6 + Math.sqrt(Math.max(0, degree)) * 2.4) * typeSizeScale(type);
+}
+
+/**
+ * Cluster center (graph coords) for a concept type: types spread evenly around
+ * a circle so each type's nodes gravitate into a distinct cloud. `types` fixes
+ * the ordering; a missing type / empty list falls back to the canvas center.
+ */
+export function typeClusterCenter(
+  type: string,
+  types: string[],
+  width: number,
+  height: number,
+  radius?: number,
+): { x: number; y: number } {
+  const cx = width / 2;
+  const cy = height / 2;
+  const i = types.indexOf(type);
+  if (i < 0 || types.length <= 1) return { x: cx, y: cy };
+  const r = radius ?? Math.min(width, height) * 0.35;
+  const angle = (i / types.length) * Math.PI * 2 - Math.PI / 2;
+  return { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r };
+}
+
+// ------------------------------------------------------------- click focus
+// Sticky node focus (distinct from the transient hover-neighborhood highlight):
+// clicking a node dims all non-neighbors and reveals its 1-hop neighbors even
+// when their concept type is toggled off in the type filter. Pure helpers here;
+// the DOM wiring lives in main.ts. Mirrors apps/cloud/src/lib/graph-view.ts.
+
+/** Minimal edge shape these helpers need. */
+export interface FocusEdge {
+  from: string;
+  to: string;
+}
+
+/**
+ * The focus-reveal set for a focused node: the focused id plus every node one
+ * undirected hop away (edges followed in BOTH directions). Empty when nothing
+ * is focused; an isolated node reveals only itself.
+ */
+export function focusRevealSet(focusedId: string | null, edges: FocusEdge[]): Set<string> {
+  const set = new Set<string>();
+  if (!focusedId) return set;
+  set.add(focusedId);
+  for (const e of edges) {
+    if (e.from === focusedId) set.add(e.to);
+    if (e.to === focusedId) set.add(e.from);
+  }
+  return set;
+}
+
+/** Is a node dimmed under focus? Nothing dims with an empty reveal set. */
+export function isDimmed(id: string, revealSet: Set<string>): boolean {
+  if (revealSet.size === 0) return false;
+  return !revealSet.has(id);
+}
+
+/**
+ * Is an edge dimmed under focus? An edge stays lit only if it connects the
+ * focused node to a neighbor (focused id is one endpoint); others dim. Nothing
+ * dims when no node is focused.
+ */
+export function isEdgeDimmed(from: string, to: string, focusedId: string | null): boolean {
+  if (!focusedId) return false;
+  return from !== focusedId && to !== focusedId;
+}
+
 export interface EdgeEndpoints {
   x1: number;
   y1: number;

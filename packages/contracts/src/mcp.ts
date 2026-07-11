@@ -110,7 +110,7 @@ export const upsertConceptInputSchema = z.object({
     .record(z.string(), z.array(z.string()))
     .optional()
     .describe(
-      "Typed edges, e.g. {\"depends_on\": [\"auth-system\"]}. Conventions: part_of (feature/story/task → domain), realized_by (story → features), realizes (task → stories/features), governs (spec → what it constrains), governed_by (task → specs), depends_on, constrains, supersedes, related_to.",
+      "Typed edges, e.g. {\"depends_on\": [\"auth-system\"]}. Conventions: part_of (feature/story/task → domain), realized_by (story → features), realizes (task → stories/features), governs (spec → what it constrains), governed_by (task → specs), depends_on, constrains, supersedes, related_to. For domain concepts, prefer linking to OTHER domains (related_to / depends_on) wherever they share a boundary or hand off responsibility — connected domains reveal how the product's areas overlap instead of floating as isolated islands.",
     ),
 });
 
@@ -121,7 +121,7 @@ export const linkConceptsInputSchema = z.object({
     .string()
     .default("related_to")
     .describe(
-      "Edge type, e.g. part_of | realized_by | governs | depends_on | constrains | supersedes | related_to (default).",
+      "Edge type, e.g. part_of | realized_by | governs | depends_on | constrains | supersedes | related_to (default). Domain→domain links (related_to / depends_on) are encouraged where two domains share a boundary, so the graph shows how areas overlap.",
     ),
 });
 
