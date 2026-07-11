@@ -153,6 +153,12 @@ export const onboardInputSchema = z.object({
     .describe(
       'Required with "complete": 2–5 sentences on what was indexed and any notable gaps — stored as the product-onboarding-summary concept.',
     ),
+  areaList: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'With "status" or "complete": the repo\'s top-level source areas (packages/*, apps/*/src subtrees, major dirs) from your own repo walk — Brainz can\'t read the repo. "status" diffs concepts\' code_areas against this to report covered vs uncovered areas; "complete" is REJECTED if too many areas are still uncovered.',
+    ),
 });
 
 // ------------------------------------------------------------- task tool i/o
@@ -302,11 +308,27 @@ export const vaultStatsOutputSchema = vaultStatsSchema.extend({
  */
 export const ONBOARD_START_CONTENT = "markdown-playbook" as const;
 
+/**
+ * Coverage report shape — which reported source areas the vault's concepts
+ * cover. Present on `status`/`complete` output only when the caller supplied
+ * an `areaList`. The `sync` epic reuses this to report drift.
+ */
+export const coverageSchema = z
+  .object({
+    covered: z.array(z.string()),
+    uncovered: z.array(z.string()),
+    coveragePct: z.number(),
+  })
+  .strict();
+
 export const onboardStatusOutputSchema = z
   .object({
     onboarded: z.boolean(),
     conceptCount: z.number().int(),
     byType: z.record(z.string(), z.number()),
+    // Present only when the caller supplied `areaList`. Covered vs uncovered
+    // top-level source areas + coveragePct — the loop's per-iteration signal.
+    coverage: coverageSchema.optional(),
   })
   .strict();
 
@@ -322,6 +344,12 @@ export const onboardCompleteOutputSchema = z
     conceptsLackingCodeAreas: z.number().int(),
     hasDomainConcepts: z.boolean(),
     byType: z.record(z.string(), z.number()),
+    // Present only when the caller supplied `areaList`: the coverage the
+    // graph was sealed at (complete having passed the thin-coverage gate).
+    coverage: coverageSchema.optional(),
+    // Present only when NO `areaList` was supplied: a note that coverage
+    // could not be judged (complete warns rather than hard-blocks).
+    coverageNote: z.string().optional(),
   })
   .strict();
 
@@ -483,10 +511,15 @@ export const MCP_TOOLS = [
       "your whole agent fleet shares. Call {action: \"start\"} to receive the onboarding playbook — " +
       "instructions for fanning subagents out over the codebase and distilling product knowledge " +
       "(domains, features, stories, specs, workflows, decisions, constraints) into concepts via " +
-      "upsert_concept, each anchored to the code with codeAreas. When the graph is written, call " +
-      "{action: \"complete\", summary} to mark the vault onboarded and store the summary. " +
-      "{action: \"status\"} reports onboarded state and concept counts. Until onboarding completes, " +
-      "search_concepts and get_context results carry a reminder to run it.",
+      "upsert_concept, each anchored to the code with codeAreas. There is NO flat concept cap — size the " +
+      "effort from the codebase; for a large project expect 200–800+ concepts and do NOT stop at a few " +
+      "dozen. Onboarding is a LOOP: index an area, then call {action: \"status\", areaList} (you supply " +
+      "your repo's source areas — Brainz can't read the repo) to see covered vs uncovered areas; keep " +
+      "indexing the uncovered ones until coverage is broad. When it is, call {action: \"complete\", " +
+      "summary, areaList} to mark the vault onboarded and store the summary — complete is coverage-gated " +
+      "and rejects if too many areas are still uncovered. {action: \"status\"} reports onboarded state, " +
+      "concept counts, and (with areaList) coverage. Until onboarding completes, search_concepts and " +
+      "get_context results carry a reminder to run it.",
     inputSchema: onboardInputSchema,
     outputSchema: onboardOutputSchema,
   },

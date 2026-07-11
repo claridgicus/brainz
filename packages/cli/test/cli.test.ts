@@ -395,7 +395,8 @@ describe("brainz onboard", () => {
     const res = await run(["onboard", "--vault", dir, "--product-name", "Acme CRM"]);
     expect(res.code).toBe(0);
     expect(res.out).toContain("Onboarding playbook — Acme CRM");
-    expect(res.out).toContain("20–60 concepts");
+    expect(res.out).not.toContain("20–60 concepts");
+    expect(res.out).toContain("200–800+ concepts");
     expect(res.out).toContain("`domain`");
     expect(res.out).toContain("realized_by");
 

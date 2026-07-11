@@ -31,10 +31,10 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "8"', () => {
-    // 8: Wave M — vault membership & email invites (role on vault shapes,
-    // member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("8");
+  it('is "9"', () => {
+    // 9: Wave O-scale — onboarding at scale. onboard input gains optional
+    // areaList; status/complete output gain optional coverage report.
+    expect(CONTRACTS_VERSION).toBe("9");
   });
 });
 
@@ -334,6 +334,65 @@ describe("onboard tool contract", () => {
     );
     expect(onboardInputSchema.safeParse({ action: "status" }).success).toBe(true);
     expect(onboardInputSchema.safeParse({ action: "restart" }).success).toBe(false);
+  });
+
+  it("input accepts an optional areaList (status/complete continue loop)", () => {
+    expect(
+      onboardInputSchema.safeParse({ action: "status", areaList: ["packages/engine", "apps/cloud/src"] })
+        .success,
+    ).toBe(true);
+    expect(
+      onboardInputSchema.safeParse({ action: "complete", summary: "done", areaList: ["packages/engine"] })
+        .success,
+    ).toBe(true);
+    // areaList must be strings.
+    expect(onboardInputSchema.safeParse({ action: "status", areaList: [1, 2] }).success).toBe(false);
+  });
+
+  it("status/complete outputs round-trip an optional coverage report", () => {
+    const coverage = { covered: ["packages/engine"], uncovered: ["apps/cloud/src"], coveragePct: 50 };
+    expect(
+      onboardStatusOutputSchema.safeParse({
+        onboarded: false,
+        conceptCount: 3,
+        byType: { feature: 3 },
+        coverage,
+      }).success,
+    ).toBe(true);
+    expect(
+      onboardCompleteOutputSchema.safeParse({
+        ok: true,
+        onboarded: true,
+        summaryConceptId: "product-onboarding-summary",
+        conceptCount: 3,
+        conceptsLackingCodeAreas: 0,
+        hasDomainConcepts: true,
+        byType: { domain: 1, feature: 2 },
+        coverage,
+      }).success,
+    ).toBe(true);
+    // coverageNote (the no-areaList warning path) also validates.
+    expect(
+      onboardCompleteOutputSchema.safeParse({
+        ok: true,
+        onboarded: true,
+        summaryConceptId: "product-onboarding-summary",
+        conceptCount: 3,
+        conceptsLackingCodeAreas: 0,
+        hasDomainConcepts: true,
+        byType: { domain: 1, feature: 2 },
+        coverageNote: "no areaList supplied",
+      }).success,
+    ).toBe(true);
+    // coverage is strict: unknown keys rejected.
+    expect(
+      onboardStatusOutputSchema.safeParse({
+        onboarded: false,
+        conceptCount: 0,
+        byType: {},
+        coverage: { covered: [], uncovered: [], coveragePct: 0, extra: true },
+      }).success,
+    ).toBe(false);
   });
 
   it("status/complete outputs are strict", () => {

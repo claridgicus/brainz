@@ -638,9 +638,49 @@ async function main() {
         startBlocks.length === 1 &&
         startBlocks[0].includes("Onboarding playbook — E2E CRM") &&
         startBlocks[0].includes("github.com/e2e/crm") &&
-        startBlocks[0].includes("20–60 concepts") &&
+        !startBlocks[0].includes("20–60 concepts") &&
+        startBlocks[0].includes("200–800+ concepts") &&
         startBlocks[0].includes("realized_by") &&
         startBlocks[0].includes("governs"),
+    );
+
+    // 9b-i. status WITH an areaList returns a coverage report. Only lead-scoring
+    // carries codeAreas (apps/crm/**, packages/models/**), so apps/crm is
+    // covered and the un-anchored areas are uncovered.
+    const statusCoverage = await mcp.callTool({
+      name: "onboard",
+      arguments: {
+        action: "status",
+        areaList: ["apps/crm/src", "packages/models", "packages/engine", "apps/api", "packages/ui"],
+      },
+    });
+    const statusCoveragePayload = JSON.parse(statusCoverage.content.find((c) => c.type === "text").text);
+    step(
+      "onboard status with areaList returns a coverage report (covered vs uncovered)",
+      onboardStatusOutputSchema.safeParse(statusCoveragePayload).success &&
+        statusCoveragePayload.coverage?.covered.includes("apps/crm/src") &&
+        statusCoveragePayload.coverage?.covered.includes("packages/models") &&
+        statusCoveragePayload.coverage?.uncovered.includes("packages/engine") &&
+        typeof statusCoveragePayload.coverage?.coveragePct === "number",
+      JSON.stringify(statusCoveragePayload),
+    );
+
+    // 9b-ii. complete with THIN coverage is rejected, listing uncovered areas.
+    const thinComplete = await mcp.callTool({
+      name: "onboard",
+      arguments: {
+        action: "complete",
+        summary: "Barely indexed.",
+        areaList: ["apps/crm/src", "packages/engine", "apps/api", "packages/ui", "packages/core"],
+      },
+    });
+    const thinText = thinComplete.content.filter((c) => c.type === "text").map((c) => c.text)[0] ?? "";
+    step(
+      "onboard complete with thin coverage is rejected, listing uncovered areas",
+      thinComplete.isError === true &&
+        thinText.includes("onboarding looks incomplete") &&
+        thinText.includes("packages/engine"),
+      thinText,
     );
 
     const incomplete = await mcp.callTool({ name: "onboard", arguments: { action: "complete" } });
