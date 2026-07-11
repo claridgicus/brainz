@@ -31,10 +31,12 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "8"', () => {
+  it('is "9"', () => {
+    // 9: delete_concept MCP tool added to MCP_TOOLS (remove a concept + its
+    // edges; idempotent — deleting a missing id is a no-op success).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     // member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("8");
+    expect(CONTRACTS_VERSION).toBe("9");
   });
 });
 
@@ -46,6 +48,7 @@ describe("MCP_TOOLS registry", () => {
       "get_related",
       "get_context",
       "upsert_concept",
+      "delete_concept",
       "link_concepts",
       "list_concepts",
       "vault_stats",

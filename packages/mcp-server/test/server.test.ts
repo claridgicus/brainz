@@ -72,6 +72,7 @@ describe("tool registration", () => {
     expect(names).toEqual([
       "complete_task",
       "create_task",
+      "delete_concept",
       "get_concept",
       "get_context",
       "get_related",
@@ -275,6 +276,34 @@ describe("upsert_concept and link_concepts", () => {
   it("errors when linking from an unknown concept", async () => {
     const result = await callTool("link_concepts", { from: "ghost", to: "mrr" });
     expect(result.isError).toBe(true);
+  });
+});
+
+describe("delete_concept", () => {
+  it("deletes a concept and its edges, then get_concept no longer finds it", async () => {
+    // Seed a concept with an outgoing wiki-link edge.
+    await callJson("upsert_concept", {
+      id: "junk-node",
+      title: "Junk Node",
+      body: "Delete me. [[mrr]]",
+      type: "concept",
+    });
+    const before = await callJson("get_related", { id: "mrr", depth: 1 });
+    expect(before.related.map((n: any) => n.id)).toContain("junk-node");
+
+    const result = await callJson("delete_concept", { id: "junk-node" });
+    expect(result).toEqual({ deleted: true, id: "junk-node" });
+
+    // Gone from the index: get_concept errors, and the edge is gone too.
+    const fetched = await callTool("get_concept", { id: "junk-node" });
+    expect(fetched.isError).toBe(true);
+    const after = await callJson("get_related", { id: "mrr", depth: 1 });
+    expect(after.related.map((n: any) => n.id)).not.toContain("junk-node");
+  });
+
+  it("deleting a missing id is a clean no-op success (deleted:false), not an error", async () => {
+    const result = await callJson("delete_concept", { id: "does-not-exist" });
+    expect(result).toEqual({ deleted: false, id: "does-not-exist" });
   });
 });
 

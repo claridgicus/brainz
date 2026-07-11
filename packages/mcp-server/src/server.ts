@@ -222,6 +222,13 @@ export function createServer(vault: Vault): McpServer {
         return ok({ ...compactMeta(saved), filePath: saved.filePath });
       }),
 
+    delete_concept: async ({ id }) =>
+      guarded(async () => {
+        // Idempotent: deleting a missing id is a no-op success (deleted:false).
+        const { deleted } = await vault.deleteConcept(id);
+        return ok({ deleted, id });
+      }),
+
     link_concepts: async ({ from, to, relation }) =>
       guarded(async () => {
         await vault.link(from, to, relation);

@@ -192,6 +192,14 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
         });
       }),
 
+    delete_concept: async ({ id }) =>
+      guarded(async () => {
+        // Idempotent: the DO returns deleted:false for a missing id (no throw),
+        // so a repeat/typo delete is a clean no-op success, not an error.
+        const { deleted } = await vault.deleteConcept(id);
+        return ok({ deleted, id });
+      }),
+
     link_concepts: async ({ from, to, relation }) =>
       guarded(async () => {
         try {

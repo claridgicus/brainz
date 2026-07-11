@@ -59,6 +59,7 @@ const INPUT_SAMPLES: Record<AnyToolName, unknown> = {
     codeAreas: ["apps/billing/**"],
     relations: { governs: ["invoicing"] },
   },
+  delete_concept: { id: "test-concept" },
   link_concepts: { from: "a", to: "b", relation: "depends_on" },
   list_concepts: { type: "spec" },
   vault_stats: {},
@@ -92,6 +93,7 @@ const OUTPUT_SAMPLES: Record<AnyToolName, unknown> = {
   get_related: { id: "lead-scoring", related: [{ ...META, distance: 1, via: [{ from: "lead-scoring", to: "auth", relation: "depends_on" }] }] },
   get_context: { included: ["a", "b"], truncated: true, approxTokens: 480 },
   upsert_concept: { ...META, filePath: "concepts/lead-scoring.md" },
+  delete_concept: { deleted: true, id: "test-concept" },
   link_concepts: { ok: true, from: "a", to: "b", relation: "depends_on" },
   list_concepts: { count: 1, concepts: [META] },
   vault_stats: {
@@ -164,6 +166,7 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOL
       get_related: { id: "x", depth: "deep" },
       get_context: { tokenBudget: "big" },
       upsert_concept: { title: "x", body: 42 },
+      delete_concept: { id: 42 },
       link_concepts: { from: "a" },
       list_concepts: { type: "banana" },
       onboard: { action: "restart" },

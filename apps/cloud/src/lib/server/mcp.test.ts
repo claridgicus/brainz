@@ -36,14 +36,23 @@ interface FakeTask {
 }
 
 interface FakeVault extends VaultClient {
-  /** Test seam: onboarded state + upserts + a small task pile recorded by the fake. */
-  state: { onboardedAt: string | null; upserts: unknown[]; tasks: FakeTask[] };
+  /** Test seam: onboarded state + upserts + a small task pile + deletes recorded by the fake. */
+  state: {
+    onboardedAt: string | null;
+    upserts: unknown[];
+    tasks: FakeTask[];
+    /** Concept ids the fake vault "holds" — deleteConcept removes from here. */
+    concepts: Set<string>;
+    deletes: string[];
+  };
 }
 
 function fakeVault(): FakeVault {
   const state: FakeVault["state"] = {
     onboardedAt: null,
     upserts: [],
+    concepts: new Set(["lead-scoring", "junk-node"]),
+    deletes: [],
     tasks: [
       {
         id: "task-a",
@@ -108,7 +117,13 @@ function fakeVault(): FakeVault {
         },
       };
     },
-    deleteConcept: async () => ({ ok: true, deleted: true }),
+    deleteConcept: async (id) => {
+      state.deletes.push(id);
+      // Idempotent, exactly like VaultDO.deleteConcept: removing the concept and
+      // its edges if it exists, a clean no-op (deleted:false) if it doesn't.
+      const deleted = state.concepts.delete(id);
+      return { ok: true, deleted };
+    },
     getConcept: async (id) =>
       id === "lead-scoring"
         ? {
@@ -381,6 +396,48 @@ describe("task tools", () => {
     expect(payload.type).toBe("task");
     expect(payload.taskStatus).toBe("open");
     expect(getMcpTool("create_task").outputSchema.safeParse(payload).success).toBe(true);
+  });
+});
+
+describe("delete_concept tool", () => {
+  let vault: FakeVault;
+  let client: Client;
+  beforeEach(async () => {
+    vault = fakeVault();
+    client = await connect(vault);
+  });
+
+  it("deletes a concept (and its edges) and reports deleted:true", async () => {
+    const result = await client.callTool({
+      name: "delete_concept",
+      arguments: { id: "junk-node" },
+    });
+    expect(result.isError ?? false).toBe(false);
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(payload).toEqual({ deleted: true, id: "junk-node" });
+    expect(getMcpTool("delete_concept").outputSchema.safeParse(payload).success).toBe(true);
+    // The DO drops the concept + its edges/embedding/FTS; the fake mirrors the row removal.
+    expect(vault.state.concepts.has("junk-node")).toBe(false);
+    expect(vault.state.deletes).toContain("junk-node");
+  });
+
+  it("deleting a missing id is a clean no-op success (deleted:false), not an error", async () => {
+    const result = await client.callTool({
+      name: "delete_concept",
+      arguments: { id: "does-not-exist" },
+    });
+    expect(result.isError ?? false).toBe(false);
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(payload).toEqual({ deleted: false, id: "does-not-exist" });
+    expect(getMcpTool("delete_concept").outputSchema.safeParse(payload).success).toBe(true);
+  });
+
+  it("is idempotent: deleting the same id twice succeeds both times", async () => {
+    const first = await client.callTool({ name: "delete_concept", arguments: { id: "lead-scoring" } });
+    expect(JSON.parse(textBlocks(first)[0])).toEqual({ deleted: true, id: "lead-scoring" });
+    const second = await client.callTool({ name: "delete_concept", arguments: { id: "lead-scoring" } });
+    expect(second.isError ?? false).toBe(false);
+    expect(JSON.parse(textBlocks(second)[0])).toEqual({ deleted: false, id: "lead-scoring" });
   });
 });
 

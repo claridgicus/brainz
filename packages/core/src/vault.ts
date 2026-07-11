@@ -552,6 +552,21 @@ export class Vault {
     return saved;
   }
 
+  /**
+   * Delete a concept: remove its markdown file and its index rows (concept,
+   * FTS, edges, embedding). Idempotent — deleting an id that doesn't exist is a
+   * no-op that returns `{ deleted: false }`.
+   */
+  async deleteConcept(id: string): Promise<{ deleted: boolean }> {
+    const existing = this.getConcept(id);
+    if (!existing) return { deleted: false };
+    await fsp.rm(existing.filePath, { force: true });
+    // File is gone → #reindexFile drops the concept's rows (and its edges/FTS/
+    // embedding via #removeConcept).
+    await this.#reindexFile(existing.filePath);
+    return { deleted: true };
+  }
+
   async link(from: string, to: string, relation = "related_to"): Promise<void> {
     const source = this.getConcept(from);
     if (!source) throw new Error(`unknown concept: ${from}`);

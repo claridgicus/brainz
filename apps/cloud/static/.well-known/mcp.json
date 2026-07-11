@@ -28,6 +28,7 @@
         "get_related",
         "get_context",
         "upsert_concept",
+        "delete_concept",
         "link_concepts",
         "list_concepts",
         "vault_stats",

@@ -125,6 +125,10 @@ export const linkConceptsInputSchema = z.object({
     ),
 });
 
+export const deleteConceptInputSchema = z.object({
+  id: z.string().describe("Exact concept id (slug) to delete, e.g. \"lead-scoring\"."),
+});
+
 export const listConceptsInputSchema = z.object({
   product: z.string().optional().describe("Only concepts of this product."),
   type: z.enum(CONCEPT_TYPES).optional().describe("Only concepts of this type."),
@@ -273,6 +277,14 @@ export const getContextOutputSchema = z
 export const upsertConceptOutputSchema = toolConceptMetaSchema.extend({
   filePath: z.string(),
 });
+
+export const deleteConceptOutputSchema = z
+  .object({
+    /** True if a concept was removed; false if the id didn't exist (idempotent no-op). */
+    deleted: z.boolean(),
+    id: z.string(),
+  })
+  .strict();
 
 export const linkConceptsOutputSchema = z
   .object({
@@ -443,6 +455,17 @@ export const MCP_TOOLS = [
       "graph edges. Returns the saved concept's metadata.",
     inputSchema: upsertConceptInputSchema,
     outputSchema: upsertConceptOutputSchema,
+  },
+  {
+    name: "delete_concept",
+    title: "Delete concept",
+    description:
+      "Remove a concept from the vault and all of its outgoing edges. Use to clear a note that is wrong, " +
+      "obsolete, or junk (e.g. a probe or test node that shouldn't be in the graph). Idempotent: deleting " +
+      "an id that doesn't exist is a no-op success (deleted:false), not an error. Deletion is permanent — " +
+      "prefer upsert_concept to correct a note you want to keep. Returns { deleted, id }.",
+    inputSchema: deleteConceptInputSchema,
+    outputSchema: deleteConceptOutputSchema,
   },
   {
     name: "link_concepts",
