@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildGraphPayload,
   compactMeta,
+  isClaimStale,
+  isEmbedRateLimited,
   keywordScore,
   makeSnippet,
   matchSnippet,
@@ -109,5 +111,55 @@ describe("buildGraphPayload", () => {
     const payload = buildGraphPayload([], []);
     expect(payload).toEqual({ nodes: [], edges: [] });
     expect(graphResponseSchema.safeParse(payload).success).toBe(true);
+  });
+});
+
+describe("isEmbedRateLimited", () => {
+  const HOUR = 60 * 60 * 1000;
+  const CAP = 1000;
+  const now = 10 * HOUR;
+
+  it("is false below the cap and true once the window reaches it", () => {
+    const under = Array.from({ length: CAP - 1 }, () => now - 1);
+    expect(isEmbedRateLimited(under, now, HOUR, CAP)).toBe(false);
+    const at = Array.from({ length: CAP }, () => now - 1);
+    expect(isEmbedRateLimited(at, now, HOUR, CAP)).toBe(true);
+    const over = Array.from({ length: CAP + 5 }, () => now - 1);
+    expect(isEmbedRateLimited(over, now, HOUR, CAP)).toBe(true);
+  });
+
+  it("only counts calls inside the rolling window (recovers as they age out)", () => {
+    // CAP calls all just outside the window → not rate-limited (they aged out).
+    const aged = Array.from({ length: CAP + 10 }, () => now - HOUR - 1);
+    expect(isEmbedRateLimited(aged, now, HOUR, CAP)).toBe(false);
+    // A boundary call exactly windowMs ago is outside (strict `>` cutoff).
+    expect(isEmbedRateLimited([now - HOUR], now, HOUR, 1)).toBe(false);
+    // One call inside the window with cap 1 → limited.
+    expect(isEmbedRateLimited([now - 1], now, HOUR, 1)).toBe(true);
+  });
+
+  it("is never limited with no prior calls", () => {
+    expect(isEmbedRateLimited([], now, HOUR, CAP)).toBe(false);
+  });
+});
+
+describe("isClaimStale", () => {
+  const TTL = 30 * 60 * 1000;
+  const now = Date.parse("2026-07-11T12:00:00.000Z");
+
+  it("is false for a fresh claim and true past the TTL", () => {
+    const fresh = new Date(now - 60_000).toISOString(); // 1 min ago
+    expect(isClaimStale(fresh, now, TTL)).toBe(false);
+    const stale = new Date(now - TTL - 1).toISOString(); // just past TTL
+    expect(isClaimStale(stale, now, TTL)).toBe(true);
+    // Exactly at the TTL boundary counts as stale (>=).
+    expect(isClaimStale(new Date(now - TTL).toISOString(), now, TTL)).toBe(true);
+  });
+
+  it("fails closed on missing/unparseable takenAt (never reclaims)", () => {
+    expect(isClaimStale(null, now, TTL)).toBe(false);
+    expect(isClaimStale(undefined, now, TTL)).toBe(false);
+    expect(isClaimStale("not-a-date", now, TTL)).toBe(false);
+    expect(isClaimStale("", now, TTL)).toBe(false);
   });
 });

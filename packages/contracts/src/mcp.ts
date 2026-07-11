@@ -336,6 +336,12 @@ export const onboardOutputSchema = z.union([
 export const taskMetaSchema = toolConceptMetaSchema.extend({
   createdAt: z.string().optional(),
   updatedAt: z.string().optional(),
+  /**
+   * Computed, not stored: true when a `taken` claim has exceeded the claim TTL
+   * (holder likely crashed) and is therefore reclaimable by take_task. Lets the
+   * board flag stuck claims. Absent/false for fresh claims and non-taken tasks.
+   */
+  staleClaim: z.boolean().optional(),
 });
 
 export const listTasksOutputSchema = z

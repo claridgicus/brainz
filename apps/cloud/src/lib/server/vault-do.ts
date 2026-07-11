@@ -44,6 +44,8 @@ import type {
 import {
   buildGraphPayload,
   compactMeta,
+  isClaimStale,
+  isEmbedRateLimited,
   keywordScore,
   makeSnippet,
   matchSnippet,
@@ -51,8 +53,29 @@ import {
   tokenize,
 } from "./do-helpers";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
+
+/**
+ * Per-vault embedding rate cap (constraint-embedding-rate-cap): a rolling-hour
+ * ceiling on Workers-AI embedding calls, counting BOTH reindex/upsert embeds
+ * and semantic-search query embeds. Over the cap the vault skips the embed and
+ * degrades to keyword-only search (embeddings: "rate-limited"), recovering
+ * automatically once the window clears. Writes and queries never fail.
+ */
+const EMBED_RATE_LIMIT_PER_HOUR = 1000;
+const EMBED_RATE_WINDOW_MS = 60 * 60 * 1000;
+
+/** Embedding availability recorded in DO meta (mirrors contracts EMBEDDING_STATUSES). */
+type EmbeddingsMeta = "ready" | "unavailable" | "rate-limited";
+
+/**
+ * Claim TTL (spec-take-task-atomic / task-lifecycle): a task left `taken` for
+ * longer than this — its holder presumably crashed — is treated as reclaimable
+ * so take_task can hand it out again and the pile can be fully drained. Fresh
+ * claims are unaffected. Surfaced as a computed `staleClaim` flag on listTasks.
+ */
+const CLAIM_TTL_MS = 30 * 60 * 1000;
 
 /** Minimal Workers AI surface (avoids model-name generics from workers-types). */
 interface AiBinding {
@@ -146,6 +169,13 @@ export class VaultDO {
         vector BLOB NOT NULL,
         hash TEXT NOT NULL
       )`);
+      // Rolling-window ledger for the per-vault embedding rate cap: one row per
+      // embedding-model call (reindex + query), pruned to a 1h window.
+      this.#sql.exec(`CREATE TABLE IF NOT EXISTS embed_event (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at INTEGER NOT NULL
+      )`);
+      this.#sql.exec(`CREATE INDEX IF NOT EXISTS embed_event_at ON embed_event (at)`);
       if (this.#metaGet("embeddings") === null) this.#metaSet("embeddings", "ready");
     } else {
       // Gated additive migrations for pre-existing vaults. Never edit past
@@ -162,6 +192,15 @@ export class VaultDO {
         this.#sql.exec(`ALTER TABLE concept ADD COLUMN taken_by TEXT`);
         this.#sql.exec(`ALTER TABLE concept ADD COLUMN taken_at TEXT`);
         this.#sql.exec(`ALTER TABLE concept ADD COLUMN done_at TEXT`);
+      }
+      if (version < 4) {
+        // v3 → v4: embedding rate-cap ledger (additive; starts empty so the
+        // window is clear for existing vaults).
+        this.#sql.exec(`CREATE TABLE IF NOT EXISTS embed_event (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          at INTEGER NOT NULL
+        )`);
+        this.#sql.exec(`CREATE INDEX IF NOT EXISTS embed_event_at ON embed_event (at)`);
       }
     }
     if (version < SCHEMA_VERSION) this.#metaSet("schema_version", String(SCHEMA_VERSION));
@@ -425,12 +464,50 @@ export class VaultDO {
 
   // -------------------------------------------------------------- embeddings
 
+  #setEmbeddings(status: EmbeddingsMeta): void {
+    this.#metaSet("embeddings", status);
+  }
+
+  /** Current embeddings availability from meta (defaults to "unavailable"). */
+  #embeddingsMeta(): EmbeddingsMeta {
+    const v = this.#metaGet("embeddings");
+    return v === "ready" || v === "rate-limited" ? v : "unavailable";
+  }
+
+  /**
+   * True when the vault has hit its rolling-hour embed cap and the NEXT call
+   * must be skipped. Prunes events outside the window first, then counts.
+   * Deterministic given `now`; called immediately before any AI.run embed.
+   */
+  #embedRateLimited(now: number): boolean {
+    const cutoff = now - EMBED_RATE_WINDOW_MS;
+    this.#sql.exec(`DELETE FROM embed_event WHERE at <= ?`, cutoff);
+    const timestamps = this.#sql
+      .exec<{ at: number }>(`SELECT at FROM embed_event`)
+      .toArray()
+      .map((r) => Number(r.at));
+    return isEmbedRateLimited(timestamps, now, EMBED_RATE_WINDOW_MS, EMBED_RATE_LIMIT_PER_HOUR);
+  }
+
+  /** Record one embedding-model call against the rolling window. */
+  #recordEmbedCall(now: number): void {
+    this.#sql.exec(`INSERT INTO embed_event (at) VALUES (?)`, now);
+  }
+
   async #tryEmbed(id: string, text: string, hash: string): Promise<void> {
     if (!this.#env.AI) {
-      this.#metaSet("embeddings", "unavailable");
+      this.#setEmbeddings("unavailable");
+      return;
+    }
+    // Over the per-vault rolling-hour cap: skip the embed, degrade to
+    // keyword-only. The write proceeds; the concept re-embeds on its next
+    // hash change once the window clears.
+    if (this.#embedRateLimited(Date.now())) {
+      this.#setEmbeddings("rate-limited");
       return;
     }
     try {
+      this.#recordEmbedCall(Date.now());
       const result = (await this.#env.AI.run(EMBEDDING_MODEL, { text: [text] })) as {
         data?: number[][];
       };
@@ -445,24 +522,34 @@ export class VaultDO {
         blob,
         hash,
       );
-      this.#metaSet("embeddings", "ready");
+      this.#setEmbeddings("ready");
     } catch {
       // Degrade to keyword-only; never fail the write.
-      this.#metaSet("embeddings", "unavailable");
+      this.#setEmbeddings("unavailable");
     }
   }
 
   async #embedQuery(query: string): Promise<Float32Array | null> {
-    if (!this.#env.AI || this.#metaGet("embeddings") !== "ready") return null;
+    // No AI binding, or embeddings hard-degraded to unavailable → keyword-only.
+    if (!this.#env.AI || this.#metaGet("embeddings") === "unavailable") return null;
+    // Over the cap: skip the query embed too (query embeds count against the
+    // same rolling window), degrade to keyword-only, recover when it clears.
+    if (this.#embedRateLimited(Date.now())) {
+      this.#setEmbeddings("rate-limited");
+      return null;
+    }
     try {
+      this.#recordEmbedCall(Date.now());
       const result = (await this.#env.AI.run(EMBEDDING_MODEL, { text: [query] })) as {
         data?: number[][];
       };
       const vector = result?.data?.[0];
       if (!Array.isArray(vector) || vector.length === 0) return null;
+      // A successful query embed clears a prior rate-limited flag.
+      if (this.#metaGet("embeddings") === "rate-limited") this.#setEmbeddings("ready");
       return Float32Array.from(vector);
     } catch {
-      this.#metaSet("embeddings", "unavailable");
+      this.#setEmbeddings("unavailable");
       return null;
     }
   }
@@ -505,11 +592,13 @@ export class VaultDO {
   // -------------------------------------------------------------------- tasks
 
   /** Task-type concepts, oldest-first (createdAt then id). A task with no
-   * task_status is treated as "open". Optionally filtered by status / part_of domain. */
+   * task_status is treated as "open". Optionally filtered by status / part_of domain.
+   * Each `taken` task carries a computed `staleClaim` flag (claim past the TTL). */
   listTasks(filter: { taskStatus?: TaskStatus; domain?: string } = {}): {
     count: number;
-    tasks: ReturnType<typeof compactMeta>[];
+    tasks: (ReturnType<typeof compactMeta> & { staleClaim?: boolean })[];
   } {
+    const now = Date.now();
     const rows = this.#sql
       .exec<ConceptRow>(`SELECT * FROM concept WHERE type = 'task'`)
       .toArray();
@@ -528,7 +617,11 @@ export class VaultDO {
         (a, b) =>
           (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.id.localeCompare(b.id),
       )
-      .map(compactMeta);
+      .map((m) => {
+        const compact = compactMeta(m);
+        const stale = m.taskStatus === "taken" && isClaimStale(m.takenAt, now, CLAIM_TTL_MS);
+        return stale ? { ...compact, staleClaim: true } : compact;
+      });
     return { count: tasks.length, tasks };
   }
 
@@ -548,27 +641,36 @@ export class VaultDO {
       approxTokens: number;
     };
   }> {
+    const now = Date.now();
     let row: ConceptRow | null;
     if (args.id) {
       row = this.#getRow(args.id);
       if (!row) throw new NotFoundError(`no task with id "${args.id}"`);
       if (row.type !== "task") throw new Error(`concept "${args.id}" is not a task`);
       const status = (row.task_status as TaskStatus | null) ?? "open";
-      if (status !== "open") {
+      // Open is always claimable; a `taken` task past the claim TTL is a stale
+      // claim (holder likely crashed) and may be reclaimed. `done` never is.
+      const stale = status === "taken" && isClaimStale(row.taken_at, now, CLAIM_TTL_MS);
+      if (status !== "open" && !stale) {
         throw new Error(`task "${args.id}" is already ${status}` + (row.taken_by ? ` (by ${row.taken_by})` : ""));
       }
     } else {
-      // Next open task: oldest open by createdAt then id.
-      const open = this.#sql
+      // Next claimable task: oldest by createdAt then id, where claimable =
+      // open OR a `taken` claim older than the TTL (stale — reclaimable).
+      const claimable = this.#sql
         .exec<ConceptRow>(`SELECT * FROM concept WHERE type = 'task'`)
         .toArray()
-        .filter((r) => ((r.task_status as TaskStatus | null) ?? "open") === "open")
+        .filter((r) => {
+          const status = (r.task_status as TaskStatus | null) ?? "open";
+          if (status === "open") return true;
+          return status === "taken" && isClaimStale(r.taken_at, now, CLAIM_TTL_MS);
+        })
         .sort(
           (a, b) =>
             (a.created_at ?? "").localeCompare(b.created_at ?? "") || a.id.localeCompare(b.id),
         );
-      if (open.length === 0) throw new Error("no open tasks to take");
-      row = open[0];
+      if (claimable.length === 0) throw new Error("no open tasks to take");
+      row = claimable[0];
     }
 
     const takenBy = args.takenBy?.trim() || "an agent";
@@ -918,7 +1020,7 @@ export class VaultDO {
     byType: Record<string, number>;
     onboarded: boolean;
     openTasks: number;
-    embeddings: "ready" | "unavailable";
+    embeddings: EmbeddingsMeta;
     keywordIndex: "fts5" | "like";
   } {
     const concepts = Number(
@@ -958,7 +1060,7 @@ export class VaultDO {
       byType,
       onboarded: this.#metaGet("onboarded_at") !== null,
       openTasks,
-      embeddings: this.#metaGet("embeddings") === "ready" ? "ready" : "unavailable",
+      embeddings: this.#embeddingsMeta(),
       keywordIndex: this.#fts ? "fts5" : "like",
     };
   }

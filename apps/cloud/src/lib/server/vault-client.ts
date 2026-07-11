@@ -32,7 +32,7 @@ export interface VaultStatsResult {
   byType: Record<string, number>;
   onboarded: boolean;
   openTasks: number;
-  embeddings: "ready" | "unavailable";
+  embeddings: "ready" | "unavailable" | "rate-limited";
   keywordIndex: "fts5" | "like";
 }
 
@@ -62,7 +62,7 @@ export interface VaultClient {
   }>;
   listTasks(filter?: { taskStatus?: TaskStatus; domain?: string }): Promise<{
     count: number;
-    tasks: (ToolConceptMeta & { createdAt?: string; updatedAt?: string })[];
+    tasks: (ToolConceptMeta & { createdAt?: string; updatedAt?: string; staleClaim?: boolean })[];
   }>;
   takeTask(args?: { id?: string; takenBy?: string }): Promise<TakeTaskResult>;
   completeTask(args: { id: string; outcome: string }): Promise<CompleteTaskResult>;

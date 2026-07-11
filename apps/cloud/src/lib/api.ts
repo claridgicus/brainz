@@ -80,7 +80,7 @@ export interface VaultStats {
   byType: Record<string, number>;
   onboarded: boolean;
   openTasks: number;
-  embeddings: "ready" | "unavailable";
+  embeddings: "ready" | "unavailable" | "rate-limited";
   /** From the x-brainz-keyword-index response header. */
   keywordIndex: "fts5" | "like";
 }

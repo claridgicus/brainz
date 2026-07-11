@@ -25,8 +25,8 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "6"', () => {
-    expect(CONTRACTS_VERSION).toBe("6");
+  it('is "7"', () => {
+    expect(CONTRACTS_VERSION).toBe("7");
   });
 });
 
