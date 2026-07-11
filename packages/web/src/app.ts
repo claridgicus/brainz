@@ -24,6 +24,7 @@ const TYPES = new Set([
   "story",
   "spec",
   "workflow",
+  "task",
   "decision",
   "constraint",
   "pattern",

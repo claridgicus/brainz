@@ -1,6 +1,7 @@
 export type {
   ConceptType,
   ConceptStatus,
+  TaskStatus,
   ConceptMeta,
   Concept,
   Edge,

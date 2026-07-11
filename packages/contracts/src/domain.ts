@@ -14,6 +14,7 @@ import type {
   Edge,
   RelatedNode,
   SearchHit,
+  TaskStatus,
   VaultStats,
 } from "@brainz/engine";
 import { z } from "zod";
@@ -28,6 +29,7 @@ export type {
   Edge,
   RelatedNode,
   SearchHit,
+  TaskStatus,
   VaultStats,
 } from "@brainz/engine";
 
@@ -38,11 +40,18 @@ export const CONCEPT_TYPES = [
   "story",
   "spec",
   "workflow",
+  "task",
   "decision",
   "constraint",
   "pattern",
   "glossary",
 ] as const satisfies readonly ConceptType[];
+
+export const TASK_STATUSES = [
+  "open",
+  "taken",
+  "done",
+] as const satisfies readonly TaskStatus[];
 
 /**
  * Canonical relation names — documented conventions, not an enum: relations
@@ -53,7 +62,9 @@ export const CONCEPT_TYPES = [
 export const CANONICAL_RELATIONS = [
   "part_of",
   "realized_by",
+  "realizes",
   "governs",
+  "governed_by",
   "depends_on",
   "constrains",
   "supersedes",
@@ -73,6 +84,7 @@ export const EMBEDDING_STATUSES = ["ready", "unavailable"] as const;
 
 export const conceptTypeSchema = z.enum(CONCEPT_TYPES);
 export const conceptStatusSchema = z.enum(CONCEPT_STATUSES);
+export const taskStatusSchema = z.enum(TASK_STATUSES);
 export const searchModeSchema = z.enum(SEARCH_MODES);
 export const embeddingStatusSchema = z.enum(EMBEDDING_STATUSES);
 
@@ -97,6 +109,10 @@ export const conceptMetaSchema = z
     product: z.string().optional(),
     tags: z.array(z.string()),
     codeAreas: z.array(z.string()).optional(),
+    taskStatus: taskStatusSchema.optional(),
+    takenBy: z.string().optional(),
+    takenAt: z.string().optional(),
+    doneAt: z.string().optional(),
     filePath: z.string(),
     createdAt: z.string().optional(),
     updatedAt: z.string().optional(),
@@ -138,6 +154,7 @@ export const vaultStatsSchema = z
     tags: z.array(z.string()),
     byType: z.record(z.string(), z.number()),
     onboarded: z.boolean(),
+    openTasks: z.number().int(),
   })
   .strict();
 
@@ -163,4 +180,7 @@ type _ConceptTypeCovered = Expect<
 >;
 type _ConceptStatusCovered = Expect<
   MutuallyAssignable<(typeof CONCEPT_STATUSES)[number], ConceptStatus>
+>;
+type _TaskStatusCovered = Expect<
+  MutuallyAssignable<(typeof TASK_STATUSES)[number], TaskStatus>
 >;

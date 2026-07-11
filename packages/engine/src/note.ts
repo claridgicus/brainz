@@ -1,6 +1,6 @@
 import matter from "gray-matter";
 import { slugify } from "./slugify.js";
-import type { ConceptMeta, ConceptStatus, ConceptType } from "./types.js";
+import type { ConceptMeta, ConceptStatus, ConceptType, TaskStatus } from "./types.js";
 
 const CONCEPT_TYPES: readonly ConceptType[] = [
   "concept",
@@ -9,6 +9,7 @@ const CONCEPT_TYPES: readonly ConceptType[] = [
   "story",
   "spec",
   "workflow",
+  "task",
   "decision",
   "constraint",
   "pattern",
@@ -16,6 +17,8 @@ const CONCEPT_TYPES: readonly ConceptType[] = [
 ];
 
 const CONCEPT_STATUSES: readonly ConceptStatus[] = ["active", "draft", "deprecated"];
+
+const TASK_STATUSES: readonly TaskStatus[] = ["open", "taken", "done"];
 
 /** Concept metadata derivable from a note's markdown alone (no file path). */
 export type NoteMeta = Omit<ConceptMeta, "filePath">;
@@ -87,6 +90,14 @@ export function parseNote(markdown: string, opts: ParseNoteOptions): ParsedNote 
 
   const codeAreas = asStringArray(fm.code_areas);
 
+  const taskStatus: TaskStatus | undefined = TASK_STATUSES.includes(fm.task_status as TaskStatus)
+    ? (fm.task_status as TaskStatus)
+    : undefined;
+  const takenBy =
+    typeof fm.taken_by === "string" && fm.taken_by.trim() ? fm.taken_by.trim() : undefined;
+  const takenAt = asIso(fm.taken_at);
+  const doneAt = asIso(fm.done_at);
+
   const meta: NoteMeta = {
     id,
     title,
@@ -95,6 +106,10 @@ export function parseNote(markdown: string, opts: ParseNoteOptions): ParsedNote 
     product,
     tags: asStringArray(fm.tags),
     ...(codeAreas.length > 0 ? { codeAreas } : {}),
+    ...(taskStatus !== undefined ? { taskStatus } : {}),
+    ...(takenBy !== undefined ? { takenBy } : {}),
+    ...(takenAt !== undefined ? { takenAt } : {}),
+    ...(doneAt !== undefined ? { doneAt } : {}),
     createdAt: asIso(fm.createdAt),
     updatedAt: asIso(fm.updatedAt),
   };

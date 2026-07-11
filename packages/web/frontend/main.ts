@@ -30,6 +30,7 @@ const TYPE_COLORS: Record<string, string> = {
   story: "#a3e635",
   spec: "#2dd4bf",
   workflow: "#fb923c",
+  task: "#f59e0b",
   decision: "#fbbf24",
   constraint: "#f87171",
   pattern: "#a78bfa",

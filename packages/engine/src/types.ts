@@ -7,12 +7,20 @@ export type ConceptType =
   | "story"
   | "spec"
   | "workflow"
+  | "task"
   | "decision"
   | "constraint"
   | "pattern"
   | "glossary";
 
 export type ConceptStatus = "active" | "draft" | "deprecated";
+
+/**
+ * Lifecycle of a `task`-type concept (distinct from ConceptStatus). A task
+ * concept with no taskStatus is treated as "open". Threaded through frontmatter
+ * as `task_status` / `taken_by` / `taken_at` / `done_at`.
+ */
+export type TaskStatus = "open" | "taken" | "done";
 
 export interface ConceptMeta {
   id: string;
@@ -23,6 +31,14 @@ export interface ConceptMeta {
   tags: string[];
   /** Rough paths/globs where this knowledge lives in the codebase (frontmatter `code_areas`). */
   codeAreas?: string[];
+  /** Task lifecycle (only meaningful for `task`-type concepts). Absent ⇒ "open". */
+  taskStatus?: TaskStatus;
+  /** Free-form label of the agent/orchestrator that claimed the task. */
+  takenBy?: string;
+  /** ISO timestamp when the task was claimed. */
+  takenAt?: string;
+  /** ISO timestamp when the task was completed. */
+  doneAt?: string;
   filePath: string; // absolute path
   createdAt?: string; // ISO dates from frontmatter if present
   updatedAt?: string;
@@ -90,6 +106,14 @@ export interface UpsertInput {
   tags?: string[];
   /** Rough paths/globs where this knowledge lives in the codebase (written as frontmatter `code_areas`). */
   codeAreas?: string[];
+  /** Task lifecycle for `task`-type concepts (frontmatter `task_status`). */
+  taskStatus?: TaskStatus;
+  /** Free-form label of the claimer (frontmatter `taken_by`). */
+  takenBy?: string;
+  /** ISO claim timestamp (frontmatter `taken_at`). */
+  takenAt?: string;
+  /** ISO completion timestamp (frontmatter `done_at`). */
+  doneAt?: string;
   relations?: Record<string, string[]>;
 }
 
@@ -101,4 +125,6 @@ export interface VaultStats {
   byType: Record<string, number>;
   /** Whether the vault has been onboarded (product knowledge indexed via the onboard flow). */
   onboarded: boolean;
+  /** Count of open (untaken) `task`-type concepts. */
+  openTasks: number;
 }

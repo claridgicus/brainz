@@ -17,15 +17,66 @@ import {
 import { ONBOARDING_NUDGE, ONBOARDING_SUMMARY_ID } from "@brainz/engine";
 import { beforeEach, describe, expect, it } from "vitest";
 import { buildMcpServer, type McpServerHooks } from "./mcp";
-import type { VaultClient } from "./vault-client";
+import { VaultDoError, type VaultClient } from "./vault-client";
+
+interface FakeTask {
+  id: string;
+  title: string;
+  type: "task";
+  status: "active";
+  tags: string[];
+  taskStatus: "open" | "taken" | "done";
+  takenBy?: string;
+  takenAt?: string;
+  doneAt?: string;
+  createdAt: string;
+  body: string;
+}
 
 interface FakeVault extends VaultClient {
-  /** Test seam: onboarded state + upserts recorded by the fake. */
-  state: { onboardedAt: string | null; upserts: unknown[] };
+  /** Test seam: onboarded state + upserts + a small task pile recorded by the fake. */
+  state: { onboardedAt: string | null; upserts: unknown[]; tasks: FakeTask[] };
 }
 
 function fakeVault(): FakeVault {
-  const state: FakeVault["state"] = { onboardedAt: null, upserts: [] };
+  const state: FakeVault["state"] = {
+    onboardedAt: null,
+    upserts: [],
+    tasks: [
+      {
+        id: "task-a",
+        title: "Task A",
+        type: "task",
+        status: "active",
+        tags: ["high"],
+        taskStatus: "open",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        body: "Do the first thing.\n",
+      },
+      {
+        id: "task-b",
+        title: "Task B",
+        type: "task",
+        status: "active",
+        tags: [],
+        taskStatus: "open",
+        createdAt: "2026-01-02T00:00:00.000Z",
+        body: "Do the second thing.\n",
+      },
+    ],
+  };
+  const taskMeta = (t: FakeTask) => ({
+    id: t.id,
+    title: t.title,
+    type: t.type,
+    status: t.status,
+    tags: t.tags,
+    taskStatus: t.taskStatus,
+    ...(t.takenBy !== undefined ? { takenBy: t.takenBy } : {}),
+    ...(t.takenAt !== undefined ? { takenAt: t.takenAt } : {}),
+    ...(t.doneAt !== undefined ? { doneAt: t.doneAt } : {}),
+    createdAt: t.createdAt,
+  });
   const concept = {
     id: "lead-scoring",
     title: "Lead scoring",
@@ -48,6 +99,10 @@ function fakeVault(): FakeVault {
           title: input.title,
           ...(input.type !== undefined ? { type: input.type } : {}),
           ...(input.codeAreas !== undefined ? { codeAreas: input.codeAreas } : {}),
+          ...(input.taskStatus !== undefined ? { taskStatus: input.taskStatus } : {}),
+          ...(input.takenBy !== undefined ? { takenBy: input.takenBy } : {}),
+          ...(input.takenAt !== undefined ? { takenAt: input.takenAt } : {}),
+          ...(input.doneAt !== undefined ? { doneAt: input.doneAt } : {}),
         },
       };
     },
@@ -110,9 +165,56 @@ function fakeVault(): FakeVault {
       tags: ["crm"],
       byType: { feature: 1 },
       onboarded: state.onboardedAt !== null,
+      openTasks: state.tasks.filter((t) => t.taskStatus === "open").length,
       embeddings: "unavailable",
       keywordIndex: "like",
     }),
+    listTasks: async (filter = {}) => {
+      const tasks = state.tasks
+        .filter((t) => !filter.taskStatus || t.taskStatus === filter.taskStatus)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+        .map(taskMeta);
+      return { count: tasks.length, tasks };
+    },
+    takeTask: async (args = {}) => {
+      const open = state.tasks
+        .filter((t) => t.taskStatus === "open")
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+      const target = args.id ? state.tasks.find((t) => t.id === args.id) : open[0];
+      if (!target) throw new VaultDoError("no open tasks to take", 400);
+      if (target.taskStatus !== "open")
+        throw new VaultDoError(`task "${target.id}" is already ${target.taskStatus}`, 400);
+      target.taskStatus = "taken";
+      target.takenBy = args.takenBy ?? "an agent";
+      target.takenAt = "2026-02-01T00:00:00.000Z";
+      return {
+        task: taskMeta(target),
+        body: target.body,
+        context: {
+          markdown: `## ${target.title} (${target.id})\n\n${target.body}`,
+          included: [target.id],
+          truncated: false,
+          approxTokens: 8,
+        },
+      };
+    },
+    completeTask: async (args) => {
+      const target = state.tasks.find((t) => t.id === args.id);
+      if (!target) throw new VaultDoError(`no task with id "${args.id}"`, 404);
+      target.taskStatus = "done";
+      target.doneAt = "2026-02-02T00:00:00.000Z";
+      target.body = `${target.body}\n## Outcome\n\n${args.outcome}\n`;
+      return { task: taskMeta(target), reminder: "index what changed via upsert_concept" };
+    },
+    reopenTask: async (args) => {
+      const target = state.tasks.find((t) => t.id === args.id);
+      if (!target) throw new VaultDoError(`no task with id "${args.id}"`, 404);
+      target.taskStatus = "open";
+      delete target.takenBy;
+      delete target.takenAt;
+      delete target.doneAt;
+      return { task: taskMeta(target) };
+    },
     onboarding: async () => ({ onboardedAt: state.onboardedAt }),
     setOnboardedAt: async (onboardedAt) => {
       state.onboardedAt = onboardedAt;
@@ -147,10 +249,10 @@ describe("remote MCP server (contract registry)", () => {
     client = await connect();
   });
 
-  it("registers exactly the 9 contract tools", async () => {
+  it("registers exactly the contract tools", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...MCP_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(9);
+    expect(tools).toHaveLength(MCP_TOOL_NAMES.length);
   });
 
   it("search_concepts output parses with the contract outputSchema", async () => {
@@ -223,6 +325,60 @@ describe("remote MCP server (contract registry)", () => {
     const payload = JSON.parse(textBlocks(result)[0]);
     expect(payload.codeAreas).toEqual(["apps/crm/src/scoring/**"]);
     expect(getMcpTool("get_concept").outputSchema.safeParse(payload).success).toBe(true);
+  });
+});
+
+describe("task tools", () => {
+  let client: Client;
+  beforeEach(async () => {
+    client = await connect();
+  });
+
+  it("list_tasks returns tasks oldest-first, parsing with the contract schema", async () => {
+    const result = await client.callTool({ name: "list_tasks", arguments: {} });
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(payload.tasks.map((t: { id: string }) => t.id)).toEqual(["task-a", "task-b"]);
+    expect(getMcpTool("list_tasks").outputSchema.safeParse(payload).success).toBe(true);
+  });
+
+  it("take_task claims the next open task and returns a context bundle", async () => {
+    const result = await client.callTool({ name: "take_task", arguments: { takenBy: "fleet-1" } });
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(payload.task.id).toBe("task-a");
+    expect(payload.task.taskStatus).toBe("taken");
+    expect(payload.task.takenBy).toBe("fleet-1");
+    expect(payload.context.markdown).toContain("task-a");
+    expect(getMcpTool("take_task").outputSchema.safeParse(payload).success).toBe(true);
+  });
+
+  it("take_task rejects an already-taken task as an isError result", async () => {
+    await client.callTool({ name: "take_task", arguments: { id: "task-a" } });
+    const again = await client.callTool({ name: "take_task", arguments: { id: "task-a" } });
+    expect(again.isError).toBe(true);
+    expect(textBlocks(again)[0]).toContain("already taken");
+  });
+
+  it("complete_task marks done and reminds the caller to index changes", async () => {
+    await client.callTool({ name: "take_task", arguments: { id: "task-a" } });
+    const result = await client.callTool({
+      name: "complete_task",
+      arguments: { id: "task-a", outcome: "Shipped it." },
+    });
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(payload.task.taskStatus).toBe("done");
+    expect(payload.reminder).toContain("upsert_concept");
+    expect(getMcpTool("complete_task").outputSchema.safeParse(payload).success).toBe(true);
+  });
+
+  it("create_task creates an open task-type concept", async () => {
+    const result = await client.callTool({
+      name: "create_task",
+      arguments: { title: "New work", body: "Do a thing", domain: "auth", tags: ["high"] },
+    });
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(payload.type).toBe("task");
+    expect(payload.taskStatus).toBe("open");
+    expect(getMcpTool("create_task").outputSchema.safeParse(payload).success).toBe(true);
   });
 });
 

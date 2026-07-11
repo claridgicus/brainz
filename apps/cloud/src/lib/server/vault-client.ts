@@ -4,7 +4,7 @@
  * code talks to vault content.
  */
 import type { DurableObjectNamespace } from "@cloudflare/workers-types";
-import type { ConceptType, UpsertInput } from "@brainz/engine";
+import type { ConceptType, TaskStatus, UpsertInput } from "@brainz/engine";
 import type {
   ContextArgs,
   RelatedArgs,
@@ -31,8 +31,25 @@ export interface VaultStatsResult {
   tags: string[];
   byType: Record<string, number>;
   onboarded: boolean;
+  openTasks: number;
   embeddings: "ready" | "unavailable";
   keywordIndex: "fts5" | "like";
+}
+
+export interface TakeTaskResult {
+  task: ToolConceptMeta & { createdAt?: string; updatedAt?: string };
+  body: string;
+  context: {
+    markdown: string;
+    included: string[];
+    truncated: boolean;
+    approxTokens: number;
+  };
+}
+
+export interface CompleteTaskResult {
+  task: ToolConceptMeta & { createdAt?: string; updatedAt?: string };
+  reminder: string;
 }
 
 export interface VaultClient {
@@ -42,6 +59,15 @@ export interface VaultClient {
   list(filter?: { product?: string; type?: ConceptType; tag?: string }): Promise<{
     count: number;
     concepts: ToolConceptMeta[];
+  }>;
+  listTasks(filter?: { taskStatus?: TaskStatus; domain?: string }): Promise<{
+    count: number;
+    tasks: (ToolConceptMeta & { createdAt?: string; updatedAt?: string })[];
+  }>;
+  takeTask(args?: { id?: string; takenBy?: string }): Promise<TakeTaskResult>;
+  completeTask(args: { id: string; outcome: string }): Promise<CompleteTaskResult>;
+  reopenTask(args: { id: string }): Promise<{
+    task: ToolConceptMeta & { createdAt?: string; updatedAt?: string };
   }>;
   search(args: SearchArgs): Promise<{ hits: WireHit[] }>;
   related(args: RelatedArgs): Promise<{ id: string; related: WireRelated[] }>;
@@ -84,6 +110,10 @@ export function vaultClient(ns: DurableObjectNamespace, vaultId: string): VaultC
     deleteConcept: (id) => call("deleteConcept", { id }),
     getConcept: (id) => call("getConcept", { id }),
     list: (filter = {}) => call("list", filter),
+    listTasks: (filter = {}) => call("listTasks", filter),
+    takeTask: (args = {}) => call("takeTask", args),
+    completeTask: (args) => call("completeTask", args),
+    reopenTask: (args) => call("reopenTask", args),
     search: (args) => call("search", args),
     related: (args) => call("related", args),
     graph: () => call("graph"),

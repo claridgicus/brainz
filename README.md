@@ -2,7 +2,7 @@
 
 A product-knowledge graph with an MCP server, built for **agent orchestration**.
 
-Product concepts — domains, features, stories, specs, workflows, decisions, constraints,
+Product concepts — domains, features, stories, specs, workflows, tasks, decisions, constraints,
 patterns, glossary terms — live as markdown notes wired into a graph by wiki-links and
 typed relations. The primary consumer is not a human but an **orchestrator agent**: before
 delegating a coding task, the orchestrator calls `get_context` over MCP and injects the
@@ -85,7 +85,7 @@ Notes are markdown with YAML frontmatter, inline `[[wiki-links]]`, and typed rel
 ---
 id: auth-session-model        # slug; defaults to filename-without-ext; unique per vault
 title: Auth Session Model
-type: concept                 # concept | domain | feature | story | spec | workflow | decision | constraint | pattern | glossary
+type: concept                 # concept | domain | feature | story | spec | workflow | task | decision | constraint | pattern | glossary
 product: acme-app             # optional grouping key
 tags: [auth, backend]
 status: active                # active | draft | deprecated

@@ -131,7 +131,21 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
         };
       }),
 
-    upsert_concept: async ({ id, title, body, type, status, product, tags, codeAreas, relations }) =>
+    upsert_concept: async ({
+      id,
+      title,
+      body,
+      type,
+      status,
+      product,
+      tags,
+      codeAreas,
+      taskStatus,
+      takenBy,
+      takenAt,
+      doneAt,
+      relations,
+    }) =>
       guarded(async () => {
         const { concept } = await vault.upsertConcept({
           id,
@@ -142,6 +156,10 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
           product,
           tags,
           codeAreas,
+          taskStatus,
+          takenBy,
+          takenAt,
+          doneAt,
           relations,
         });
         return ok({
@@ -152,6 +170,10 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
           ...(concept.product !== undefined ? { product: concept.product } : {}),
           tags: concept.tags,
           ...(concept.codeAreas !== undefined ? { codeAreas: concept.codeAreas } : {}),
+          ...(concept.taskStatus !== undefined ? { taskStatus: concept.taskStatus } : {}),
+          ...(concept.takenBy !== undefined ? { takenBy: concept.takenBy } : {}),
+          ...(concept.takenAt !== undefined ? { takenAt: concept.takenAt } : {}),
+          ...(concept.doneAt !== undefined ? { doneAt: concept.doneAt } : {}),
           filePath: syntheticFilePath(concept.id),
         });
       }),
@@ -175,10 +197,10 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
 
     vault_stats: async () =>
       guarded(async () => {
-        const { concepts, edges, products, tags, byType, onboarded, embeddings } =
+        const { concepts, edges, products, tags, byType, onboarded, openTasks, embeddings } =
           await vault.stats();
         // keywordIndex is intentionally dropped: vault_stats' contract shape is strict.
-        return ok({ concepts, edges, products, tags, byType, onboarded, embeddings });
+        return ok({ concepts, edges, products, tags, byType, onboarded, openTasks, embeddings });
       }),
 
     onboard: async ({ action, productName, repoHint, summary }) =>
@@ -211,6 +233,64 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
         }
         const { concepts, byType, onboarded } = await vault.stats();
         return ok({ onboarded, conceptCount: concepts, byType });
+      }),
+
+    list_tasks: async ({ taskStatus, domain }) =>
+      guarded(async () => {
+        const result = await vault.listTasks({ taskStatus, domain });
+        return ok(result);
+      }),
+
+    take_task: async ({ id, takenBy }) =>
+      guarded(async () => {
+        try {
+          const result = await vault.takeTask({ id, takenBy });
+          return ok(result);
+        } catch (err) {
+          if (err instanceof VaultDoError) return fail(err.message);
+          throw err;
+        }
+      }),
+
+    complete_task: async ({ id, outcome }) =>
+      guarded(async () => {
+        try {
+          const result = await vault.completeTask({ id, outcome });
+          return ok(result);
+        } catch (err) {
+          if (err instanceof VaultDoError) return fail(err.message);
+          throw err;
+        }
+      }),
+
+    create_task: async ({ title, body, domain, realizes, governedBy, codeAreas, tags }) =>
+      guarded(async () => {
+        const relations: Record<string, string[]> = {};
+        if (domain) relations.part_of = [domain];
+        if (realizes && realizes.length > 0) relations.realizes = realizes;
+        if (governedBy && governedBy.length > 0) relations.governed_by = governedBy;
+        const { concept } = await vault.upsertConcept({
+          title,
+          body,
+          type: "task",
+          taskStatus: "open",
+          tags,
+          codeAreas,
+          relations: Object.keys(relations).length > 0 ? relations : undefined,
+        });
+        return ok({
+          id: concept.id,
+          title: concept.title,
+          type: concept.type,
+          status: concept.status,
+          ...(concept.product !== undefined ? { product: concept.product } : {}),
+          tags: concept.tags,
+          ...(concept.codeAreas !== undefined ? { codeAreas: concept.codeAreas } : {}),
+          ...(concept.taskStatus !== undefined ? { taskStatus: concept.taskStatus } : {}),
+          ...(concept.createdAt !== undefined ? { createdAt: concept.createdAt } : {}),
+          ...(concept.updatedAt !== undefined ? { updatedAt: concept.updatedAt } : {}),
+          filePath: syntheticFilePath(concept.id),
+        });
       }),
   };
 

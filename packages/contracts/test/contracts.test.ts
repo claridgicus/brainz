@@ -25,13 +25,13 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "4"', () => {
-    expect(CONTRACTS_VERSION).toBe("4");
+  it('is "5"', () => {
+    expect(CONTRACTS_VERSION).toBe("5");
   });
 });
 
 describe("MCP_TOOLS registry", () => {
-  it("declares the nine spec'd tools, in registration order", () => {
+  it("declares the spec'd tools, in registration order", () => {
     expect(MCP_TOOL_NAMES).toEqual([
       "search_concepts",
       "get_concept",
@@ -42,6 +42,10 @@ describe("MCP_TOOLS registry", () => {
       "list_concepts",
       "vault_stats",
       "onboard",
+      "list_tasks",
+      "take_task",
+      "complete_task",
+      "create_task",
     ]);
   });
 
@@ -141,6 +145,7 @@ describe("output schemas encode the shipped shapes", () => {
       tags: ["auth"],
       byType: { decision: 3 },
       onboarded: false,
+      openTasks: 2,
       embeddings: "unavailable",
     });
     expect(parsed.success).toBe(true);
@@ -166,20 +171,40 @@ describe("output schemas encode the shipped shapes", () => {
 });
 
 describe("product ontology (v3)", () => {
-  it("has the 10 concept types, additive over the original 6", () => {
-    expect(CONCEPT_TYPES).toHaveLength(10);
+  it("has the 11 concept types, additive over the original 6", () => {
+    expect(CONCEPT_TYPES).toHaveLength(11);
     for (const t of ["concept", "feature", "decision", "constraint", "pattern", "glossary"]) {
       expect(CONCEPT_TYPES).toContain(t);
     }
-    for (const t of ["domain", "story", "spec", "workflow"]) {
+    for (const t of ["domain", "story", "spec", "workflow", "task"]) {
       expect(CONCEPT_TYPES).toContain(t);
     }
   });
 
-  it("documents the canonical relations incl. realized_by and governs", () => {
+  it("documents the canonical relations incl. realized_by, governs, and task relations", () => {
     expect(CANONICAL_RELATIONS).toContain("realized_by");
     expect(CANONICAL_RELATIONS).toContain("governs");
     expect(CANONICAL_RELATIONS).toContain("part_of");
+    expect(CANONICAL_RELATIONS).toContain("realizes");
+    expect(CANONICAL_RELATIONS).toContain("governed_by");
+  });
+
+  it("concept metas round-trip the optional task fields (strict otherwise)", () => {
+    const meta = {
+      id: "task-fix-auth",
+      title: "Fix auth",
+      type: "task",
+      status: "active",
+      tags: ["high"],
+      taskStatus: "taken",
+      takenBy: "fleet-1",
+      takenAt: "2026-07-11T00:00:00.000Z",
+      filePath: "/v/concepts/task-fix-auth.md",
+    };
+    const parsed = conceptMetaSchema.safeParse(meta);
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.taskStatus).toBe("taken");
+    expect(parsed.success && parsed.data.takenBy).toBe("fleet-1");
   });
 
   it("concept metas round-trip codeAreas (optional, strict otherwise)", () => {

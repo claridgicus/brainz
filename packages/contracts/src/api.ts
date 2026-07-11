@@ -11,12 +11,15 @@
  * concept metadata is the tool-compact shape (no filePath) plus timestamps.
  */
 import { z } from "zod";
-import { conceptTypeSchema, edgeSchema, searchModeSchema } from "./domain.js";
+import { conceptTypeSchema, edgeSchema, searchModeSchema, taskStatusSchema } from "./domain.js";
 import {
+  createTaskInputSchema,
   getContextInputSchema,
   getRelatedOutputSchema,
   listConceptsOutputSchema,
+  listTasksOutputSchema,
   searchConceptsOutputSchema,
+  taskMetaSchema,
   toolConceptMetaSchema,
   upsertConceptInputSchema,
   vaultStatsOutputSchema,
@@ -65,6 +68,37 @@ export const conceptListResponseSchema = listConceptsOutputSchema;
 
 /** POST .../concepts / PUT .../concepts/:id body — same shape as the upsert_concept tool input. */
 export const conceptUpsertRequestSchema = upsertConceptInputSchema;
+
+// -------------------------------------------------------------------- tasks
+
+/** GET .../tasks query params. `groupBy` is a board-layout hint; the server
+ * returns the same task list regardless (grouping happens client-side). */
+export const tasksQuerySchema = z.object({
+  taskStatus: taskStatusSchema.optional(),
+  domain: z.string().optional(),
+  groupBy: z.enum(["status", "domain", "priority", "takenBy"]).optional(),
+});
+
+/** GET .../tasks response — same shape as the list_tasks tool output. */
+export const taskListResponseSchema = listTasksOutputSchema;
+export type TaskMeta = z.infer<typeof taskMetaSchema>;
+
+/** POST .../tasks body — same shape as the create_task tool input. */
+export const taskCreateRequestSchema = createTaskInputSchema;
+
+/**
+ * PATCH .../tasks/:id body — a card move on the board. `action` maps to a task
+ * mutation: take (claim), complete (done + outcome), reopen (back to open).
+ */
+export const taskMoveRequestSchema = z.union([
+  z.object({ action: z.literal("take"), takenBy: z.string().optional() }),
+  z.object({ action: z.literal("complete"), outcome: z.string().min(1) }),
+  z.object({ action: z.literal("reopen") }),
+]);
+export type TaskMoveRequest = z.infer<typeof taskMoveRequestSchema>;
+
+/** PATCH .../tasks/:id response: the updated task meta. */
+export const taskMoveResponseSchema = taskMetaSchema;
 
 // ----------------------------------------------------------------- api keys
 

@@ -51,6 +51,10 @@ const INPUT_SAMPLES: Record<McpToolName | PublicMcpToolName, unknown> = {
   list_concepts: { type: "spec" },
   vault_stats: {},
   onboard: { action: "start", productName: "Acme" },
+  list_tasks: { taskStatus: "open" },
+  take_task: { takenBy: "fleet-1" },
+  complete_task: { id: "task-a", outcome: "Shipped it." },
+  create_task: { title: "Fix auth", body: "Details", domain: "auth", tags: ["high"] },
   signup: { email: "human@example.com", vaultName: "Acme Brain" },
 };
 
@@ -83,9 +87,31 @@ const OUTPUT_SAMPLES: Record<McpToolName | PublicMcpToolName, unknown> = {
     tags: ["auth"],
     byType: { feature: 2 },
     onboarded: true,
+    openTasks: 1,
     embeddings: "ready",
   },
   onboard: { onboarded: false, conceptCount: 4, byType: { feature: 2 } },
+  list_tasks: {
+    count: 1,
+    tasks: [{ ...META, id: "task-a", title: "Task A", type: "task", taskStatus: "open" }],
+  },
+  take_task: {
+    task: { ...META, id: "task-a", title: "Task A", type: "task", taskStatus: "taken" },
+    body: "Do the thing.",
+    context: { markdown: "## Task A", included: ["task-a"], truncated: false, approxTokens: 8 },
+  },
+  complete_task: {
+    task: { ...META, id: "task-a", title: "Task A", type: "task", taskStatus: "done" },
+    reminder: "index what changed via upsert_concept",
+  },
+  create_task: {
+    ...META,
+    id: "task-a",
+    title: "Task A",
+    type: "task",
+    taskStatus: "open",
+    filePath: "concepts/task-a.md",
+  },
   signup: {
     apiKey: "bz_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     loginUrl: "https://example.com/api/auth/magic-link/verify?token=" + "0".repeat(32),
@@ -191,9 +217,10 @@ describe("REST schemas round-trip the shipped shapes", () => {
     expect(searchQuerySchema.safeParse({ q: "" }).success).toBe(false);
     expect(searchQuerySchema.safeParse({ q: "x", limit: "51" }).success).toBe(false);
     expect(searchQuerySchema.safeParse({ q: "x", mode: "psychic" }).success).toBe(false);
-    // The search type filter accepts the full 10-type ontology.
+    // The search type filter accepts the full 11-type ontology.
     expect(searchQuerySchema.safeParse({ q: "x", type: "domain" }).success).toBe(true);
     expect(searchQuerySchema.safeParse({ q: "x", type: "workflow" }).success).toBe(true);
+    expect(searchQuerySchema.safeParse({ q: "x", type: "task" }).success).toBe(true);
   });
 
   it("related query params coerce depth and cap it at 3", () => {
@@ -272,6 +299,7 @@ describe("CLI --json schemas round-trip", () => {
       tags: ["auth"],
       byType: { decision: 3 },
       onboarded: false,
+      openTasks: 0,
       embeddingStatus: "unavailable",
     };
     expect(cliReindexJsonSchema.parse(payload)).toEqual(payload);

@@ -79,6 +79,11 @@
 			<span class="dot" style="background:{TYPE_COLORS[node.type] ?? TYPE_COLORS['pending']}"></span>
 			{node.pending ? "pending" : node.type}
 		</span>
+		{#if concept?.type === "task"}
+			{@const ts = concept.taskStatus ?? "open"}
+			<span class="badge task-badge task-{ts}">{ts}</span>
+			{#if ts === "taken" && concept.takenBy}<span class="badge">by {concept.takenBy}</span>{/if}
+		{/if}
 		{#if concept?.product}<span class="badge">{concept.product}</span>{/if}
 		{#if concept && concept.status !== "active"}<span class="badge">{concept.status}</span>{/if}
 		{#each concept?.tags ?? [] as tag (tag)}<span class="badge">#{tag}</span>{/each}
@@ -167,6 +172,22 @@
 		flex-wrap: wrap;
 		gap: 6px;
 		margin: 10px 0 14px;
+	}
+	.task-badge {
+		font-weight: 600;
+		text-transform: capitalize;
+	}
+	.task-open {
+		color: #f59e0b;
+		border-color: color-mix(in srgb, #f59e0b 45%, transparent);
+	}
+	.task-taken {
+		color: #60a5fa;
+		border-color: color-mix(in srgb, #60a5fa 45%, transparent);
+	}
+	.task-done {
+		color: #34d399;
+		border-color: color-mix(in srgb, #34d399 45%, transparent);
 	}
 	.code-areas {
 		display: flex;

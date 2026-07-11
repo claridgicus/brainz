@@ -81,6 +81,7 @@ describe("parseNote", () => {
       "story",
       "spec",
       "workflow",
+      "task",
       "decision",
       "constraint",
       "pattern",
@@ -89,6 +90,33 @@ describe("parseNote", () => {
       const { meta } = parseNote(`---\ntype: ${type}\n---\nx`, { fallbackId: "t" });
       expect(meta.type).toBe(type);
     }
+  });
+
+  it("reads task frontmatter (task_status/taken_by/taken_at/done_at)", () => {
+    const raw = [
+      "---",
+      "id: task-fix-auth",
+      "type: task",
+      "task_status: taken",
+      "taken_by: fleet-1",
+      "taken_at: 2026-07-11T00:00:00.000Z",
+      "---",
+      "Fix the auth bug.",
+    ].join("\n");
+    const { meta } = parseNote(raw, { fallbackId: "task-fix-auth" });
+    expect(meta.type).toBe("task");
+    expect(meta.taskStatus).toBe("taken");
+    expect(meta.takenBy).toBe("fleet-1");
+    expect(meta.takenAt).toBe("2026-07-11T00:00:00.000Z");
+    expect(meta.doneAt).toBeUndefined();
+    // A task-type note with no task_status leaves taskStatus absent (treated as open elsewhere).
+    expect(
+      parseNote("---\ntype: task\n---\nx", { fallbackId: "t" }).meta.taskStatus,
+    ).toBeUndefined();
+    // An invalid task_status is ignored.
+    expect(
+      parseNote("---\ntype: task\ntask_status: bogus\n---\nx", { fallbackId: "t" }).meta.taskStatus,
+    ).toBeUndefined();
   });
 
   it("reads code_areas frontmatter into codeAreas (absent when empty)", () => {
@@ -175,6 +203,27 @@ describe("serializeNote / readFrontmatter", () => {
     );
     const { meta } = parseNote(md, { fallbackId: "x" });
     expect(meta.codeAreas).toEqual(["src/a.ts", "packages/b/**"]);
+  });
+
+  it("round-trips task fields through serialize -> parse", () => {
+    const md = serializeNote(
+      {
+        id: "task-rt",
+        title: "Task RT",
+        type: "task",
+        task_status: "done",
+        taken_by: "fleet-2",
+        taken_at: "2026-07-11T00:00:00.000Z",
+        done_at: "2026-07-11T01:00:00.000Z",
+      },
+      "Body.\n",
+    );
+    const { meta } = parseNote(md, { fallbackId: "x" });
+    expect(meta.type).toBe("task");
+    expect(meta.taskStatus).toBe("done");
+    expect(meta.takenBy).toBe("fleet-2");
+    expect(meta.takenAt).toBe("2026-07-11T00:00:00.000Z");
+    expect(meta.doneAt).toBe("2026-07-11T01:00:00.000Z");
   });
 
   it("preserves unknown frontmatter keys via the passthrough map", () => {

@@ -23,6 +23,10 @@ export function compactMeta(meta: ConceptMeta): ToolConceptMeta {
     ...(meta.product !== undefined ? { product: meta.product } : {}),
     tags: meta.tags,
     ...(meta.codeAreas !== undefined ? { codeAreas: meta.codeAreas } : {}),
+    ...(meta.taskStatus !== undefined ? { taskStatus: meta.taskStatus } : {}),
+    ...(meta.takenBy !== undefined ? { takenBy: meta.takenBy } : {}),
+    ...(meta.takenAt !== undefined ? { takenAt: meta.takenAt } : {}),
+    ...(meta.doneAt !== undefined ? { doneAt: meta.doneAt } : {}),
   };
 }
 

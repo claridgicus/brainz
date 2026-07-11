@@ -14,11 +14,15 @@ import {
   graphResponseSchema,
   searchResponseSchema,
   statsResponseSchema,
+  taskListResponseSchema,
+  taskMoveResponseSchema,
   vaultListResponseSchema,
   vaultSchema,
   type ApiConcept,
   type ApiKey,
   type GraphPayload,
+  type TaskMeta,
+  type TaskMoveRequest,
   type Vault,
 } from "@brainz/contracts";
 import { slugify } from "@brainz/engine";
@@ -45,6 +49,7 @@ export interface UpsertConceptBody {
     | "story"
     | "spec"
     | "workflow"
+    | "task"
     | "decision"
     | "constraint"
     | "pattern"
@@ -53,7 +58,18 @@ export interface UpsertConceptBody {
   product?: string;
   tags?: string[];
   codeAreas?: string[];
+  taskStatus?: "open" | "taken" | "done";
   relations?: Record<string, string[]>;
+}
+
+export interface CreateTaskBody {
+  title: string;
+  body: string;
+  domain?: string;
+  realizes?: string[];
+  governedBy?: string[];
+  codeAreas?: string[];
+  tags?: string[];
 }
 
 export interface VaultStats {
@@ -63,10 +79,13 @@ export interface VaultStats {
   tags: string[];
   byType: Record<string, number>;
   onboarded: boolean;
+  openTasks: number;
   embeddings: "ready" | "unavailable";
   /** From the x-brainz-keyword-index response header. */
   keywordIndex: "fts5" | "like";
 }
+
+export type Task = TaskMeta;
 
 export type SearchHit = z.infer<typeof searchResponseSchema>["hits"][number];
 
@@ -175,6 +194,31 @@ export function createApi(fetchFn: Fetch) {
       const stats = await parse(res, statsResponseSchema, path);
       const keywordIndex = res.headers.get("x-brainz-keyword-index") === "like" ? "like" : "fts5";
       return { ...stats, keywordIndex };
+    },
+
+    // --------------------------------------------------------------- tasks
+    async listTasks(
+      vaultId: string,
+      filter: { taskStatus?: "open" | "taken" | "done"; domain?: string } = {},
+    ): Promise<Task[]> {
+      const params = new URLSearchParams();
+      if (filter.taskStatus) params.set("taskStatus", filter.taskStatus);
+      if (filter.domain) params.set("domain", filter.domain);
+      const qs = params.toString();
+      const path = `/api/vaults/${enc(vaultId)}/tasks${qs ? `?${qs}` : ""}`;
+      return (await request(taskListResponseSchema, path)).tasks;
+    },
+    createTask(vaultId: string, body: CreateTaskBody): Promise<Task> {
+      return request(taskMoveResponseSchema, `/api/vaults/${enc(vaultId)}/tasks`, {
+        method: "POST",
+        body,
+      });
+    },
+    moveTask(vaultId: string, id: string, move: TaskMoveRequest): Promise<Task> {
+      return request(taskMoveResponseSchema, `/api/vaults/${enc(vaultId)}/tasks/${enc(id)}`, {
+        method: "PATCH",
+        body: move,
+      });
     },
 
     // ------------------------------------------------------------ api keys

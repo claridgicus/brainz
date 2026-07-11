@@ -63,7 +63,7 @@ describe("createApi", () => {
   });
 
   it("reads the keyword-index mode from the stats response header", async () => {
-    const stats = { concepts: 2, edges: 1, products: [], tags: [], byType: {}, onboarded: false, embeddings: "unavailable" };
+    const stats = { concepts: 2, edges: 1, products: [], tags: [], byType: {}, onboarded: false, openTasks: 0, embeddings: "unavailable" };
     const api = createApi(
       fetchStub(() => jsonResponse(200, stats, { "x-brainz-keyword-index": "like" })),
     );

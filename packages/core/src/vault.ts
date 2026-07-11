@@ -50,6 +50,10 @@ interface ConceptRow {
   product: string | null;
   tags: string;
   code_areas: string;
+  task_status: string | null;
+  taken_by: string | null;
+  taken_at: string | null;
+  done_at: string | null;
   file_path: string;
   created_at: string | null;
   updated_at: string | null;
@@ -191,11 +195,13 @@ export class Vault {
 
     this.#db
       .prepare(
-        `INSERT INTO concepts (id, title, type, status, product, tags, code_areas, file_path, created_at, updated_at, body, hash)
-         VALUES (@id, @title, @type, @status, @product, @tags, @code_areas, @file_path, @created_at, @updated_at, @body, @hash)
+        `INSERT INTO concepts (id, title, type, status, product, tags, code_areas, task_status, taken_by, taken_at, done_at, file_path, created_at, updated_at, body, hash)
+         VALUES (@id, @title, @type, @status, @product, @tags, @code_areas, @task_status, @taken_by, @taken_at, @done_at, @file_path, @created_at, @updated_at, @body, @hash)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title, type = excluded.type, status = excluded.status,
            product = excluded.product, tags = excluded.tags, code_areas = excluded.code_areas,
+           task_status = excluded.task_status, taken_by = excluded.taken_by,
+           taken_at = excluded.taken_at, done_at = excluded.done_at,
            file_path = excluded.file_path,
            created_at = excluded.created_at, updated_at = excluded.updated_at,
            body = excluded.body, hash = excluded.hash`,
@@ -208,6 +214,10 @@ export class Vault {
         product: concept.product ?? null,
         tags: JSON.stringify(concept.tags),
         code_areas: JSON.stringify(concept.codeAreas ?? []),
+        task_status: concept.taskStatus ?? null,
+        taken_by: concept.takenBy ?? null,
+        taken_at: concept.takenAt ?? null,
+        done_at: concept.doneAt ?? null,
         file_path: filePath,
         created_at: concept.createdAt ?? null,
         updated_at: concept.updatedAt ?? null,
@@ -434,6 +444,11 @@ export class Vault {
     };
     const codeAreas = JSON.parse(row.code_areas ?? "[]") as string[];
     if (codeAreas.length > 0) meta.codeAreas = codeAreas;
+    if (row.task_status !== null && row.task_status !== undefined)
+      meta.taskStatus = row.task_status as ConceptMeta["taskStatus"];
+    if (row.taken_by !== null && row.taken_by !== undefined) meta.takenBy = row.taken_by;
+    if (row.taken_at !== null && row.taken_at !== undefined) meta.takenAt = row.taken_at;
+    if (row.done_at !== null && row.done_at !== undefined) meta.doneAt = row.done_at;
     if (row.product !== null) meta.product = row.product;
     if (row.created_at !== null) meta.createdAt = row.created_at;
     if (row.updated_at !== null) meta.updatedAt = row.updated_at;
@@ -521,6 +536,10 @@ export class Vault {
     if (input.product !== undefined) data.product = input.product;
     if (input.tags !== undefined) data.tags = input.tags;
     if (input.codeAreas !== undefined) data.code_areas = input.codeAreas;
+    if (input.taskStatus !== undefined) data.task_status = input.taskStatus;
+    if (input.takenBy !== undefined) data.taken_by = input.takenBy;
+    if (input.takenAt !== undefined) data.taken_at = input.takenAt;
+    if (input.doneAt !== undefined) data.done_at = input.doneAt;
     if (input.relations !== undefined) data.relations = input.relations;
 
     const body = input.body.endsWith("\n") ? input.body : `${input.body}\n`;
@@ -623,6 +642,13 @@ export class Vault {
       .all() as { type: string; n: number }[]) {
       byType[row.type] = row.n;
     }
+    const openTasks = (
+      this.#db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM concepts WHERE type = 'task' AND (task_status IS NULL OR task_status = 'open')",
+        )
+        .get() as { n: number }
+    ).n;
     return {
       concepts,
       edges: edgeCount,
@@ -630,6 +656,7 @@ export class Vault {
       tags: [...tagSet].sort(),
       byType,
       onboarded: this.onboardedAt !== null,
+      openTasks,
     };
   }
 

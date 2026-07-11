@@ -442,10 +442,11 @@ async function main() {
     const tools = await mcp.listTools();
     const toolNames = tools.tools.map((t) => t.name).sort();
     step(
-      "MCP tools/list returns the 9 contract tools (incl. onboard)",
-      toolNames.length === 9 &&
+      "MCP tools/list returns the contract tools (incl. onboard + task tools)",
+      toolNames.length === MCP_TOOL_NAMES.length &&
         JSON.stringify(toolNames) === JSON.stringify([...MCP_TOOL_NAMES].sort()) &&
-        toolNames.includes("onboard"),
+        toolNames.includes("onboard") &&
+        toolNames.includes("take_task"),
       toolNames.join(", "),
     );
 
@@ -560,7 +561,83 @@ async function main() {
       "nudge disappears from get_context after complete",
       !ctxAfterMarkdown.startsWith(ONBOARDING_NUDGE),
     );
+
+    // 9c. task tools: create → list → take (+ context bundle) → reject → complete
+    const createdTask = await mcp.callTool({
+      name: "create_task",
+      arguments: {
+        title: "E2E task: wire billing",
+        body: "Handle Stripe events. Relates to [[lead-scoring]].",
+        tags: ["high"],
+        codeAreas: ["apps/billing/src/**"],
+      },
+    });
+    const createdTaskPayload = JSON.parse(createdTask.content.find((c) => c.type === "text").text);
+    step(
+      "MCP create_task creates an open task-type concept (parses w/ contract schema)",
+      getMcpTool("create_task").outputSchema.safeParse(createdTaskPayload).success &&
+        createdTaskPayload.type === "task" &&
+        createdTaskPayload.taskStatus === "open",
+      JSON.stringify(createdTaskPayload),
+    );
+    const taskId = createdTaskPayload.id;
+
+    const listTasks = await mcp.callTool({ name: "list_tasks", arguments: { taskStatus: "open" } });
+    const listTasksPayload = JSON.parse(listTasks.content.find((c) => c.type === "text").text);
+    step(
+      "MCP list_tasks returns the new open task (parses w/ contract schema)",
+      getMcpTool("list_tasks").outputSchema.safeParse(listTasksPayload).success &&
+        listTasksPayload.tasks.some((t) => t.id === taskId),
+      JSON.stringify(listTasksPayload.tasks.map((t) => t.id)),
+    );
+
+    const takeTask = await mcp.callTool({
+      name: "take_task",
+      arguments: { id: taskId, takenBy: "e2e-fleet" },
+    });
+    const takePayload = JSON.parse(takeTask.content.find((c) => c.type === "text").text);
+    step(
+      "MCP take_task claims the task, records takenBy, and returns a context bundle",
+      getMcpTool("take_task").outputSchema.safeParse(takePayload).success &&
+        takePayload.task.taskStatus === "taken" &&
+        takePayload.task.takenBy === "e2e-fleet" &&
+        typeof takePayload.context.markdown === "string",
+      JSON.stringify(takePayload.task),
+    );
+
+    const takeAgain = await mcp.callTool({ name: "take_task", arguments: { id: taskId } });
+    step("MCP take_task on an already-taken task is an isError", takeAgain.isError === true);
+
+    const completeTask = await mcp.callTool({
+      name: "complete_task",
+      arguments: { id: taskId, outcome: "Billing webhooks wired and tested." },
+    });
+    const completeTaskPayload = JSON.parse(completeTask.content.find((c) => c.type === "text").text);
+    step(
+      "MCP complete_task marks done and reminds to index changes",
+      getMcpTool("complete_task").outputSchema.safeParse(completeTaskPayload).success &&
+        completeTaskPayload.task.taskStatus === "done" &&
+        completeTaskPayload.reminder.includes("upsert_concept"),
+      JSON.stringify(completeTaskPayload.task),
+    );
     await mcp.close();
+
+    // task REST surface: GET /tasks lists task metas (session cookie)
+    const tasksRest = await api("GET", `/api/vaults/${vaultId}/tasks`);
+    step(
+      "REST GET /tasks lists the task (now done) with its task fields",
+      tasksRest.status === 200 &&
+        Array.isArray(tasksRest.json?.tasks) &&
+        tasksRest.json.tasks.some((t) => t.id === taskId && t.taskStatus === "done"),
+      `status ${tasksRest.status}`,
+    );
+    const openTasksRest = await api("GET", `/api/vaults/${vaultId}/tasks?taskStatus=open`);
+    step(
+      "REST GET /tasks?taskStatus=open filters to open tasks only",
+      openTasksRest.status === 200 &&
+        openTasksRest.json.tasks.every((t) => (t.taskStatus ?? "open") === "open"),
+      `status ${openTasksRest.status}`,
+    );
 
     // the onboarding summary is a spec concept readable via REST; D1 mirror feeds stats
     const summaryRest = await api("GET", `/api/vaults/${vaultId}/concepts/${ONBOARDING_SUMMARY_ID}`);

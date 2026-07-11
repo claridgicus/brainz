@@ -58,7 +58,8 @@ A concept earns its place by answering a question a future agent will ask ("how 
 3. \`story\` — user stories, the mapping facet between domains and features: a story is \`part_of\` its domain and \`realized_by\` the features that deliver it ("As a user I stay signed in across visits" → part_of Authentication, realized_by Session Refresh).
 4. \`spec\` — technical specifications: the RULES under which a function must be performed. A spec \`governs\` the features/stories/domains it constrains ("Session tokens rotate every 15 minutes" governs Session Refresh).
 5. \`workflow\` — multi-step user/system journeys across features (\`part_of\` its domain, \`depends_on\` the features it crosses, in order).
-6. And wherever they surface: \`decision\` (choices made and why), \`constraint\` (hard limits), \`pattern\` (recurring implementation approaches), \`glossary\` (terms of art), \`concept\` (anything else worth keeping).
+6. \`task\` — a unit of work NOT yet reflected in the codebase (a gap, fix, or follow-up). A task is \`part_of\` a domain, \`realizes\` the stories/features it will deliver, and is \`governed_by\` the specs it must satisfy; \`code_areas\` say where the work lands. Prefer the \`create_task\` tool. Tasks show up on the Kanban board and are claimed via \`take_task\`.
+7. And wherever they surface: \`decision\` (choices made and why), \`constraint\` (hard limits), \`pattern\` (recurring implementation approaches), \`glossary\` (terms of art), \`concept\` (anything else worth keeping).
 
 ## 3. Anchor every concept to the code
 
@@ -67,7 +68,7 @@ Give EVERY concept a \`codeAreas\` list — rough paths or globs pointing at whe
 ## 4. Link the graph
 
 - Write each concept with \`upsert_concept\`; reference other concepts with \`[[wiki-links]]\` in the body and typed \`relations\` for structure.
-- Canonical relations (free-form strings — these are the conventions): \`part_of\`, \`realized_by\`, \`governs\`, \`depends_on\`, \`constrains\`, \`supersedes\`, \`related_to\`.
+- Canonical relations (free-form strings — these are the conventions): \`part_of\`, \`realized_by\`, \`realizes\`, \`governs\`, \`governed_by\`, \`depends_on\`, \`constrains\`, \`supersedes\`, \`related_to\`.
 - Direction matters: story —realized_by→ feature; spec —governs→ feature.
 
 ## 5. Calibrate, then complete

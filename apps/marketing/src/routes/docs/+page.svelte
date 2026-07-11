@@ -215,13 +215,15 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		<code>upsert_concept</code>.
 	</p>
 	<p>
-		The ontology is ten concept types, and five of them carry the structure: <code>domain</code>
+		The ontology is eleven concept types, and five of them carry the structure: <code>domain</code>
 		(high-level product areas — the top of the graph), <code>feature</code> (concrete capabilities,
 		<code>part_of</code> a domain), <code>story</code> (user stories, <code>realized_by</code> the
 		features that deliver them), <code>spec</code> (the rules that <code>govern</code> features and
-		stories), and <code>workflow</code> (multi-step journeys across features) — plus the classics:
-		<code>concept</code>, <code>decision</code>, <code>constraint</code>, <code>pattern</code>,
-		<code>glossary</code>. Every concept can carry <code>code_areas</code> — rough paths or globs
+		stories), and <code>workflow</code> (multi-step journeys across features) — plus <code>task</code>
+		(a unit of work not yet in the codebase, claimed off a real-time Kanban board via
+		<code>take_task</code>) and the classics: <code>concept</code>, <code>decision</code>,
+		<code>constraint</code>, <code>pattern</code>, <code>glossary</code>. Every concept can carry
+		<code>code_areas</code> — rough paths or globs
 		pointing at where that knowledge lives in the codebase — so a subagent briefed by
 		<code>get_context</code> learns the rules <em>and</em> where to apply them.
 	</p>

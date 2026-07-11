@@ -38,6 +38,7 @@ import type {
   ConceptStatus,
   ConceptType,
   Edge,
+  TaskStatus,
   UpsertInput,
 } from "@brainz/engine";
 import {
@@ -50,7 +51,7 @@ import {
   tokenize,
 } from "./do-helpers";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
 
 /** Minimal Workers AI surface (avoids model-name generics from workers-types). */
@@ -71,6 +72,10 @@ interface ConceptRow {
   product: string | null;
   tags_json: string;
   code_areas_json: string;
+  task_status: string | null;
+  taken_by: string | null;
+  taken_at: string | null;
+  done_at: string | null;
   relations_json: string;
   body: string;
   hash: string;
@@ -119,6 +124,10 @@ export class VaultDO {
         product TEXT,
         tags_json TEXT NOT NULL DEFAULT '[]',
         code_areas_json TEXT NOT NULL DEFAULT '[]',
+        task_status TEXT,
+        taken_by TEXT,
+        taken_at TEXT,
+        done_at TEXT,
         relations_json TEXT NOT NULL DEFAULT '{}',
         body TEXT NOT NULL,
         hash TEXT NOT NULL,
@@ -138,9 +147,22 @@ export class VaultDO {
         hash TEXT NOT NULL
       )`);
       if (this.#metaGet("embeddings") === null) this.#metaSet("embeddings", "ready");
-    } else if (version < 2) {
-      // v1 → v2: code_areas ships (additive column; v1 rows default to []).
-      this.#sql.exec(`ALTER TABLE concept ADD COLUMN code_areas_json TEXT NOT NULL DEFAULT '[]'`);
+    } else {
+      // Gated additive migrations for pre-existing vaults. Never edit past
+      // branches; append a new one and bump SCHEMA_VERSION.
+      if (version < 2) {
+        // v1 → v2: code_areas ships (additive column; v1 rows default to []).
+        this.#sql.exec(
+          `ALTER TABLE concept ADD COLUMN code_areas_json TEXT NOT NULL DEFAULT '[]'`,
+        );
+      }
+      if (version < 3) {
+        // v2 → v3: task fields ship (additive, nullable; non-task rows stay null).
+        this.#sql.exec(`ALTER TABLE concept ADD COLUMN task_status TEXT`);
+        this.#sql.exec(`ALTER TABLE concept ADD COLUMN taken_by TEXT`);
+        this.#sql.exec(`ALTER TABLE concept ADD COLUMN taken_at TEXT`);
+        this.#sql.exec(`ALTER TABLE concept ADD COLUMN done_at TEXT`);
+      }
     }
     if (version < SCHEMA_VERSION) this.#metaSet("schema_version", String(SCHEMA_VERSION));
     // FTS5 probe: try to create the virtual table; fall back to token/LIKE
@@ -201,6 +223,14 @@ export class VaultDO {
           return json(this.getConcept(String(args.id ?? "")));
         case "list":
           return json(this.list(args as { product?: string; type?: ConceptType; tag?: string }));
+        case "listTasks":
+          return json(this.listTasks(args as { taskStatus?: TaskStatus; domain?: string }));
+        case "takeTask":
+          return json(await this.takeTask(args as { id?: string; takenBy?: string }));
+        case "completeTask":
+          return json(await this.completeTask(args as { id: string; outcome: string }));
+        case "reopenTask":
+          return json(this.reopenTask(args as { id: string }));
         case "search":
           return json(await this.search(args as unknown as SearchArgs));
         case "related":
@@ -257,17 +287,24 @@ export class VaultDO {
         : existing
           ? (JSON.parse(existing.relations_json) as Record<string, string[]>)
           : {};
+    const taskStatus =
+      input.taskStatus !== undefined ? input.taskStatus : (existing?.task_status ?? null);
+    const takenBy = input.takenBy !== undefined ? input.takenBy : (existing?.taken_by ?? null);
+    const takenAt = input.takenAt !== undefined ? input.takenAt : (existing?.taken_at ?? null);
+    const doneAt = input.doneAt !== undefined ? input.doneAt : (existing?.done_at ?? null);
     const body = input.body.endsWith("\n") ? input.body : `${input.body}\n`;
     const createdAt = existing?.created_at ?? now;
     const hash = await sha256Hex(`${title}\n\n${body}`);
 
     this.#sql.exec(
-      `INSERT INTO concept (id, title, type, status, product, tags_json, code_areas_json, relations_json, body, hash, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO concept (id, title, type, status, product, tags_json, code_areas_json, task_status, taken_by, taken_at, done_at, relations_json, body, hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          title = excluded.title, type = excluded.type, status = excluded.status,
          product = excluded.product, tags_json = excluded.tags_json,
          code_areas_json = excluded.code_areas_json,
+         task_status = excluded.task_status, taken_by = excluded.taken_by,
+         taken_at = excluded.taken_at, done_at = excluded.done_at,
          relations_json = excluded.relations_json, body = excluded.body,
          hash = excluded.hash, created_at = excluded.created_at, updated_at = excluded.updated_at`,
       id,
@@ -277,6 +314,10 @@ export class VaultDO {
       product ?? null,
       JSON.stringify(tags),
       JSON.stringify(codeAreas),
+      taskStatus,
+      takenBy,
+      takenAt,
+      doneAt,
       JSON.stringify(relations),
       body,
       hash,
@@ -459,6 +500,209 @@ export class VaultDO {
       })
       .map(compactMeta);
     return { count: concepts.length, concepts };
+  }
+
+  // -------------------------------------------------------------------- tasks
+
+  /** Task-type concepts, oldest-first (createdAt then id). A task with no
+   * task_status is treated as "open". Optionally filtered by status / part_of domain. */
+  listTasks(filter: { taskStatus?: TaskStatus; domain?: string } = {}): {
+    count: number;
+    tasks: ReturnType<typeof compactMeta>[];
+  } {
+    const rows = this.#sql
+      .exec<ConceptRow>(`SELECT * FROM concept WHERE type = 'task'`)
+      .toArray();
+    const edges = this.#edges();
+    const domainOf = (id: string): string[] =>
+      edges.filter((e) => e.from === id && e.relation === "part_of").map((e) => e.to);
+    const tasks = rows
+      .map((r) => this.#rowToMeta(r))
+      .filter((m) => {
+        const status = m.taskStatus ?? "open";
+        if (filter.taskStatus && status !== filter.taskStatus) return false;
+        if (filter.domain && !domainOf(m.id).includes(filter.domain)) return false;
+        return true;
+      })
+      .sort(
+        (a, b) =>
+          (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.id.localeCompare(b.id),
+      )
+      .map(compactMeta);
+    return { count: tasks.length, tasks };
+  }
+
+  /**
+   * Atomically claim a task (DO storage is single-threaded, so this
+   * read-modify-write is race-free). With no id, claims THE next open task
+   * (oldest open by createdAt then id). Returns the task plus a get_context-grade
+   * bundle for its part_of domain + realizes / governed_by neighbors.
+   */
+  async takeTask(args: { id?: string; takenBy?: string } = {}): Promise<{
+    task: ReturnType<typeof compactMeta> & { createdAt?: string; updatedAt?: string };
+    body: string;
+    context: {
+      markdown: string;
+      included: string[];
+      truncated: boolean;
+      approxTokens: number;
+    };
+  }> {
+    let row: ConceptRow | null;
+    if (args.id) {
+      row = this.#getRow(args.id);
+      if (!row) throw new NotFoundError(`no task with id "${args.id}"`);
+      if (row.type !== "task") throw new Error(`concept "${args.id}" is not a task`);
+      const status = (row.task_status as TaskStatus | null) ?? "open";
+      if (status !== "open") {
+        throw new Error(`task "${args.id}" is already ${status}` + (row.taken_by ? ` (by ${row.taken_by})` : ""));
+      }
+    } else {
+      // Next open task: oldest open by createdAt then id.
+      const open = this.#sql
+        .exec<ConceptRow>(`SELECT * FROM concept WHERE type = 'task'`)
+        .toArray()
+        .filter((r) => ((r.task_status as TaskStatus | null) ?? "open") === "open")
+        .sort(
+          (a, b) =>
+            (a.created_at ?? "").localeCompare(b.created_at ?? "") || a.id.localeCompare(b.id),
+        );
+      if (open.length === 0) throw new Error("no open tasks to take");
+      row = open[0];
+    }
+
+    const takenBy = args.takenBy?.trim() || "an agent";
+    const takenAt = new Date().toISOString();
+    this.#sql.exec(
+      `UPDATE concept SET task_status = 'taken', taken_by = ?, taken_at = ?, updated_at = ? WHERE id = ?`,
+      takenBy,
+      takenAt,
+      takenAt,
+      row.id,
+    );
+
+    const claimed = this.#getRow(row.id);
+    if (!claimed) throw new Error(`failed to claim task: ${row.id}`);
+
+    // Assemble a briefing: the task itself + its part_of domain + the concepts
+    // it realizes / is governed_by (their neighbors expand one hop).
+    const seedIds = [claimed.id];
+    const relations = JSON.parse(claimed.relations_json) as Record<string, string[]>;
+    for (const rel of ["part_of", "realizes", "governed_by"]) {
+      for (const target of relations[rel] ?? []) seedIds.push(target);
+    }
+    const context = this.#assemble(seedIds, 1, 4000);
+
+    const meta = this.#rowToMeta(claimed);
+    return {
+      task: {
+        ...compactMeta(meta),
+        ...(meta.createdAt !== undefined ? { createdAt: meta.createdAt } : {}),
+        ...(meta.updatedAt !== undefined ? { updatedAt: meta.updatedAt } : {}),
+      },
+      body: claimed.body,
+      context,
+    };
+  }
+
+  /** Mark a task done: set task_status=done + done_at, append the outcome to the body. */
+  async completeTask(args: { id: string; outcome: string }): Promise<{
+    task: ReturnType<typeof compactMeta> & { createdAt?: string; updatedAt?: string };
+    reminder: string;
+  }> {
+    const row = this.#getRow(args.id);
+    if (!row) throw new NotFoundError(`no task with id "${args.id}"`);
+    if (row.type !== "task") throw new Error(`concept "${args.id}" is not a task`);
+    const outcome = args.outcome?.trim();
+    if (!outcome) throw new Error("complete_task requires a non-empty `outcome`");
+
+    const doneAt = new Date().toISOString();
+    const base = row.body.endsWith("\n") ? row.body.replace(/\n+$/, "\n") : `${row.body}\n`;
+    const body = `${base}\n## Outcome\n\n${outcome}\n`;
+    // Re-upsert through upsertConcept so edges/fts/hash stay consistent.
+    await this.upsertConcept({
+      id: row.id,
+      title: row.title,
+      body,
+      type: "task",
+      status: row.status as ConceptStatus,
+      product: row.product ?? undefined,
+      tags: JSON.parse(row.tags_json) as string[],
+      codeAreas: JSON.parse(row.code_areas_json) as string[],
+      relations: JSON.parse(row.relations_json) as Record<string, string[]>,
+      taskStatus: "done",
+      doneAt,
+    });
+    const saved = this.#getRow(row.id);
+    if (!saved) throw new Error(`failed to complete task: ${row.id}`);
+    const meta = this.#rowToMeta(saved);
+    return {
+      task: {
+        ...compactMeta(meta),
+        ...(meta.createdAt !== undefined ? { createdAt: meta.createdAt } : {}),
+        ...(meta.updatedAt !== undefined ? { updatedAt: meta.updatedAt } : {}),
+      },
+      reminder:
+        "Task complete. Now index what changed via upsert_concept so the knowledge graph stays true to the codebase — new/updated features, specs, decisions, and constraints.",
+    };
+  }
+
+  /** Reopen a task: back to open, clear takenBy/takenAt (board "move to Open"). */
+  reopenTask(args: { id: string }): {
+    task: ReturnType<typeof compactMeta> & { createdAt?: string; updatedAt?: string };
+  } {
+    const row = this.#getRow(args.id);
+    if (!row) throw new NotFoundError(`no task with id "${args.id}"`);
+    if (row.type !== "task") throw new Error(`concept "${args.id}" is not a task`);
+    const now = new Date().toISOString();
+    this.#sql.exec(
+      `UPDATE concept SET task_status = 'open', taken_by = NULL, taken_at = NULL, done_at = NULL, updated_at = ? WHERE id = ?`,
+      now,
+      args.id,
+    );
+    const saved = this.#getRow(args.id);
+    if (!saved) throw new Error(`failed to reopen task: ${args.id}`);
+    const meta = this.#rowToMeta(saved);
+    return {
+      task: {
+        ...compactMeta(meta),
+        ...(meta.createdAt !== undefined ? { createdAt: meta.createdAt } : {}),
+        ...(meta.updatedAt !== undefined ? { updatedAt: meta.updatedAt } : {}),
+      },
+    };
+  }
+
+  /** Assemble a context bundle for explicit seed ids (reuses engine assembleContext). */
+  #assemble(
+    seedIds: string[],
+    depth: number,
+    tokenBudget: number,
+  ): { markdown: string; included: string[]; truncated: boolean; approxTokens: number } {
+    const rows = this.#sql.exec<ConceptRow>(`SELECT * FROM concept`).toArray();
+    const concepts = new Map<string, Concept>();
+    for (const row of rows) {
+      concepts.set(row.id, { ...this.#rowToMeta(row), body: row.body });
+    }
+    const bundle = assembleContext(
+      seedIds,
+      {
+        edges: this.#edges(),
+        getMeta: (id) => {
+          const c = concepts.get(id);
+          if (!c) return null;
+          const { body: _body, ...meta } = c;
+          return meta;
+        },
+        getConcept: (id) => concepts.get(id) ?? null,
+      },
+      { depth, tokenBudget },
+    );
+    return {
+      markdown: bundle.markdown,
+      included: bundle.included.map((c) => c.id),
+      truncated: bundle.truncated,
+      approxTokens: bundle.approxTokens,
+    };
   }
 
   async search(opts: SearchArgs): Promise<{ hits: WireHit[] }> {
@@ -673,6 +917,7 @@ export class VaultDO {
     tags: string[];
     byType: Record<string, number>;
     onboarded: boolean;
+    openTasks: number;
     embeddings: "ready" | "unavailable";
     keywordIndex: "fts5" | "like";
   } {
@@ -698,6 +943,13 @@ export class VaultDO {
       .toArray()) {
       byType[row.type] = Number(row.n);
     }
+    const openTasks = Number(
+      this.#sql
+        .exec<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM concept WHERE type = 'task' AND (task_status IS NULL OR task_status = 'open')`,
+        )
+        .one().n,
+    );
     return {
       concepts,
       edges,
@@ -705,6 +957,7 @@ export class VaultDO {
       tags: [...tagSet].sort(),
       byType,
       onboarded: this.#metaGet("onboarded_at") !== null,
+      openTasks,
       embeddings: this.#metaGet("embeddings") === "ready" ? "ready" : "unavailable",
       keywordIndex: this.#fts ? "fts5" : "like",
     };
@@ -733,6 +986,11 @@ export class VaultDO {
     };
     const codeAreas = JSON.parse(row.code_areas_json ?? "[]") as string[];
     if (codeAreas.length > 0) meta.codeAreas = codeAreas;
+    if (row.task_status !== null && row.task_status !== undefined)
+      meta.taskStatus = row.task_status as ConceptMeta["taskStatus"];
+    if (row.taken_by !== null && row.taken_by !== undefined) meta.takenBy = row.taken_by;
+    if (row.taken_at !== null && row.taken_at !== undefined) meta.takenAt = row.taken_at;
+    if (row.done_at !== null && row.done_at !== undefined) meta.doneAt = row.done_at;
     if (row.product !== null) meta.product = row.product;
     if (row.created_at !== null) meta.createdAt = row.created_at;
     if (row.updated_at !== null) meta.updatedAt = row.updated_at;
@@ -769,6 +1027,10 @@ export interface WireConcept {
   product?: string;
   tags: string[];
   codeAreas?: string[];
+  taskStatus?: "open" | "taken" | "done";
+  takenBy?: string;
+  takenAt?: string;
+  doneAt?: string;
   createdAt?: string;
   updatedAt?: string;
   body: string;

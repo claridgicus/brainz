@@ -15,10 +15,12 @@ import { z } from "zod";
 import {
   CONCEPT_STATUSES,
   CONCEPT_TYPES,
+  TASK_STATUSES,
   conceptStatusSchema,
   conceptTypeSchema,
   edgeSchema,
   embeddingStatusSchema,
+  taskStatusSchema,
   vaultStatsSchema,
 } from "./domain.js";
 
@@ -32,6 +34,10 @@ export const toolConceptMetaSchema = z
     product: z.string().optional(),
     tags: z.array(z.string()),
     codeAreas: z.array(z.string()).optional(),
+    taskStatus: taskStatusSchema.optional(),
+    takenBy: z.string().optional(),
+    takenAt: z.string().optional(),
+    doneAt: z.string().optional(),
   })
   .strict();
 
@@ -92,11 +98,19 @@ export const upsertConceptInputSchema = z.object({
     .describe(
       "Rough codebase paths/globs where this knowledge lives, e.g. [\"packages/core/src/vault.ts\", \"apps/web/src/routes/**\"] — lets agents briefed by get_context know where to apply it.",
     ),
+  taskStatus: taskStatusSchema
+    .optional()
+    .describe(
+      "For type=\"task\" concepts: lifecycle \"open\" | \"taken\" | \"done\" (default \"open\"). Prefer the task tools (create_task / take_task / complete_task) over setting this directly.",
+    ),
+  takenBy: z.string().optional().describe("For tasks: label of the agent/orchestrator that claimed it."),
+  takenAt: z.string().optional().describe("For tasks: ISO timestamp when claimed."),
+  doneAt: z.string().optional().describe("For tasks: ISO timestamp when completed."),
   relations: z
     .record(z.string(), z.array(z.string()))
     .optional()
     .describe(
-      "Typed edges, e.g. {\"depends_on\": [\"auth-system\"]}. Conventions: part_of (feature/story → domain), realized_by (story → features), governs (spec → what it constrains), depends_on, constrains, supersedes, related_to.",
+      "Typed edges, e.g. {\"depends_on\": [\"auth-system\"]}. Conventions: part_of (feature/story/task → domain), realized_by (story → features), realizes (task → stories/features), governs (spec → what it constrains), governed_by (task → specs), depends_on, constrains, supersedes, related_to.",
     ),
 });
 
@@ -139,6 +153,55 @@ export const onboardInputSchema = z.object({
     .describe(
       'Required with "complete": 2–5 sentences on what was indexed and any notable gaps — stored as the product-onboarding-summary concept.',
     ),
+});
+
+// ------------------------------------------------------------- task tool i/o
+
+export const listTasksInputSchema = z.object({
+  taskStatus: taskStatusSchema
+    .optional()
+    .describe("Only tasks in this lifecycle state (\"open\" | \"taken\" | \"done\"). Omit for all."),
+  domain: z
+    .string()
+    .optional()
+    .describe("Only tasks that are part_of this domain concept id."),
+});
+
+export const takeTaskInputSchema = z.object({
+  id: z
+    .string()
+    .optional()
+    .describe("Claim this specific task by id. Omit to claim THE next open task (oldest by createdAt then id)."),
+  takenBy: z
+    .string()
+    .optional()
+    .describe("Label for who's claiming it (agent/orchestrator name). Defaults to a generic label."),
+});
+
+export const completeTaskInputSchema = z.object({
+  id: z.string().describe("Id of the task to mark done."),
+  outcome: z
+    .string()
+    .describe("A short account of what was done — appended to the task body as an Outcome section."),
+});
+
+export const createTaskInputSchema = z.object({
+  title: z.string().describe("Human-readable task title (required, non-empty)."),
+  body: z.string().describe("Markdown description of the work. [[wiki-links]] become edges."),
+  domain: z.string().optional().describe("Domain concept id this task is part_of."),
+  realizes: z
+    .array(z.string())
+    .optional()
+    .describe("Story/feature concept ids this task realizes (creates `realizes` edges)."),
+  governedBy: z
+    .array(z.string())
+    .optional()
+    .describe("Spec concept ids that govern this task (creates `governed_by` edges)."),
+  codeAreas: z
+    .array(z.string())
+    .optional()
+    .describe("Rough codebase paths/globs where the work lands."),
+  tags: z.array(z.string()).optional().describe("Tags, e.g. a priority tag like \"high\" or an area tag."),
 });
 
 // ------------------------------------------------------------ output schemas
@@ -260,6 +323,52 @@ export const onboardOutputSchema = z.union([
   onboardStatusOutputSchema,
 ]);
 
+// ----------------------------------------------------------- task tool output
+
+/** A task concept as the task tools emit it (compact meta with task fields). */
+export const taskMetaSchema = toolConceptMetaSchema.extend({
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+});
+
+export const listTasksOutputSchema = z
+  .object({
+    count: z.number().int(),
+    tasks: z.array(taskMetaSchema),
+  })
+  .strict();
+
+/**
+ * take_task responds with ONE JSON block: the claimed task PLUS an
+ * auto-assembled get_context-grade bundle for its part_of domain + realizes/
+ * governed_by neighbors, so the caller can fan out immediately.
+ */
+export const takeTaskOutputSchema = z
+  .object({
+    task: taskMetaSchema,
+    body: z.string(),
+    context: z
+      .object({
+        markdown: z.string(),
+        included: z.array(z.string()),
+        truncated: z.boolean(),
+        approxTokens: z.number(),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const completeTaskOutputSchema = z
+  .object({
+    task: taskMetaSchema,
+    reminder: z.string(),
+  })
+  .strict();
+
+export const createTaskOutputSchema = taskMetaSchema.extend({
+  filePath: z.string(),
+});
+
 // ----------------------------------------------------------------- registry
 
 export const MCP_TOOLS = [
@@ -367,6 +476,54 @@ export const MCP_TOOLS = [
       "search_concepts and get_context results carry a reminder to run it.",
     inputSchema: onboardInputSchema,
     outputSchema: onboardOutputSchema,
+  },
+  {
+    name: "list_tasks",
+    title: "List tasks",
+    description:
+      "List the vault's work pile: `task`-type concepts with their lifecycle (open/taken/done), oldest " +
+      "first. Call to survey what's outstanding before claiming work, to check what a teammate agent is " +
+      "already doing (taskStatus \"taken\" with takenBy), or to audit completed work. Filter by taskStatus " +
+      "or by the domain the tasks are part_of. To actually pick up work, use take_task — don't just read.",
+    inputSchema: listTasksInputSchema,
+    outputSchema: listTasksOutputSchema,
+  },
+  {
+    name: "take_task",
+    title: "Take a task off the pile",
+    description:
+      "Claim a unit of work and get briefed in one call. Pass an `id` to claim a specific task, or omit it " +
+      "to claim THE next open task (deterministic: oldest open by createdAt then id) — safe to call " +
+      "repeatedly to drain the pile. Atomically flips the task to \"taken\" and records takenBy/takenAt; " +
+      "errors if it's already taken or done. Returns the task AND an auto-assembled get_context-grade " +
+      "briefing for its part_of domain plus the concepts it realizes / is governed_by (with code_areas) — " +
+      "paste that straight into your implementation. THE CONTRACT: after implementing, verify the artifact " +
+      "matches every spec that governs the task; fix or file a new task for any discrepancy; then index the " +
+      "new/changed knowledge via upsert_concept and call complete_task.",
+    inputSchema: takeTaskInputSchema,
+    outputSchema: takeTaskOutputSchema,
+  },
+  {
+    name: "complete_task",
+    title: "Complete a task",
+    description:
+      "Mark a task done once the work is in the artifact. Sets taskStatus=done + doneAt and appends your " +
+      "`outcome` to the task body as an Outcome section. The result reminds you to index what changed via " +
+      "upsert_concept so the knowledge graph stays true to the codebase — do that before moving on.",
+    inputSchema: completeTaskInputSchema,
+    outputSchema: completeTaskOutputSchema,
+  },
+  {
+    name: "create_task",
+    title: "Create a task",
+    description:
+      "Turn a finding into first-class work: creates a `task`-type concept with taskStatus=open and the " +
+      "given relations — part_of a domain, `realizes` stories/features, `governed_by` specs — plus " +
+      "codeAreas pointing at where the work lands. Use when you discover work that isn't reflected in the " +
+      "codebase yet (a gap, a needed fix, a follow-up). The task then shows up in list_tasks / take_task " +
+      "and on the Kanban board.",
+    inputSchema: createTaskInputSchema,
+    outputSchema: createTaskOutputSchema,
   },
 ] as const;
 

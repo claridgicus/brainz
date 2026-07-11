@@ -76,6 +76,10 @@ function compactMeta(c: ConceptMeta) {
     ...(c.product !== undefined ? { product: c.product } : {}),
     tags: c.tags,
     ...(c.codeAreas !== undefined ? { codeAreas: c.codeAreas } : {}),
+    ...(c.taskStatus !== undefined ? { taskStatus: c.taskStatus } : {}),
+    ...(c.takenBy !== undefined ? { takenBy: c.takenBy } : {}),
+    ...(c.takenAt !== undefined ? { takenAt: c.takenAt } : {}),
+    ...(c.doneAt !== undefined ? { doneAt: c.doneAt } : {}),
   };
 }
 
@@ -184,7 +188,21 @@ export function createServer(vault: Vault): McpServer {
         };
       }),
 
-    upsert_concept: async ({ id, title, body, type, status, product, tags, codeAreas, relations }) =>
+    upsert_concept: async ({
+      id,
+      title,
+      body,
+      type,
+      status,
+      product,
+      tags,
+      codeAreas,
+      taskStatus,
+      takenBy,
+      takenAt,
+      doneAt,
+      relations,
+    }) =>
       guarded(async () => {
         const saved = await vault.upsertConcept({
           id,
@@ -195,6 +213,10 @@ export function createServer(vault: Vault): McpServer {
           product,
           tags,
           codeAreas,
+          taskStatus,
+          takenBy,
+          takenAt,
+          doneAt,
           relations,
         });
         return ok({ ...compactMeta(saved), filePath: saved.filePath });
@@ -242,6 +264,139 @@ export function createServer(vault: Vault): McpServer {
           onboarded: stats.onboarded,
           conceptCount: stats.concepts,
           byType: stats.byType,
+        });
+      }),
+
+    list_tasks: async ({ taskStatus, domain }) =>
+      guarded(() => {
+        const edges = vault.edges();
+        const domainOf = (id: string): string[] =>
+          edges.filter((e) => e.from === id && e.relation === "part_of").map((e) => e.to);
+        const tasks = vault
+          .listConcepts({ type: "task" })
+          .filter((m) => {
+            const status = m.taskStatus ?? "open";
+            if (taskStatus && status !== taskStatus) return false;
+            if (domain && !domainOf(m.id).includes(domain)) return false;
+            return true;
+          })
+          .sort(
+            (a, b) =>
+              (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.id.localeCompare(b.id),
+          );
+        return ok({ count: tasks.length, tasks: tasks.map(compactMeta) });
+      }),
+
+    take_task: async ({ id, takenBy }) =>
+      guarded(async () => {
+        let target: ConceptMeta | undefined;
+        if (id) {
+          const concept = vault.getConcept(id);
+          if (!concept) return fail(`no task with id "${id}"`);
+          if (concept.type !== "task") return fail(`concept "${id}" is not a task`);
+          const status = concept.taskStatus ?? "open";
+          if (status !== "open") {
+            return fail(
+              `task "${id}" is already ${status}` +
+                (concept.takenBy ? ` (by ${concept.takenBy})` : ""),
+            );
+          }
+          target = concept;
+        } else {
+          const open = vault
+            .listConcepts({ type: "task" })
+            .filter((m) => (m.taskStatus ?? "open") === "open")
+            .sort(
+              (a, b) =>
+                (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.id.localeCompare(b.id),
+            );
+          if (open.length === 0) return fail("no open tasks to take");
+          target = open[0];
+        }
+
+        const takenAt = new Date().toISOString();
+        const saved = await vault.upsertConcept({
+          id: target.id,
+          title: target.title,
+          body: vault.getConcept(target.id)?.body ?? "",
+          type: "task",
+          taskStatus: "taken",
+          takenBy: takenBy?.trim() || "an agent",
+          takenAt,
+        });
+
+        // Briefing: the task + its part_of domain + realizes / governed_by targets.
+        const seedIds = [saved.id];
+        const edges = vault.edges();
+        for (const rel of ["part_of", "realizes", "governed_by"]) {
+          for (const e of edges) if (e.from === saved.id && e.relation === rel) seedIds.push(e.to);
+        }
+        const bundle = await vault.assembleContext({ ids: seedIds, depth: 1, tokenBudget: 4000 });
+        return ok({
+          task: {
+            ...compactMeta(saved),
+            ...(saved.createdAt !== undefined ? { createdAt: saved.createdAt } : {}),
+            ...(saved.updatedAt !== undefined ? { updatedAt: saved.updatedAt } : {}),
+          },
+          body: vault.getConcept(saved.id)?.body ?? "",
+          context: {
+            markdown: bundle.markdown,
+            included: bundle.included.map((c) => c.id),
+            truncated: bundle.truncated,
+            approxTokens: bundle.approxTokens,
+          },
+        });
+      }),
+
+    complete_task: async ({ id, outcome }) =>
+      guarded(async () => {
+        const concept = vault.getConcept(id);
+        if (!concept) return fail(`no task with id "${id}"`);
+        if (concept.type !== "task") return fail(`concept "${id}" is not a task`);
+        if (!outcome?.trim()) return fail("complete_task requires a non-empty `outcome`");
+        const doneAt = new Date().toISOString();
+        const base = concept.body.endsWith("\n")
+          ? concept.body.replace(/\n+$/, "\n")
+          : `${concept.body}\n`;
+        const saved = await vault.upsertConcept({
+          id: concept.id,
+          title: concept.title,
+          body: `${base}\n## Outcome\n\n${outcome.trim()}\n`,
+          type: "task",
+          taskStatus: "done",
+          doneAt,
+        });
+        return ok({
+          task: {
+            ...compactMeta(saved),
+            ...(saved.createdAt !== undefined ? { createdAt: saved.createdAt } : {}),
+            ...(saved.updatedAt !== undefined ? { updatedAt: saved.updatedAt } : {}),
+          },
+          reminder:
+            "Task complete. Now index what changed via upsert_concept so the knowledge graph stays true to the codebase — new/updated features, specs, decisions, and constraints.",
+        });
+      }),
+
+    create_task: async ({ title, body, domain, realizes, governedBy, codeAreas, tags }) =>
+      guarded(async () => {
+        const relations: Record<string, string[]> = {};
+        if (domain) relations.part_of = [domain];
+        if (realizes && realizes.length > 0) relations.realizes = realizes;
+        if (governedBy && governedBy.length > 0) relations.governed_by = governedBy;
+        const saved = await vault.upsertConcept({
+          title,
+          body,
+          type: "task",
+          taskStatus: "open",
+          tags,
+          codeAreas,
+          relations: Object.keys(relations).length > 0 ? relations : undefined,
+        });
+        return ok({
+          ...compactMeta(saved),
+          ...(saved.createdAt !== undefined ? { createdAt: saved.createdAt } : {}),
+          ...(saved.updatedAt !== undefined ? { updatedAt: saved.updatedAt } : {}),
+          filePath: saved.filePath,
         });
       }),
   };

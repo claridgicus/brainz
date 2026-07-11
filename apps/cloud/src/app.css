@@ -57,9 +57,9 @@
 	 *   workflow   → --node-workflow   #fb923c  orange    (new type)
 	 *   story      → --node-story      #a3e635  lime      (new type)
 	 *   spec       → --node-spec       #2dd4bf  teal      (new type)
+	 *   task       → --node-task       #f59e0b  amber-orange (work pile)
 	 *   pending    → --node-pending    #6b7280  gray, rendered dashed
-	 * All eleven are defined here so the branch adding the four new types
-	 * only has to add TYPE_COLORS entries — the tokens already exist. */
+	 * Keep in sync with TYPE_COLORS in $lib/graph-data.ts. */
 	--node-concept: #a78bfa;
 	--node-feature: #34d399;
 	--node-decision: #fbbf24;
@@ -70,6 +70,7 @@
 	--node-workflow: #fb923c;
 	--node-story: #a3e635;
 	--node-spec: #2dd4bf;
+	--node-task: #f59e0b;
 	--node-pending: #6b7280;
 
 	--font-sans:

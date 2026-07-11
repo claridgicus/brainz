@@ -273,6 +273,30 @@ async function main() {
     );
     step("keyword-only badge shown (no Workers AI locally)", ws.html.includes("keyword-only"));
     step("pending edge target counted", ws.html.includes("1 pending"));
+    step("workspace links to the board", ws.html.includes("/v/ui-vault/board"));
+
+    // 6b. Kanban board SSR (columns + a task card)
+    const taskRes = await api("POST", `/api/vaults/${vault.id}/tasks`, {
+      body: {
+        title: "Ship the board",
+        body: "Build the Kanban view.",
+        tags: ["high"],
+        codeAreas: ["apps/cloud/src/routes/(app)/v/[slug]/board/**"],
+      },
+    });
+    step("create task via REST → 201", taskRes.status === 201, `status ${taskRes.status}`);
+    const board = await page("/v/ui-vault/board");
+    step("/v/ui-vault/board → 200", board.status === 200, `status ${board.status}`);
+    step(
+      "board SSR renders the Open · Taken · Done columns",
+      board.html.includes(">open<") && board.html.includes(">taken<") && board.html.includes(">done<"),
+    );
+    step("board SSR renders the task card", board.html.includes("Ship the board"));
+    step("board SSR carries the group-by control", board.html.includes("Group by"));
+
+    // Dashboard shows the open-task chip now that a task exists.
+    const dash2 = await page("/dashboard");
+    step("dashboard shows the open-task chip", dash2.html.includes("open task"));
 
     // 7. settings SSR (+ a key created via REST shows up)
     const keyRes = await api("POST", `/api/vaults/${vault.id}/keys`, { body: { name: "ui-e2e-key" } });

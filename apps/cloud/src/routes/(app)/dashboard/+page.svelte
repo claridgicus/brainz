@@ -53,11 +53,20 @@
 	{:else}
 		<div class="grid">
 			{#each vaults as v (v.id)}
-				<a class="card vault" href="/v/{v.slug}">
-					<h2>{v.name}</h2>
-					<p class="slug"><code>{v.slug}</code></p>
-					<p class="muted created">Created {fmtDate(v.createdAt)}</p>
-				</a>
+				<div class="card vault">
+					<a class="vault-link" href="/v/{v.slug}">
+						<h2>{v.name}</h2>
+						<p class="slug"><code>{v.slug}</code></p>
+					</a>
+					<div class="meta-row">
+						<span class="muted created">Created {fmtDate(v.createdAt)}</span>
+						{#if (data.openTasks?.[v.id] ?? 0) > 0}
+							<a class="task-chip" href="/v/{v.slug}/board" title="Open tasks — view the board">
+								{data.openTasks[v.id]} open {data.openTasks[v.id] === 1 ? "task" : "tasks"}
+							</a>
+						{/if}
+					</div>
+				</div>
 			{/each}
 		</div>
 	{/if}
@@ -122,11 +131,17 @@
 			box-shadow 120ms ease;
 	}
 	.vault:hover {
-		text-decoration: none;
 		border-color: var(--accent);
 		box-shadow:
 			var(--surface-ring),
 			var(--glow);
+	}
+	.vault-link {
+		display: block;
+		color: var(--text);
+	}
+	.vault-link:hover {
+		text-decoration: none;
 	}
 	.vault h2 {
 		font-size: 16px;
@@ -138,6 +153,26 @@
 	.created {
 		font-size: 12.5px;
 		margin: 0;
+	}
+	.meta-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+	}
+	.task-chip {
+		font-size: 11.5px;
+		font-weight: 600;
+		padding: 2px 8px;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--node-task, #f59e0b) 20%, transparent);
+		color: var(--node-task, #f59e0b);
+		border: 1px solid color-mix(in srgb, var(--node-task, #f59e0b) 40%, transparent);
+		white-space: nowrap;
+	}
+	.task-chip:hover {
+		text-decoration: none;
+		background: color-mix(in srgb, var(--node-task, #f59e0b) 32%, transparent);
 	}
 	.empty {
 		text-align: center;

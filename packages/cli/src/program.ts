@@ -25,6 +25,7 @@ const CONCEPT_TYPES = [
   "story",
   "spec",
   "workflow",
+  "task",
   "decision",
   "constraint",
   "pattern",

@@ -66,17 +66,21 @@ afterAll(async () => {
 });
 
 describe("tool registration", () => {
-  it("exposes the nine spec'd tools", async () => {
+  it("exposes the spec'd tools", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([
+      "complete_task",
+      "create_task",
       "get_concept",
       "get_context",
       "get_related",
       "link_concepts",
       "list_concepts",
+      "list_tasks",
       "onboard",
       "search_concepts",
+      "take_task",
       "upsert_concept",
       "vault_stats",
     ]);
@@ -411,5 +415,34 @@ describe("resolveVaultDir", () => {
 
   it("throws when --vault has no value", () => {
     expect(() => resolveVaultDir(["--vault"], {})).toThrow();
+  });
+});
+
+describe("task tools", () => {
+  it("create_task → list_tasks → take_task → complete_task round-trips", async () => {
+    const created = await callJson("create_task", {
+      title: "Wire up billing webhooks",
+      body: "Handle Stripe events.",
+      tags: ["high"],
+      codeAreas: ["apps/billing/src/webhooks.ts"],
+    });
+    expect(created.type).toBe("task");
+    expect(created.taskStatus).toBe("open");
+
+    const list = await callJson("list_tasks", { taskStatus: "open" });
+    expect(list.tasks.some((t: { id: string }) => t.id === created.id)).toBe(true);
+
+    const taken = await callJson("take_task", { id: created.id, takenBy: "fleet-7" });
+    expect(taken.task.taskStatus).toBe("taken");
+    expect(taken.task.takenBy).toBe("fleet-7");
+    expect(typeof taken.context.markdown).toBe("string");
+
+    // Taking it again is an isError (already taken).
+    const again = await callTool("take_task", { id: created.id });
+    expect(again.isError).toBe(true);
+
+    const done = await callJson("complete_task", { id: created.id, outcome: "Shipped." });
+    expect(done.task.taskStatus).toBe("done");
+    expect(done.reminder).toContain("upsert_concept");
   });
 });
