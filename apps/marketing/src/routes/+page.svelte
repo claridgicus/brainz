@@ -38,7 +38,7 @@ tags: [crm, ranking]
 code_areas: [src/scoring/**]
 relations:
   depends_on: [contact-model]
-  constrained_by: [rate-limits]
+  governed_by: [rate-limits]
 ---
 
 Scores leads 0-100. Recomputed on every
@@ -119,10 +119,10 @@ Scores leads 0-100. Recomputed on every
 			<div class="card feature">
 				<h3>Hybrid search, graceful fallback</h3>
 				<p>
-					Queries fuse full-text search with embedding similarity via reciprocal-rank fusion, then
-					expand through the graph to pull in the neighbors that matter. If embeddings are
-					unavailable — offline, no key, no model — everything degrades to keyword search. Nothing
-					crashes, ever.
+					<code>search_concepts</code> fuses full-text search with embedding similarity via
+					reciprocal-rank fusion; <code>get_context</code> then expands through the graph to pull in
+					the neighbors that matter. If embeddings are unavailable — offline, no key, no model —
+					search degrades to keyword-only. Nothing crashes, ever.
 				</p>
 			</div>
 

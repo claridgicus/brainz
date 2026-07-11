@@ -7,6 +7,7 @@
 	import { ApiError, createApi, roleOf } from "$lib/api";
 	import { TYPE_COLORS } from "$lib/graph-data";
 	import ConceptPanel from "$lib/components/ConceptPanel.svelte";
+	import Mark from "$lib/components/Mark.svelte";
 	import { onMount } from "svelte";
 	import {
 		type GroupBy,
@@ -218,7 +219,7 @@
 
 	{#if tasks.length === 0}
 		<div class="empty">
-			<div class="mark" aria-hidden="true">&#x1F4A9;</div>
+			<div class="mark" aria-hidden="true"><Mark size={40} /></div>
 			<h2>No tasks yet</h2>
 			<p class="muted">
 				Tasks appear here when an agent files them (create_task over MCP) or takes work off the pile.
@@ -566,7 +567,8 @@
 		margin: 48px auto;
 	}
 	.empty .mark {
-		font-size: 40px;
+		display: flex;
+		justify-content: center;
 		margin-bottom: 10px;
 	}
 	.empty h2 {

@@ -109,10 +109,11 @@ describe("DevMailer", () => {
 });
 
 describe("templates", () => {
-  it("magic-link template is Brownmatter-branded and single-button", () => {
+  it("magic-link template is Brainz-branded and single-button", () => {
     const tpl = magicLinkTemplate("https://x/verify?token=t");
-    expect(tpl.html).toContain("💩 Brainz");
-    expect(tpl.text).toContain("💩 Brainz");
+    // 🧠 stands in for the zombie-brain SVG mark (SVG unsupported in email).
+    expect(tpl.html).toContain("🧠 Brainz");
+    expect(tpl.text).toContain("🧠 Brainz");
     expect(tpl.html).toContain("https://x/verify?token=t");
     // Exactly one action button (anchor).
     expect((tpl.html.match(/<a /g) ?? []).length).toBe(1);
@@ -177,7 +178,7 @@ describe("templates", () => {
       keyPrefix: "bz_a1B2c…",
     });
     expect(tpl.subject).toMatch(/agent/i);
-    expect(tpl.html).toContain("💩 Brainz");
+    expect(tpl.html).toContain("🧠 Brainz");
     expect(tpl.html).toContain("Agent Vault");
     expect(tpl.html).toContain("agent-signup");
     expect(tpl.html).toContain("bz_a1B2c…");
@@ -191,7 +192,7 @@ describe("templates", () => {
   it("claim-notice template has NO token link — only the sign-in page", () => {
     const tpl = claimNoticeTemplate();
     expect(tpl.subject).toMatch(/agent/i);
-    expect(tpl.html).toContain("💩 Brainz");
+    expect(tpl.html).toContain("🧠 Brainz");
     expect(tpl.html).toMatch(/already have an account/i);
     expect(tpl.html).not.toContain("/claim/");
     expect(tpl.text).not.toContain("/claim/");

@@ -14,8 +14,11 @@
  *     harness can capture it (see `lastLink`). NEVER used when the binding
  *     exists, so tokens are never console-logged in production.
  *
- * Templates are Brownmatter-branded (💩 wordmark, one clear button), HTML +
- * plain-text. Nothing here logs the token in prod.
+ * Templates are Brainz-branded (one clear button), HTML + plain-text. The
+ * real Brainz mark is the zombie half-eaten brain SVG (see
+ * src/lib/components/Mark.svelte), but email clients don't render inline SVG
+ * reliably, so templates use the closest robust emoji: 🧠. Nothing here logs
+ * the token in prod.
  */
 import { createMimeMessage } from "mimetext";
 import type { SendEmail } from "@cloudflare/workers-types";
@@ -84,8 +87,9 @@ function brandedEmail(opts: {
   url: string;
   footnote: string;
 }): Template {
+  // 🧠 stands in for the zombie half-eaten brain SVG mark (SVG unsupported in email).
   const text = [
-    `💩 Brainz`,
+    `🧠 Brainz`,
     ``,
     opts.heading,
     ``,
@@ -102,7 +106,7 @@ function brandedEmail(opts: {
   const html = `<!-- ${escapeHtml(opts.preheader)} -->
 <div style="background:#0f0f11;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#e7e7ea;">
   <div style="max-width:440px;margin:0 auto;background:#17171a;border:1px solid #26262b;border-radius:14px;padding:32px;">
-    <div style="font-size:20px;font-weight:700;margin-bottom:24px;letter-spacing:-0.02em;">💩 Brainz</div>
+    <div style="font-size:20px;font-weight:700;margin-bottom:24px;letter-spacing:-0.02em;">🧠 Brainz</div>
     <h1 style="font-size:19px;font-weight:600;margin:0 0 12px;color:#fff;">${escapeHtml(opts.heading)}</h1>
     <p style="font-size:14.5px;line-height:1.55;margin:0 0 24px;color:#b7b7bd;">${escapeHtml(opts.intro)}</p>
     <a href="${escapeAttr(opts.url)}" style="display:inline-block;background:#7c5cff;color:#fff;text-decoration:none;font-weight:600;font-size:14.5px;padding:12px 22px;border-radius:9px;">${escapeHtml(opts.buttonLabel)}</a>

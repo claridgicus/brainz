@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
 	import { createApi, autoSlug, roleOf, ApiError } from "$lib/api";
+	import Mark from "$lib/components/Mark.svelte";
 
 	let { data } = $props();
 	const api = createApi(fetch);
@@ -42,7 +43,7 @@
 
 	{#if vaults.length === 0}
 		<div class="card empty">
-			<div class="mark" aria-hidden="true">&#x1F4A9;</div>
+			<div class="mark" aria-hidden="true"><Mark size={40} /></div>
 			<h2>Create your first vault</h2>
 			<p class="muted">
 				A vault is one knowledge graph — concepts, decisions, and constraints your agents share.
@@ -190,7 +191,8 @@
 		margin-bottom: 28px;
 	}
 	.empty .mark {
-		font-size: 40px;
+		display: flex;
+		justify-content: center;
 		margin-bottom: 10px;
 	}
 	.empty h2 {

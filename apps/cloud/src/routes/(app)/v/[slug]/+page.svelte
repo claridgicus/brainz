@@ -8,6 +8,7 @@
 	import ConceptEditor from "$lib/components/ConceptEditor.svelte";
 	import ConceptPanel from "$lib/components/ConceptPanel.svelte";
 	import Graph from "$lib/components/Graph.svelte";
+	import Mark from "$lib/components/Mark.svelte";
 	import Modal from "$lib/components/Modal.svelte";
 	import SearchBox from "$lib/components/SearchBox.svelte";
 
@@ -237,7 +238,7 @@
 		<div class="graph-area">
 			{#if graph.nodes.length === 0}
 				<div class="graph-empty">
-					<div class="mark" aria-hidden="true">&#x1F4A9;</div>
+					<div class="mark" aria-hidden="true"><Mark size={40} /></div>
 					<h2>An empty brain</h2>
 					<p class="muted">
 						Create your first concept here, or point your orchestrator at this vault's MCP URL
@@ -428,7 +429,8 @@
 		padding: 24px;
 	}
 	.graph-empty .mark {
-		font-size: 40px;
+		display: flex;
+		justify-content: center;
 		margin-bottom: 8px;
 	}
 	.graph-empty h2 {

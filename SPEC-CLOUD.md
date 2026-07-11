@@ -269,7 +269,7 @@ Threat model this wave closes (from the July 2026 review): (1) `signup` required
 
 ### Branding
 
-Logo mark: the 💩 (pile of poo) emoji — the Brownmatter brand joke, played straight against a polished dark UI. Wordmark: "💩 Brainz". Favicon: 💩 as an inline-SVG data-URI. Marketing site lives at brownmatter.ai; the app at brainz.brownmatter.ai.
+Logo mark (Brainz, the product): a custom zombie half-eaten brain SVG — flat pink two-lobe brain with fold squiggles, a scalloped bite out of the right side, and sickly-green ooze crumbs (`apps/cloud/src/lib/components/Mark.svelte`) — the brand joke, played straight against a polished dark UI. Wordmark: zombie-brain mark + "Brainz". Favicon: the same SVG as an inline data-URI. The 💩 (pile of poo) emoji remains the Brownmatter *company* mark (marketing wordmark "💩 Brownmatter", site favicon/touch icon). Emails fall back to 🧠 for the product mark (inline SVG is unsupported in email clients). Marketing site lives at brownmatter.ai; the app at brainz.brownmatter.ai.
 
 ### UI (Svelte 5, `src/routes/(marketing)` + `(app)`)
 

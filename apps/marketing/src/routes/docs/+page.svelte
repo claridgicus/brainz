@@ -4,7 +4,7 @@
 
 	const title = "Docs — Get started with Brainz";
 	const description =
-		"Wire Brainz into your agents in minutes: hosted remote MCP at brainz.brownmatter.ai or the local-first CLI over stdio. All thirteen MCP tools, documented.";
+		"Wire Brainz into your agents in minutes: hosted remote MCP at brainz.brownmatter.ai or the local-first CLI over stdio. All fourteen MCP tools, documented.";
 
 	const remoteMcpSnippet = `{
   "mcpServers": {
@@ -111,6 +111,15 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 				"graph edges. Returns the saved concept's metadata.",
 		},
 		{
+			name: "delete_concept",
+			title: "Delete concept",
+			description:
+				"Remove a concept from the vault and all of its outgoing edges. Use to clear a note that is wrong, " +
+				"obsolete, or junk (e.g. a probe or test node that shouldn't be in the graph). Idempotent: deleting " +
+				"an id that doesn't exist is a no-op success (deleted:false), not an error. Deletion is permanent — " +
+				"prefer upsert_concept to correct a note you want to keep. Returns { deleted, id }.",
+		},
+		{
 			name: "link_concepts",
 			title: "Link concepts",
 			description:
@@ -143,10 +152,15 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 				"your whole agent fleet shares. Call {action: \"start\"} to receive the onboarding playbook — " +
 				"instructions for fanning subagents out over the codebase and distilling product knowledge " +
 				"(domains, features, stories, specs, workflows, decisions, constraints) into concepts via " +
-				"upsert_concept, each anchored to the code with codeAreas. When the graph is written, call " +
-				"{action: \"complete\", summary} to mark the vault onboarded and store the summary. " +
-				"{action: \"status\"} reports onboarded state and concept counts. Until onboarding completes, " +
-				"search_concepts and get_context results carry a reminder to run it.",
+				"upsert_concept, each anchored to the code with codeAreas. There is NO flat concept cap — size the " +
+				"effort from the codebase; for a large project expect 200–800+ concepts and do NOT stop at a few " +
+				"dozen. Onboarding is a LOOP: index an area, then call {action: \"status\", areaList} (you supply " +
+				"your repo's source areas — Brainz can't read the repo) to see covered vs uncovered areas; keep " +
+				"indexing the uncovered ones until coverage is broad. When it is, call {action: \"complete\", " +
+				"summary, areaList} to mark the vault onboarded and store the summary — complete is coverage-gated " +
+				"and rejects if too many areas are still uncovered. {action: \"status\"} reports onboarded state, " +
+				"concept counts, and (with areaList) coverage. Until onboarding completes, search_concepts and " +
+				"get_context results carry a reminder to run it.",
 		},
 		{
 			name: "list_tasks",
@@ -242,7 +256,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 	<p>
 		An orchestrator doesn't need a pre-made account. Point it at <code>{MCP_URL}</code>
 		<em>without</em> an <code>Authorization</code> header and it gets a public MCP server exposing
-		two tools — <code>signup</code> and <code>sign_in</code> (the thirteen vault tools stay behind
+		two tools — <code>signup</code> and <code>sign_in</code> (the fourteen vault tools stay behind
 		authentication):
 	</p>
 	<pre><code>{agentSignupSnippet}</code></pre>
@@ -290,10 +304,13 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		<code>get_context</code> learns the rules <em>and</em> where to apply them.
 	</p>
 	<p>
-		When the graph is written (20–60 concepts for a mid-size product), the agent calls
-		<code>onboard</code> with <code>&lbrace;"action": "complete", "summary"&rbrace;</code>. Until
-		then, <code>search_concepts</code> and <code>get_context</code> responses carry a one-line
-		reminder — a nudge, never a wall. Local vaults get the same flow via
+		Onboarding is a loop, not a one-shot: the agent indexes an area of the codebase, calls
+		<code>onboard</code> with <code>&lbrace;"action": "status", "areaList"&rbrace;</code> to see
+		which areas are covered and which aren't, and keeps going until coverage is broad — expect
+		hundreds of concepts on a real codebase, not dozens. <code>&lbrace;"action": "complete",
+		"summary", "areaList"&rbrace;</code> is coverage-gated: it rejects if too many areas are still
+		uncovered. Until it succeeds, <code>search_concepts</code> and <code>get_context</code>
+		responses carry a one-line reminder — a nudge, never a wall. Local vaults get the same flow via
 		<code>brainz onboard</code>.
 	</p>
 
@@ -307,12 +324,13 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 	<p>Serve the vault to your agents over stdio MCP:</p>
 	<pre><code>{localMcpSnippet}</code></pre>
 	<p>
-		The vault directory can also be set via the <code>BRAINZ_VAULT</code> environment variable.
+		(Running the <code>brainz-mcp</code> binary directly? It can take the vault directory from the
+		<code>BRAINZ_VAULT</code> environment variable instead of a flag.)
 		Search is hybrid (full-text + embeddings, fused by reciprocal rank); if an embedding provider
 		isn't configured or available, it degrades gracefully to keyword-only.
 	</p>
 
-	<h2 id="tools">The thirteen MCP tools</h2>
+	<h2 id="tools">The fourteen MCP tools</h2>
 	<p>
 		These names and descriptions are the exact text your orchestrator sees — lifted from the tool
 		registry that both the hosted and local servers register from, so they never drift.

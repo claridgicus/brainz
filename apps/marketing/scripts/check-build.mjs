@@ -98,7 +98,7 @@ for (const page of ["index.html", "docs.html"]) {
 
 // --- 1c. onboarding, the task queue, and teams are documented ----------------
 // Docs carry the "Onboard your product" section, list the onboard + task tools
-// in the thirteen-tool table, and document vault membership.
+// in the fourteen-tool table, and document vault membership.
 {
 	const docs = htmlFiles.find((f) => f.endsWith("/docs.html") || f.endsWith("\\docs.html"));
 	if (docs) {
@@ -109,8 +109,8 @@ for (const page of ["index.html", "docs.html"]) {
 		if (!html.includes("Onboard this vault")) {
 			errors.push("docs.html: onboard tool missing from the tools table");
 		}
-		if (!html.includes("thirteen MCP tools")) {
-			errors.push("docs.html: tools section heading should say thirteen MCP tools");
+		if (!html.includes("fourteen MCP tools")) {
+			errors.push("docs.html: tools section heading should say fourteen MCP tools");
 		}
 		if (!html.includes("take_task")) {
 			errors.push("docs.html: missing take_task — the task tools must be documented");

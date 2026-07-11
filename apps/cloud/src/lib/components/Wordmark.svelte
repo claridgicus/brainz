@@ -1,9 +1,14 @@
+<script lang="ts">
+	import Mark from "./Mark.svelte";
+</script>
+
 <!--
-	The Brainz logo mark is the pile-of-poo emoji — lean into the Brownmatter
-	name. The chrome around it stays dark and sleek; the contrast is the point.
+	The Brainz logo mark is the zombie half-eaten brain (see Mark.svelte) — the
+	brand joke, played straight against the dark, sleek chrome. The 💩 pile-of-poo
+	stays Brownmatter's *company* mark over in apps/marketing.
 -->
 <span class="wordmark">
-	<span class="mark" aria-hidden="true">&#x1F4A9;</span>
+	<span class="mark" aria-hidden="true"><Mark size={21} /></span>
 	Brainz
 </span>
 
@@ -18,9 +23,8 @@
 		color: var(--text);
 	}
 	.mark {
-		font-size: 21px;
-		line-height: 1;
-		/* keep the glyph crisp against the dark chrome */
+		display: inline-flex;
+		/* keep the mark crisp against the dark chrome */
 		filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.4));
 	}
 </style>

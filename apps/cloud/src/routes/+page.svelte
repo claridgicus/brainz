@@ -1,6 +1,7 @@
 <script lang="ts">
 	// Minimal splash for signed-out visitors (signed-in users are redirected
 	// to /dashboard by +page.server.ts). The full pitch lives at brownmatter.ai.
+	import Mark from "$lib/components/Mark.svelte";
 </script>
 
 <svelte:head>
@@ -9,7 +10,7 @@
 </svelte:head>
 
 <main>
-	<div class="mark" aria-hidden="true">&#x1F4A9;</div>
+	<div class="mark" aria-hidden="true"><Mark size={64} /></div>
 	<h1>Brainz</h1>
 	<p class="tagline">Give your agent fleet a shared brain — free hosted knowledge graphs, one MCP URL away.</p>
 	<div class="cta">
@@ -53,7 +54,6 @@
 			var(--bg);
 	}
 	.mark {
-		font-size: 64px;
 		line-height: 1;
 		filter: drop-shadow(0 0 26px rgb(124 58 237 / 0.5)) drop-shadow(0 2px 6px rgb(0 0 0 / 0.45));
 		margin-bottom: 14px;
