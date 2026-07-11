@@ -35,6 +35,7 @@
 title: Lead Scoring
 type: feature
 tags: [crm, ranking]
+code_areas: [src/scoring/**]
 relations:
   depends_on: [contact-model]
   constrained_by: [rate-limits]
@@ -43,9 +44,11 @@ relations:
 Scores leads 0-100. Recomputed on every
 [[contact-model]] change; see [[scoring-decision]].`;
 
-	const signupSnippet = `# connect to ${MCP_URL} with NO auth header → one public tool
-→ tools/call signup { "email": "you@company.com" }
-← { "apiKey": "bz_…", "loginUrl": "${APP_URL}/api/auth/magic-link/verify?token=…", "vaultSlug": "my-vault" }`;
+	const signupSnippet = `# connect to ${MCP_URL} with NO auth header → two public tools
+→ tools/call signup { "vaultName": "Acme brain" }
+← { "apiKey": "bz_…", "vaultSlug": "acme-brain",
+    "expiresAt": "…", "claimEmailSent": false }
+# no URL of any kind in the response — approval links only ever go to the human's inbox`;
 </script>
 
 <Seo {title} {description} path="/" {schema} />
@@ -96,7 +99,8 @@ Scores leads 0-100. Recomputed on every
 					term. Inline <code>[[wiki-links]]</code> and typed relations like
 					<code>depends_on</code>, <code>part_of</code>, and <code>constrains</code> wire notes
 					into a directed graph, so context assembly follows the structure of your product instead
-					of guessing from keywords.
+					of guessing from keywords. And <code>code_areas</code> anchor each concept to the code it
+					describes — a briefed agent learns the rules <em>and</em> where to apply them.
 				</p>
 				<pre><code>{noteSnippet}</code></pre>
 			</div>
@@ -106,7 +110,8 @@ Scores leads 0-100. Recomputed on every
 				<p>
 					Point any MCP client at your hosted vault — Claude Code, or anything that speaks
 					streamable HTTP. Create an API key in the dashboard, add one entry to
-					<code>.mcp.json</code>, and all nine tools are live.
+					<code>.mcp.json</code>, and every vault tool is live — from
+					<code>search_concepts</code> to <code>take_task</code>.
 				</p>
 				<pre><code>{mcpSnippet}</code></pre>
 			</div>
@@ -131,14 +136,39 @@ Scores leads 0-100. Recomputed on every
 				</p>
 			</div>
 
+			<div class="card feature">
+				<h3>Give your fleet a work queue</h3>
+				<p>
+					Tasks are concepts too. <code>create_task</code> turns a finding into first-class work —
+					wired to its domain, the specs that govern it, and the code areas where it lands. One
+					<code>take_task</code> call claims the next open task atomically <em>and</em> returns it
+					with an auto-assembled briefing, so the agent that picks up the work starts already
+					briefed. You watch it happen on a real-time Kanban board: Open, Taken, Done.
+				</p>
+			</div>
+
+			<div class="card feature">
+				<h3>Share one brain across humans and agents</h3>
+				<p>
+					Invite teammates by email — single-use links, <code>owner</code> / <code>editor</code> /
+					<code>viewer</code> roles, enforced on every REST route and MCP call. Your colleagues
+					browse the same graph in the dashboard that your agents query over MCP. One vault, one
+					source of truth, everyone briefed from it.
+				</p>
+			</div>
+
 			<div class="card feature wide">
 				<h3>No signup form required — your agent does it</h3>
 				<p>
 					An orchestrator can provision its own brain: hit <code>{MCP_URL}</code> with no
-					credentials and the endpoint exposes a single public <code>signup</code> tool. One call
-					creates the account, a first vault, and an API key that works immediately — and returns a
-					one-time magic sign-in link the agent hands to its human, who opens it to land in the
-					dashboard. No passwords anywhere — Brainz is passwordless.
+					credentials and the endpoint exposes two public tools — <code>signup</code> and
+					<code>sign_in</code>. One <code>signup</code> call creates a provisional workspace: a
+					first vault and an API key that works immediately, no email required. The response
+					contains no URL of any kind — that's the security story. The workspace expires in 7 days
+					unless claimed: the <code>claim</code> tool emails your human an approval link the agent
+					never sees. No passwords anywhere — Brainz is passwordless. Or skip the wiring entirely:
+					tell your agent to read <a href="/docs#agent-signup">the setup flow</a> and it does the
+					rest.
 				</p>
 				<pre><code>{signupSnippet}</code></pre>
 			</div>
@@ -156,10 +186,10 @@ Scores leads 0-100. Recomputed on every
 				<div class="step-n">1</div>
 				<h3>Capture concepts</h3>
 				<p>
-					Write features, decisions, and constraints as markdown notes — or let agents capture
-					knowledge as they work with <code>upsert_concept</code>. Wiki-links and typed relations
-					grow the graph as you go. No account yet? Your agent can
-					<a href="/docs#agent-signup">sign itself up</a> and seed the vault.
+					Point your agent at an existing codebase: the <code>onboard</code> tool hands it a
+					playbook for distilling your product into the graph. Then let agents keep capturing
+					knowledge as they work with <code>upsert_concept</code>. No account yet? Your agent can
+					<a href="/docs#agent-signup">sign itself up</a> first.
 				</p>
 			</div>
 			<div class="step">
@@ -167,8 +197,8 @@ Scores leads 0-100. Recomputed on every
 				<h3>Wire the MCP</h3>
 				<p>
 					One entry in <code>.mcp.json</code>: hosted over HTTP with an API key, or local over
-					stdio. Your orchestrator sees nine tools — search, traversal, writes, and the flagship,
-					<code>get_context</code>.
+					stdio. Your orchestrator sees the full toolset — search, traversal, writes, a work
+					queue, and the flagship, <code>get_context</code>.
 				</p>
 			</div>
 			<div class="step">

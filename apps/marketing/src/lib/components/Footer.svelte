@@ -28,7 +28,7 @@
 		</div>
 	</div>
 	<div class="container legal">
-		<span>&copy; 2026 Brownmatter &middot; brownmatter.ai</span>
+		<span>&copy; {new Date().getFullYear()} Brownmatter &middot; brownmatter.ai</span>
 		<span>Free for everyone.</span>
 	</div>
 </footer>

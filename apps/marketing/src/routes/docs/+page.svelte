@@ -1,10 +1,10 @@
 <script lang="ts">
 	import Seo from "$lib/components/Seo.svelte";
-	import { APP_URL, MCP_URL, SIGNUP_URL, SITE_URL } from "$lib/links";
+	import { MCP_URL, SIGNUP_URL, SITE_URL, SKILL_URL } from "$lib/links";
 
 	const title = "Docs — Get started with Brainz";
 	const description =
-		"Wire Brainz into your agents in minutes: hosted remote MCP at brainz.brownmatter.ai or the local-first CLI over stdio. All nine MCP tools, documented.";
+		"Wire Brainz into your agents in minutes: hosted remote MCP at brainz.brownmatter.ai or the local-first CLI over stdio. All thirteen MCP tools, documented.";
 
 	const remoteMcpSnippet = `{
   "mcpServers": {
@@ -20,18 +20,22 @@
   --header "Authorization: Bearer bz_..."`;
 
 	const agentSignupSnippet = `# 1. connect UNAUTHENTICATED — no Authorization header
-#    initialize → tools/list shows exactly one tool: signup
+#    initialize → tools/list shows two public tools: signup and sign_in
 
-# 2. call it with your human's email
-→ tools/call signup { "email": "you@company.com", "vaultName": "Acme brain" }
+# 2. provision a workspace — no email, no human action required
+→ tools/call signup { "vaultName": "Acme brain" }
 
-# 3. the result is everything the agent needs
+# 3. the result is everything the agent needs — and no URL of any kind
 ← {
-    "apiKey":    "bz_…",                       // keep this — works immediately
-    "loginUrl":  "${APP_URL}/api/auth/magic-link/verify?token=…",  // deliver to your human
-    "vaultSlug": "acme-brain",
-    "email":     "you@company.com"
-  }`;
+    "apiKey":         "bz_…",              // works immediately — keep it secret
+    "vaultSlug":      "acme-brain",
+    "expiresAt":      "2026-07-18T…",      // workspace expires in 7 days unless claimed
+    "claimEmailSent": false
+  }
+
+# 4. keep it: the claim tool (authenticated) emails YOUR HUMAN an approval link
+→ tools/call claim { "email": "you@company.com" }
+← { "status": "sent", "expiresAt": "…" }   // link goes to the inbox, never to the agent`;
 
 	const localInit = `# scaffold a vault (config + concepts/ + a sample note)
 npx brainz init my-vault
@@ -144,6 +148,46 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 				"{action: \"status\"} reports onboarded state and concept counts. Until onboarding completes, " +
 				"search_concepts and get_context results carry a reminder to run it.",
 		},
+		{
+			name: "list_tasks",
+			title: "List tasks",
+			description:
+				"List the vault's work pile: `task`-type concepts with their lifecycle (open/taken/done), oldest " +
+				"first. Call to survey what's outstanding before claiming work, to check what a teammate agent is " +
+				"already doing (taskStatus \"taken\" with takenBy), or to audit completed work. Filter by taskStatus " +
+				"or by the domain the tasks are part_of. To actually pick up work, use take_task — don't just read.",
+		},
+		{
+			name: "take_task",
+			title: "Take a task off the pile",
+			description:
+				"Claim a unit of work and get briefed in one call. Pass an `id` to claim a specific task, or omit it " +
+				"to claim THE next open task (deterministic: oldest open by createdAt then id) — safe to call " +
+				"repeatedly to drain the pile. Atomically flips the task to \"taken\" and records takenBy/takenAt; " +
+				"errors if it's already taken or done. Returns the task AND an auto-assembled get_context-grade " +
+				"briefing for its part_of domain plus the concepts it realizes / is governed_by (with code_areas) — " +
+				"paste that straight into your implementation. THE CONTRACT: after implementing, verify the artifact " +
+				"matches every spec that governs the task; fix or file a new task for any discrepancy; then index the " +
+				"new/changed knowledge via upsert_concept and call complete_task.",
+		},
+		{
+			name: "complete_task",
+			title: "Complete a task",
+			description:
+				"Mark a task done once the work is in the artifact. Sets taskStatus=done + doneAt and appends your " +
+				"`outcome` to the task body as an Outcome section. The result reminds you to index what changed via " +
+				"upsert_concept so the knowledge graph stays true to the codebase — do that before moving on.",
+		},
+		{
+			name: "create_task",
+			title: "Create a task",
+			description:
+				"Turn a finding into first-class work: creates a `task`-type concept with taskStatus=open and the " +
+				"given relations — part_of a domain, `realizes` stories/features, `governed_by` specs — plus " +
+				"codeAreas pointing at where the work lands. Use when you discover work that isn't reflected in the " +
+				"codebase yet (a gap, a needed fix, a follow-up). The task then shows up in list_tasks / take_task " +
+				"and on the Kanban board.",
+		},
 	];
 </script>
 
@@ -170,7 +214,8 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		<p class="lede">
 			Two ways to run the same brain: hosted at <code>brainz.brownmatter.ai</code> (free, remote MCP
 			over HTTP) or local-first from a folder of markdown (open source CLI, MCP over stdio). Both
-			expose the identical nine tools, so your orchestrator doesn't care which one it's talking to.
+			expose the identical vault toolset, so your orchestrator doesn't care which one it's talking
+			to.
 		</p>
 	</header>
 
@@ -189,24 +234,38 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 	<p>
 		That's the whole integration. Your orchestrator can now call <code>vault_stats</code> to orient
 		itself, <code>search_concepts</code> to explore, and <code>get_context</code> to brief
-		subagents.
+		subagents. Clients that support MCP discovery can also find the server themselves via
+		<code>/.well-known/mcp.json</code> (registry name <code>ai.brownmatter/brainz</code>).
 	</p>
 
-	<h3 id="agent-signup">Agent-driven signup: no human in the loop</h3>
+	<h3 id="agent-signup">Agent-driven signup: human in the loop, not in the way</h3>
 	<p>
 		An orchestrator doesn't need a pre-made account. Point it at <code>{MCP_URL}</code>
-		<em>without</em> an <code>Authorization</code> header and it gets a public MCP server exposing a
-		single <code>signup</code> tool (the nine vault tools stay behind authentication):
+		<em>without</em> an <code>Authorization</code> header and it gets a public MCP server exposing
+		two tools — <code>signup</code> and <code>sign_in</code> (the thirteen vault tools stay behind
+		authentication):
 	</p>
 	<pre><code>{agentSignupSnippet}</code></pre>
 	<p>
 		The <code>apiKey</code> works immediately — the agent reconnects to the same endpoint with
 		<code>Authorization: Bearer bz_…</code> and can start seeding the vault right away. The
-		<code>loginUrl</code> is for the human: it's a one-time <strong>magic sign-in link</strong> —
-		opening it signs them straight into the dashboard, no password to choose (Brainz is
-		<strong>passwordless</strong>). The link is <strong>single-use</strong> and expires in about
-		<strong>15 minutes</strong>; the API key keeps working regardless of whether the human ever
-		opens it. Signups are rate-limited to 5 per hour per IP.
+		workspace is <strong>provisional</strong>: it expires in <strong>7 days</strong> unless a human
+		claims it. To keep it, the agent calls the <code>claim</code> tool with its human's email — the
+		approval link is <strong>emailed to the human and never returned to the agent</strong>, so an
+		agent can never see, open, or leak it. Passing <code>email</code> to <code>signup</code> fires
+		the same claim request in one call. Returning humans use the <code>sign_in</code> tool instead:
+		a one-time magic sign-in link lands in their inbox — no password to choose, ever (Brainz is
+		<strong>passwordless</strong>). Signups are rate-limited to 5 per hour per IP.
+	</p>
+
+	<h3 id="teams">Bring your team</h3>
+	<p>
+		A vault isn't a solo brain. From the vault's settings, owners invite teammates by email — each
+		invite is a <strong>single-use link</strong> that expires in <strong>14 days</strong> — and
+		assign a role: <code>owner</code> (everything, including keys, members, and invites),
+		<code>editor</code> (read and write concepts and tasks), or <code>viewer</code> (read-only).
+		Roles are enforced on every REST route and MCP call, so a colleague in the dashboard and an
+		agent holding an API key play by the same rules. Humans and agents share one brain.
 	</p>
 
 	<h2 id="onboard">Onboard your product</h2>
@@ -253,7 +312,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		isn't configured or available, it degrades gracefully to keyword-only.
 	</p>
 
-	<h2 id="tools">The nine MCP tools</h2>
+	<h2 id="tools">The thirteen MCP tools</h2>
 	<p>
 		These names and descriptions are the exact text your orchestrator sees — lifted from the tool
 		registry that both the hosted and local servers register from, so they never drift.
@@ -283,7 +342,8 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		One convention worth knowing: <code>get_context</code> responds with two text blocks — first the
 		assembled markdown briefing (paste it straight into a subagent prompt), then a single-line JSON
 		footer <code>&lbrace; included, truncated, approxTokens &rbrace;</code>. Every other tool
-		responds with one JSON text block.
+		responds with one JSON text block — except <code>onboard &lbrace;"action": "start"&rbrace;</code>,
+		which returns the playbook as one markdown block.
 	</p>
 
 	<h2 id="next">Where to go next</h2>
@@ -291,6 +351,11 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		<li>
 			<a href={SIGNUP_URL}>Create a free vault</a> and point an orchestrator at it — the fastest way
 			to feel the <code>get_context</code> loop.
+		</li>
+		<li>
+			Or just tell your agent to set itself up: point it at
+			<a href={SKILL_URL} rel="noopener">{SKILL_URL}</a> — one pasted prompt and it walks itself
+			through signup, key configuration, claiming the workspace for you, and onboarding.
 		</li>
 		<li>
 			<a href="#onboard">Onboard your product</a>: point your orchestrator at the vault and have it

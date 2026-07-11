@@ -65,7 +65,10 @@ for (const page of ["index.html", "docs.html"]) {
 
 // --- 1b. agent-driven signup is visible ------------------------------------
 // Landing page carries the self-provisioning feature card; docs carry the
-// agent-signup section (anchor target of the landing-page link).
+// agent-signup section (anchor target of the landing-page link). The retired
+// Wave G copy (signup returning a loginUrl) must never resurface: signup
+// returns { apiKey, vaultSlug, expiresAt, claimEmailSent } — no URL of any
+// kind; the claim approval link is only ever EMAILED to the human.
 {
 	const index = htmlFiles.find((f) => f.endsWith("/index.html") || f.endsWith("\\index.html"));
 	const docs = htmlFiles.find((f) => f.endsWith("/docs.html") || f.endsWith("\\docs.html"));
@@ -84,11 +87,18 @@ for (const page of ["index.html", "docs.html"]) {
 			errors.push("docs.html: missing the #agent-signup section");
 		}
 	}
+	for (const [file, name] of [[index, "index.html"], [docs, "docs.html"]]) {
+		if (!file) continue;
+		const html = readFileSync(file, "utf8");
+		if (html.includes("loginUrl")) {
+			errors.push(`${name}: mentions "loginUrl" — retired Wave G copy; signup returns no URL of any kind`);
+		}
+	}
 }
 
-// --- 1c. onboarding is documented -------------------------------------------
-// Docs carry the "Onboard your product" section and list the onboard tool in
-// the nine-tool table.
+// --- 1c. onboarding, the task queue, and teams are documented ----------------
+// Docs carry the "Onboard your product" section, list the onboard + task tools
+// in the thirteen-tool table, and document vault membership.
 {
 	const docs = htmlFiles.find((f) => f.endsWith("/docs.html") || f.endsWith("\\docs.html"));
 	if (docs) {
@@ -99,8 +109,14 @@ for (const page of ["index.html", "docs.html"]) {
 		if (!html.includes("Onboard this vault")) {
 			errors.push("docs.html: onboard tool missing from the tools table");
 		}
-		if (!html.includes("nine MCP tools")) {
-			errors.push("docs.html: tools section heading should say nine MCP tools");
+		if (!html.includes("thirteen MCP tools")) {
+			errors.push("docs.html: tools section heading should say thirteen MCP tools");
+		}
+		if (!html.includes("take_task")) {
+			errors.push("docs.html: missing take_task — the task tools must be documented");
+		}
+		if (!html.includes('id="teams"')) {
+			errors.push("docs.html: missing the #teams (vault membership) section");
 		}
 	}
 }

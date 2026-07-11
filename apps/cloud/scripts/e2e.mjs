@@ -1535,6 +1535,245 @@ async function main() {
     step("viewer cannot create invites → 403 (owner-only)", viewerInvite.status === 403, `status ${viewerInvite.status}`);
 
     // ================================================================
+    // 17c. MEMBERSHIP ADMIN (Wave M) — the EDITOR journey, role gates on the
+    //      admin plane, role change, last-owner protection, remove/self-leave,
+    //      and invite mismatch/revoke/resend. Emails ride DEDICATED client IPs
+    //      (see §17b) so the shared "local" bucket stays intact for §19.
+    // ================================================================
+    const ADMIN_IP = "203.0.113.78";
+    const inviteApi = (method, p, body, jar = null) =>
+      fetch(`${BASE}${p}`, {
+        method,
+        headers: {
+          origin: BASE,
+          "content-type": "application/json",
+          cookie: jar ? cookieHeader(jar) : cookieHeader(),
+          "cf-connecting-ip": ADMIN_IP,
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      }).then(async (r) => ({ status: r.status, json: await r.json().catch(() => null) }));
+
+    // --- invite an EDITOR; the list schema parses and never leaks the token.
+    const editor2Email = `editor2-${Date.now()}@example.com`;
+    const editor2Marker = devLog.length;
+    const editor2Invite = await inviteApi("POST", `/api/vaults/${vaultId}/invites`, {
+      email: editor2Email.toUpperCase(), // mixed-case in → normalized at rest
+      role: "editor",
+    });
+    step("editor invite → 201", editor2Invite.status === 201, `status ${editor2Invite.status}`);
+    assertParse(inviteCreateResponseSchema, editor2Invite.json, "invite create response parses ({invite, url})");
+    step(
+      "invite email is stored normalized-lowercase (shared choke-point)",
+      editor2Invite.json?.invite?.email === editor2Email,
+      editor2Invite.json?.invite?.email,
+    );
+    const editor2Token = new URL(editor2Invite.json.url, BASE).pathname.split("/invite/")[1];
+    const editor2Emailed = await captureInviteLink(editor2Email, editor2Marker);
+    step(
+      "the editor invite was EMAILED — capture matches the one-time url",
+      Boolean(editor2Emailed) && editor2Emailed.includes(editor2Token),
+      (editor2Emailed ?? "").slice(0, 60),
+    );
+    const pendingList = await api("GET", `/api/vaults/${vaultId}/invites`);
+    assertParse(inviteListResponseSchema, pendingList.json, "invite list parses with contract schema");
+    step(
+      "the pending list carries NO url and NO token (hashed at rest — url shown once)",
+      pendingList.json?.invites?.some((i) => i.email === editor2Email) &&
+        !JSON.stringify(pendingList.json).includes(editor2Token) &&
+        !/"url"/.test(JSON.stringify(pendingList.json)),
+      JSON.stringify(pendingList.json?.invites?.map((i) => i.email)),
+    );
+
+    // MISMATCH first: the colleague (viewer, WRONG address) cannot take it.
+    const mismatchAccept = await inviteApi(
+      "POST",
+      `/api/invites/${editor2Token}/accept`,
+      undefined,
+      colleagueJar,
+    );
+    step(
+      "accepting with the WRONG signed-in email → 403 naming both addresses",
+      mismatchAccept.status === 403 &&
+        (mismatchAccept.json?.error ?? "").includes(editor2Email) &&
+        (mismatchAccept.json?.error ?? "").includes(colleagueEmail),
+      `status ${mismatchAccept.status} — ${(mismatchAccept.json?.error ?? "").slice(0, 90)}`,
+    );
+
+    // The RIGHT address signs in and accepts over REST.
+    const editor2Jar = new Map();
+    const editor2Login = await signInViaMagicLink(editor2Email, editor2Jar, {
+      "cf-connecting-ip": ADMIN_IP,
+    });
+    step("editor signs in via magic link", editor2Login.ok, editor2Login.reason);
+    const editor2Accept = await inviteApi(
+      "POST",
+      `/api/invites/${editor2Token}/accept`,
+      undefined,
+      editor2Jar,
+    );
+    step("editor accepts the invite → 200", editor2Accept.status === 200, `status ${editor2Accept.status}`);
+    assertParse(inviteAcceptResponseSchema, editor2Accept.json, "invite accept response parses");
+    step(
+      "accept grants the invite's role on the right vault",
+      editor2Accept.json?.vaultId === vaultId &&
+        editor2Accept.json?.role === "editor" &&
+        editor2Accept.json?.alreadyMember === false,
+      JSON.stringify(editor2Accept.json),
+    );
+
+    // --- EDITOR powers: session writes YES; admin surfaces NO.
+    const editor2Vaults = await api("GET", "/api/vaults", { jar: editor2Jar });
+    step(
+      "GET /api/vaults lists by MEMBERSHIP with the caller's role (editor) + memberCount",
+      editor2Vaults.status === 200 &&
+        editor2Vaults.json?.vaults?.some(
+          (v) => v.id === vaultId && v.role === "editor" && v.memberCount === 3,
+        ),
+      JSON.stringify(editor2Vaults.json?.vaults?.map((v) => `${v.slug}:${v.role}:${v.memberCount}`)),
+    );
+    const editorUpsert = await api("POST", `/api/vaults/${vaultId}/concepts`, {
+      jar: editor2Jar,
+      body: { id: "editor-written-note", title: "Editor note", body: "written by the invited editor" },
+    });
+    step("editor CAN upsert concepts via session → 201", editorUpsert.status === 201, `status ${editorUpsert.status}`);
+    for (const [method, p, body, label] of [
+      ["GET", `/api/vaults/${vaultId}/keys`, undefined, "list keys"],
+      ["POST", `/api/vaults/${vaultId}/keys`, { name: "sneaky" }, "mint a key"],
+      ["GET", `/api/vaults/${vaultId}/invites`, undefined, "list invites"],
+      ["POST", `/api/vaults/${vaultId}/invites`, { email: "x@example.com", role: "viewer" }, "create an invite"],
+      ["PATCH", `/api/vaults/${vaultId}`, { name: "renamed-by-editor" }, "rename the vault"],
+      ["DELETE", `/api/vaults/${vaultId}`, undefined, "delete the vault"],
+    ]) {
+      const res = await api(method, p, { body, jar: editor2Jar });
+      step(`editor cannot ${label} → 403`, res.status === 403, `status ${res.status}`);
+    }
+    const editorMembersRead = await api("GET", `/api/vaults/${vaultId}/members`, { jar: editor2Jar });
+    assertParse(memberListResponseSchema, editorMembersRead.json, "members list (as editor) parses");
+    step(
+      "any member can read the roster (owner + viewer + editor = 3)",
+      editorMembersRead.status === 200 && editorMembersRead.json?.members?.length === 3,
+      `status ${editorMembersRead.status}, ${editorMembersRead.json?.members?.length} member(s)`,
+    );
+    const ownerUserId = editorMembersRead.json.members.find((m) => m.role === "owner")?.userId;
+    const colleagueUserId = editorMembersRead.json.members.find((m) => m.email === colleagueEmail)?.userId;
+    const editor2UserId = editorMembersRead.json.members.find((m) => m.email === editor2Email)?.userId;
+
+    // --- role change: owner-only; takes effect immediately.
+    const editorTriesRoleChange = await api("PATCH", `/api/vaults/${vaultId}/members/${colleagueUserId}`, {
+      jar: editor2Jar,
+      body: { role: "editor" },
+    });
+    step("an editor cannot change roles → 403 (owner-only)", editorTriesRoleChange.status === 403, `status ${editorTriesRoleChange.status}`);
+    const promoteColleague = await api("PATCH", `/api/vaults/${vaultId}/members/${colleagueUserId}`, {
+      body: { role: "editor" },
+    });
+    step(
+      "owner promotes the viewer to editor → 200 with the updated member",
+      promoteColleague.status === 200 && promoteColleague.json?.role === "editor",
+      `status ${promoteColleague.status} role=${promoteColleague.json?.role}`,
+    );
+    const promotedWrite = await fetch(`${BASE}/api/vaults/${vaultId}/concepts`, {
+      method: "POST",
+      headers: { origin: BASE, "content-type": "application/json", cookie: cookieHeader(colleagueJar) },
+      body: JSON.stringify({ title: "Promoted note", body: "the promoted member can write now" }),
+    });
+    step("the promoted member can write immediately → 201", promotedWrite.status === 201, `status ${promotedWrite.status}`);
+    const demoteColleague = await api("PATCH", `/api/vaults/${vaultId}/members/${colleagueUserId}`, {
+      body: { role: "viewer" },
+    });
+    step("owner demotes back to viewer → 200", demoteColleague.status === 200 && demoteColleague.json?.role === "viewer", `status ${demoteColleague.status}`);
+    const demotedWrite = await fetch(`${BASE}/api/vaults/${vaultId}/concepts`, {
+      method: "POST",
+      headers: { origin: BASE, "content-type": "application/json", cookie: cookieHeader(colleagueJar) },
+      body: JSON.stringify({ title: "Planted", body: "demoted viewer must not write" }),
+    });
+    step("the demoted member is read-only again → 403", demotedWrite.status === 403, `status ${demotedWrite.status}`);
+
+    // --- LAST-OWNER protection: cannot be demoted, removed, or leave.
+    const demoteLastOwner = await api("PATCH", `/api/vaults/${vaultId}/members/${ownerUserId}`, {
+      body: { role: "editor" },
+    });
+    step(
+      "demoting the LAST owner → 409",
+      demoteLastOwner.status === 409 && /last owner/.test(demoteLastOwner.json?.error ?? ""),
+      `status ${demoteLastOwner.status} — ${(demoteLastOwner.json?.error ?? "").slice(0, 70)}`,
+    );
+    const lastOwnerLeaves = await api("DELETE", `/api/vaults/${vaultId}/members/${ownerUserId}`);
+    step("the LAST owner cannot leave → 409", lastOwnerLeaves.status === 409, `status ${lastOwnerLeaves.status}`);
+
+    // --- removal semantics: editors cannot remove others; self-leave works;
+    //     owner removal strips access instantly (404, no existence leak).
+    const editorRemovesColleague = await api("DELETE", `/api/vaults/${vaultId}/members/${colleagueUserId}`, { jar: editor2Jar });
+    step("an editor cannot remove OTHER members → 403", editorRemovesColleague.status === 403, `status ${editorRemovesColleague.status}`);
+    const editor2Leaves = await api("DELETE", `/api/vaults/${vaultId}/members/${editor2UserId}`, { jar: editor2Jar });
+    step("a non-owner may LEAVE (self-delete) → 204", editor2Leaves.status === 204, `status ${editor2Leaves.status}`);
+    const leftEditorRead = await api("GET", `/api/vaults/${vaultId}`, { jar: editor2Jar });
+    step("after leaving, the vault is 404 for the ex-editor", leftEditorRead.status === 404, `status ${leftEditorRead.status}`);
+    const removeColleague = await api("DELETE", `/api/vaults/${vaultId}/members/${colleagueUserId}`);
+    step("owner removes the viewer → 204", removeColleague.status === 204, `status ${removeColleague.status}`);
+    const removedColleagueRead = await fetch(`${BASE}/api/vaults/${vaultId}/stats`, {
+      headers: { origin: BASE, cookie: cookieHeader(colleagueJar) },
+    });
+    step("the removed member's access is gone → 404", removedColleagueRead.status === 404, `status ${removedColleagueRead.status}`);
+
+    // --- revoke: a revoked pending invite's token is dead; double-revoke 404.
+    const revokeeInvite = await inviteApi("POST", `/api/vaults/${vaultId}/invites`, {
+      email: `revokee-${Date.now()}@example.com`,
+      role: "viewer",
+    });
+    const revokeeToken = new URL(revokeeInvite.json.url, BASE).pathname.split("/invite/")[1];
+    const revokeInv = await api("DELETE", `/api/vaults/${vaultId}/invites/${revokeeInvite.json.invite.id}`);
+    step("owner revokes a pending invite → 204", revokeInv.status === 204, `status ${revokeInv.status}`);
+    const revokedAccept = await inviteApi("POST", `/api/invites/${revokeeToken}/accept`, undefined, colleagueJar);
+    step("a revoked token never accepts → 410", revokedAccept.status === 410, `status ${revokedAccept.status}`);
+    const revokeAgain = await api("DELETE", `/api/vaults/${vaultId}/invites/${revokeeInvite.json.invite.id}`);
+    step("revoking an already-revoked invite → 404", revokeAgain.status === 404, `status ${revokeAgain.status}`);
+
+    // --- resend: ROTATES the token (old emailed link dies), re-emails, and
+    //     returns a fresh one-time url.
+    const resendeeEmail = `resendee-${Date.now()}@example.com`;
+    const resendeeInvite = await inviteApi("POST", `/api/vaults/${vaultId}/invites`, {
+      email: resendeeEmail,
+      role: "viewer",
+    });
+    const resendeeToken1 = new URL(resendeeInvite.json.url, BASE).pathname.split("/invite/")[1];
+    const resendMarker = devLog.length;
+    const resend = await inviteApi(
+      "POST",
+      `/api/vaults/${vaultId}/invites/${resendeeInvite.json.invite.id}/resend`,
+      undefined,
+    );
+    step("resend → 200 {invite, url}", resend.status === 200, `status ${resend.status}`);
+    assertParse(inviteCreateResponseSchema, resend.json, "invite resend response parses ({invite, url})");
+    const resendeeToken2 = new URL(resend.json.url, BASE).pathname.split("/invite/")[1];
+    step("the resent token DIFFERS from the original", Boolean(resendeeToken2) && resendeeToken2 !== resendeeToken1);
+    const resentEmailed = await captureInviteLink(resendeeEmail, resendMarker);
+    step(
+      "the resend was EMAILED — capture matches the new url",
+      Boolean(resentEmailed) && resentEmailed.includes(resendeeToken2),
+      (resentEmailed ?? "").slice(0, 60),
+    );
+    const supersededAccept = await inviteApi("POST", `/api/invites/${resendeeToken1}/accept`, undefined, colleagueJar);
+    step("the SUPERSEDED (pre-resend) token is dead → 410", supersededAccept.status === 410, `status ${supersededAccept.status}`);
+    const resentPage = await fetch(`${BASE}/invite/${resendeeToken2}`, { headers: { origin: BASE } });
+    const resentPageHtml = await resentPage.text();
+    step(
+      "the RESENT token's invite page is live (renders the vault + invited email)",
+      resentPage.status === 200 && resentPageHtml.includes(resendeeEmail),
+      `status ${resentPage.status}`,
+    );
+
+    // --- expiry setup: mint one more invite now; §20's restart backdates its
+    //     expires_at and asserts the token is dead.
+    const expireeEmail = `expiree-${Date.now()}@example.com`;
+    const expireeInvite = await inviteApi("POST", `/api/vaults/${vaultId}/invites`, {
+      email: expireeEmail,
+      role: "editor",
+    });
+    const expireeToken = new URL(expireeInvite.json.url, BASE).pathname.split("/invite/")[1];
+    step("expiry setup: invite minted (backdated + asserted in §20)", Boolean(expireeToken));
+
+    // ================================================================
     // 18. VAULT LIFECYCLE — rename, slug clash, concept delete, vault delete.
     // ================================================================
 
@@ -1675,6 +1914,11 @@ async function main() {
       "wrangler", "d1", "execute", "brainz", "--local", "--persist-to", STATE_DIR,
       "--command", "UPDATE user SET expires_at = 1000 WHERE email LIKE '%@pending.brainz.invalid'",
     ]);
+    // …and backdate the §17c expiry invite in the same exclusive-D1 window.
+    run("npx", [
+      "wrangler", "d1", "execute", "brainz", "--local", "--persist-to", STATE_DIR,
+      "--command", "UPDATE vault_invite SET expires_at = 1000 WHERE accepted_at IS NULL",
+    ]);
     dev = startDev();
     await waitForReady(dev);
 
@@ -1713,6 +1957,32 @@ async function main() {
       "claimed workspace's key still works past the window (account permanent)",
       claimedStill.status === 200,
       `status ${claimedStill.status}`,
+    );
+
+    // Wave M expiry: the §17c invite is now past its (backdated) expires_at —
+    // the token neither accepts nor renders, and it drops off the pending list.
+    const expiredInviteAccept = await fetch(`${BASE}/api/invites/${expireeToken}/accept`, {
+      method: "POST",
+      headers: { origin: BASE, cookie: cookieHeader() },
+    });
+    step(
+      "an EXPIRED invite token never accepts → 410",
+      expiredInviteAccept.status === 410,
+      `status ${expiredInviteAccept.status}`,
+    );
+    const expiredInvitePage = await fetch(`${BASE}/invite/${expireeToken}`, { headers: { origin: BASE } });
+    const expiredInviteHtml = await expiredInvitePage.text();
+    step(
+      "the expired token's invite page no longer offers the vault",
+      expiredInvitePage.status === 200 && !expiredInviteHtml.includes(expireeEmail),
+      `status ${expiredInvitePage.status}`,
+    );
+    const expiredPending = await api("GET", `/api/vaults/${vaultId}/invites`);
+    step(
+      "expired invites drop out of the pending list",
+      expiredPending.status === 200 &&
+        !(expiredPending.json?.invites ?? []).some((i) => i.email === expireeEmail),
+      JSON.stringify(expiredPending.json?.invites?.map((i) => i.email)),
     );
   } catch (err) {
     failed++;
