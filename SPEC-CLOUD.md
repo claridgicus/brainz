@@ -171,6 +171,18 @@ The tenant unit becomes the **project** — human-readable name, many users ↔ 
 - **UI**: project picker in the (app) header (current project name + dropdown: switch, create, invite chip showing pending count); dashboard groups by membership; settings gains Members (list, roles, remove) + Invites (create w/ role, copy URL, revoke) sections; rename stays; create-project flow asks for a human-readable name (slug auto).
 - **Contracts**: project/member/invite schemas + updated key schemas in api.ts; CONTRACTS_VERSION bump. REST routes move to `/api/projects/...` with `/api/vaults` kept as deprecated aliases until the UI/e2e migrate (delete aliases in the same wave if all callers are updated — preferred).
 
+### User-definable concept types + per-vault type registry (Wave TR)
+
+Make concept types **data, not a hardcoded enum** — per-vault, user-definable, weighted, editable in the UI. Defaults reproduce today's 11 types + behavior EXACTLY.
+
+- **Type registry (per-vault):** a `concept_type` registry in the VaultDO (id/key, label, color, weight, order/hidden). On vault create it's SEEDED with the 11 built-in types (concept, domain, feature, story, spec, workflow, decision, constraint, pattern, glossary, task) with their CURRENT colors + a signal `weight` matching today's LOD ranking (domain highest → … → glossary/concept/task lowest). So a fresh vault behaves identically to now.
+- **Users can:** add a custom type (key + label + color + weight), rename/recolor/re-weight/reorder/hide any type (including built-ins), via a settings UI panel. Deleting/hiding a built-in that concepts still use → reassign-or-block (don't orphan; simplest: hide, don't hard-delete if in use).
+- **Wire safety (critical):** concept `type` stops being a strict zod enum and becomes a **validated string that must resolve to a key in the vault's type registry**; an unknown/removed type FALLS BACK to `concept` (matching the existing unknown-type behavior). Engine/contracts: replace the `ConceptType` union's enforcement at the boundary with registry validation; keep the 11 keys as the documented defaults + the ontology the onboarding playbook teaches. Do NOT break: onboarding playbook (still teaches the default ontology), computeCoverage, tenancy, existing concepts.
+- **Weight drives everything from ONE source:** the per-vault type weights feed the semantic zoom-LOD tiers (`typesVisibleAtZoom` reads registry weights, not a hardcoded ranking), node sizing, and the default-visible-type set. Re-weighting a type in the UI immediately changes where it appears in the zoom progression + its size.
+- **Contracts/REST:** type-registry schemas + CRUD endpoints (`GET/POST/PATCH/DELETE /api/vaults/:id/types`, owner/editor-gated per the role model); graph/concept responses carry the resolved type meta (color/weight) so the UI renders custom types. CONTRACTS_VERSION bump. MCP: `upsert_concept` accepts any registry type; a `list_types`/`define_type` tool is optional (note if deferred).
+- **UI:** vault settings gains a "Concept types" panel (list built-in + custom, edit label/color/weight/order/hide, add custom); the graph palette + type-filter chips + zoom-LOD + sizing all read the registry. Obsidian-dark.
+- **Sequencing:** builds ON TOP of the semantic-zoom-LOD work (the LOD signal ranking becomes registry weights) — do NOT build in parallel with it.
+
 ### Onboarding at scale — coverage-driven continue/status loop (Wave O-scale)
 
 **Problem:** the onboarding playbook says "target 20–60 concepts," so agents stop at ~40 even on a 500+ concept codebase — they obey a flat cap that's wrong for large repos. Fix: make onboarding size-aware, resumable, and coverage-gated so it indexes the WHOLE project.
