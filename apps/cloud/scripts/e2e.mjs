@@ -50,6 +50,7 @@ import {
   onboardStatusOutputSchema,
   relatedResponseSchema,
   searchResponseSchema,
+  signInOutputSchema,
   signupOutputSchema,
   statsResponseSchema,
   upsertConceptOutputSchema,
@@ -781,8 +782,8 @@ async function main() {
     const pubTools = await pub.listTools();
     const pubNames = pubTools.tools.map((t) => t.name);
     step(
-      "unauthenticated tools/list is exactly [signup] — no vault tools, no claim",
-      JSON.stringify(pubNames) === JSON.stringify(["signup"]) &&
+      "unauthenticated tools/list is exactly [signup, sign_in] — no vault tools, no claim",
+      JSON.stringify(pubNames) === JSON.stringify(["signup", "sign_in"]) &&
         !pubNames.some((n) => MCP_TOOL_NAMES.includes(n)) &&
         !pubNames.includes("claim"),
       pubNames.join(", "),
@@ -820,6 +821,61 @@ async function main() {
       signupBlocks.length === 2 && /SECRET/i.test(signupBlocks[1]) && /`claim`/.test(signupBlocks[1]),
       (signupBlocks[1] ?? "").slice(0, 70),
     );
+
+    // 12b. PUBLIC sign_in: emails a magic sign-in link for a returning human.
+    // CRITICAL: the tool result carries NO login URL — the human must action
+    // the emailed link. We prove the mailer/send path fired by capturing the
+    // emailed magic link from the DevMailer output, and that the result leaks
+    // nothing about account existence.
+    const signInEmail = `signin-${Date.now()}@example.com`;
+    const signInMarker = devLog.length;
+    const signInRes = await pub.callTool({ name: "sign_in", arguments: { email: signInEmail } });
+    const signInBlocks = signInRes.content.filter((c) => c.type === "text").map((c) => c.text);
+    step(
+      "public sign_in call succeeds",
+      signInRes.isError !== true,
+      signInRes.isError ? (signInBlocks[0] ?? "").slice(0, 160) : "",
+    );
+    const signInPayload = JSON.parse(signInBlocks[0]);
+    assertParse(signInOutputSchema, signInPayload, "sign_in output parses with contract schema");
+    step(
+      "sign_in result is the generic {status:'sent'} and carries NO login URL of any kind",
+      signInPayload.status === "sent" &&
+        !("loginUrl" in signInPayload) &&
+        !("url" in signInPayload) &&
+        !signInBlocks.some((t) => /https?:\/\//.test(t)),
+      signInBlocks.join(" | ").slice(0, 80),
+    );
+    step(
+      "sign_in confirmation tells the human to action the link from their inbox",
+      signInBlocks.some((t) => /inbox/i.test(t)),
+    );
+    // The magic link itself is EMAILED — captured from the mailer, never returned.
+    const signInUrl = await captureLink(signInEmail, signInMarker);
+    step(
+      "sign_in EMAILED a magic-link (mailer/send path invoked) — link only in the email",
+      Boolean(signInUrl) && /magic-link\/verify/.test(signInUrl ?? ""),
+      (signInUrl ?? "").slice(0, 70),
+    );
+
+    // Rate limit: 5 sign-in emails/hour/email. The 6th for the SAME address in
+    // the window trips a friendly isError with no existence leak.
+    let signInThrottled = false;
+    for (let i = 0; i < 6; i++) {
+      const r = await pub.callTool({ name: "sign_in", arguments: { email: signInEmail } });
+      if (r.isError === true) {
+        signInThrottled = true;
+        const t = r.content.find((c) => c.type === "text")?.text ?? "";
+        step(
+          "sign_in rate-limit trips with a friendly message (no existence leak)",
+          /rate limit/i.test(t) && !/account (exists|not found)/i.test(t),
+          t.slice(0, 80),
+        );
+        break;
+      }
+    }
+    step("sign_in rate limit is enforced within the window", signInThrottled);
+
     const claimedKey = signupPayload.apiKey;
 
     // the returned apiKey works immediately on the authenticated MCP surface

@@ -571,9 +571,27 @@ export const signupOutputSchema = z
   })
   .strict();
 
+export const signInInputSchema = z.object({
+  email: z
+    .string()
+    .email()
+    .describe(
+      "Your human's email address. A magic sign-in link is EMAILED there — it is NEVER returned to " +
+        "you, so do not ask for it or try to open it; your human must click it from their inbox.",
+    ),
+});
+
+export const signInOutputSchema = z
+  .object({
+    /** Always "sent" — a deliberately generic confirmation (no account-existence leak). */
+    status: z.literal("sent"),
+  })
+  .strict();
+
 /**
  * PUBLIC_MCP_TOOLS — the toolset an UNAUTHENTICATED /mcp connection sees on
- * Brainz Cloud: exactly one tool, `signup`. It is deliberately NOT part of
+ * Brainz Cloud: `signup` (provision an anonymous workspace) and `sign_in`
+ * (email a returning human a magic sign-in link). Deliberately NOT part of
  * MCP_TOOLS (the local stdio server has no accounts, and the authenticated
  * remote surface stays the vault tools).
  */
@@ -593,12 +611,27 @@ export const PUBLIC_MCP_TOOLS = [
     inputSchema: signupInputSchema,
     outputSchema: signupOutputSchema,
   },
+  {
+    name: "sign_in",
+    title: "Sign in (email a magic sign-in link)",
+    description:
+      "Request a magic SIGN-IN email for a human who ALREADY has a Brainz Cloud account (use `signup` " +
+      "to create a new workspace). A one-time sign-in link is EMAILED to the address — it is NEVER " +
+      "returned to you, so do not ask for it or try to open it. Tell your human to open their inbox " +
+      "and click the link; that is the ONLY way to complete sign-in. The result only confirms an " +
+      "email is on its way and reveals nothing about whether the address has an account. Rate-limited " +
+      "to 5 sign-in emails per hour per address.",
+    inputSchema: signInInputSchema,
+    outputSchema: signInOutputSchema,
+  },
 ] as const;
 
 export type PublicMcpTool = (typeof PUBLIC_MCP_TOOLS)[number];
 export type PublicMcpToolName = PublicMcpTool["name"];
 export type SignupInput = z.infer<typeof signupInputSchema>;
 export type SignupOutput = z.infer<typeof signupOutputSchema>;
+export type SignInInput = z.infer<typeof signInInputSchema>;
+export type SignInOutput = z.infer<typeof signInOutputSchema>;
 
 // ------------------------------------------------------- cloud-only (authed)
 

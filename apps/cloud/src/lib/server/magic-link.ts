@@ -27,7 +27,7 @@
  */
 import type { CloudEnv } from "../../app.d";
 import { APPROVE_REDIRECT_TTL_SECONDS, createAuth, PRODUCTION_ORIGIN } from "./auth";
-import type { Mailer } from "./mailer";
+import { createMailer, type Mailer } from "./mailer";
 
 /**
  * Returns a function that mints a magic sign-in link for an email and returns
@@ -66,5 +66,45 @@ export function magicLinkMinter(
       throw new Error("failed to mint magic sign-in link");
     }
     return captured;
+  };
+}
+
+/**
+ * Returns a function that triggers Better Auth to EMAIL a magic sign-in link to
+ * an address (the same path the /login page uses) — used by the public `sign_in`
+ * MCP tool. Unlike `magicLinkMinter`, the URL is NEVER captured or returned: it
+ * travels only in the email the env-selected mailer delivers, so the human must
+ * action it from their inbox. Delivery failures are swallowed (the production
+ * mailer already logs its own; we defend against any other throw) so a send
+ * problem never turns into an account-existence oracle or a 500.
+ *
+ * Better Auth's `signInMagicLink` mints a real single-use, hashed token and
+ * calls the configured `sendMagicLink`, which delivers via the real mailer. If
+ * the address has no account yet, Better Auth signs it up on first verify — but
+ * for `sign_in` the tool result is generic either way, so nothing leaks.
+ */
+export function magicLinkSender(
+  env: CloudEnv,
+  requestOrigin: string,
+): (email: string) => Promise<void> {
+  const base = env.BETTER_AUTH_URL || requestOrigin || PRODUCTION_ORIGIN;
+  const host = new URL(base).host;
+  return async (email: string) => {
+    // Real, env-selected mailer: the link is EMAILED, never returned.
+    const auth = createAuth({ ...env, BETTER_AUTH_URL: base }, createMailer(env));
+    const headers = new Headers({ host, origin: base, "content-type": "application/json" });
+    try {
+      await auth.api.signInMagicLink({
+        body: { email, callbackURL: "/dashboard" },
+        headers,
+      });
+    } catch (err) {
+      // Never fail (or leak) on a delivery/mint hiccup — the tool response is
+      // deliberately generic. The mailer itself already logs real send errors.
+      // eslint-disable-next-line no-console
+      console.error(
+        `[sign_in] magic-link send failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   };
 }

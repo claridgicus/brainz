@@ -1,7 +1,7 @@
 import { building } from "$app/environment";
 import type { Handle } from "@sveltejs/kit";
 import { svelteKitHandler } from "better-auth/svelte-kit";
-import { createAuth } from "$lib/server/auth";
+import { createAuth, isProductionEnv } from "$lib/server/auth";
 import { createDb } from "$lib/server/db";
 import {
   guardDepsFromDb,
@@ -9,6 +9,7 @@ import {
   MAGIC_LINK_REQUEST_PATH,
   throttleResponse,
 } from "$lib/server/magic-link-guard";
+import { resolveRateLimitIp } from "$lib/server/rate-limit";
 
 /** Extract the email from a magic-link request body without consuming it. */
 async function readMagicLinkEmail(request: Request): Promise<string | null> {
@@ -36,10 +37,17 @@ export const handle: Handle = async ({ event, resolve }) => {
   if (event.request.method === "POST" && event.url.pathname === MAGIC_LINK_REQUEST_PATH) {
     const email = await readMagicLinkEmail(event.request);
     if (email) {
-      const ip = event.request.headers.get("cf-connecting-ip") ?? "local";
+      // Fail closed on a missing cf-connecting-ip in production (audit LOW):
+      // header-less traffic must not share one permissive "local" bucket that a
+      // single actor could exhaust to DoS every other header-less client.
+      const resolvedIp = resolveRateLimitIp(
+        event.request.headers.get("cf-connecting-ip"),
+        isProductionEnv(event.platform.env),
+      );
+      if (!resolvedIp.ok) return throttleResponse();
       const { throttled } = await guardMagicLinkRequest(
         guardDepsFromDb(createDb(event.platform.env.DB)),
-        { email, ip },
+        { email, ip: resolvedIp.ip },
       );
       if (throttled) return throttleResponse();
     }

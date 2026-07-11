@@ -241,8 +241,12 @@ describe("requestClaim", () => {
     expect(state.claims).toHaveLength(0);
   });
 
-  it("throttled by the email window → error result, nothing sent, not recorded", async () => {
-    const { db, state } = fakeDb({ emailCount: MAGIC_LINK_EMAIL_LIMIT });
+  it("throttled by the email window → error result, nothing sent (attempt still recorded)", async () => {
+    // TOCTOU-safe guard (record-before-count, inclusive `count > limit`): the
+    // inclusive window count already PAST the email cap trips the throttle. The
+    // attempt is recorded FIRST (it counts toward the window), so a throttled
+    // request DOES leave a magic_link_events row — but no claim/email is sent.
+    const { db, state } = fakeDb({ emailCount: MAGIC_LINK_EMAIL_LIMIT + 1 });
     const { mailer, sent } = fakeMailer();
     const result = await requestClaim(deps(db, mailer), {
       userId: "user-1",
@@ -251,11 +255,12 @@ describe("requestClaim", () => {
     expect(result).toMatchObject({ ok: false, reason: "throttled" });
     expect(sent).toHaveLength(0);
     expect(state.claims).toHaveLength(0);
-    expect(state.magicLinkEvents).toHaveLength(0);
+    // Recorded first (TOCTOU-safe order) — the attempt counts toward the window.
+    expect(state.magicLinkEvents).toHaveLength(1);
   });
 
   it("throttled by the IP window too", async () => {
-    const { db } = fakeDb({ ipCount: MAGIC_LINK_IP_LIMIT });
+    const { db } = fakeDb({ ipCount: MAGIC_LINK_IP_LIMIT + 1 });
     const { mailer } = fakeMailer();
     const result = await requestClaim(deps(db, mailer), {
       userId: "user-1",
@@ -488,7 +493,8 @@ describe("handleClaimTool (cloud-only MCP tool)", () => {
   });
 
   it("throttled → isError mentioning the rate limit", async () => {
-    const { db } = fakeDb({ emailCount: MAGIC_LINK_EMAIL_LIMIT });
+    // Inclusive (count > limit) guard: over the cap trips the throttle.
+    const { db } = fakeDb({ emailCount: MAGIC_LINK_EMAIL_LIMIT + 1 });
     const { mailer } = fakeMailer();
     const result = await handleClaimTool({ email: "human@example.com" }, toolDeps(db, mailer));
     expect(result.isError).toBe(true);

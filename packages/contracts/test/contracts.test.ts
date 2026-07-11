@@ -21,6 +21,8 @@ import {
   PUBLIC_MCP_TOOLS,
   PUBLIC_MCP_TOOL_NAMES,
   searchConceptsOutputSchema,
+  signInInputSchema,
+  signInOutputSchema,
   signupInputSchema,
   signupOutputSchema,
   toolConceptMetaSchema,
@@ -78,13 +80,14 @@ describe("MCP_TOOLS registry", () => {
 });
 
 describe("PUBLIC_MCP_TOOLS registry (unauthenticated /mcp surface)", () => {
-  it("declares exactly one tool: signup", () => {
-    expect(PUBLIC_MCP_TOOL_NAMES).toEqual(["signup"]);
-    expect(PUBLIC_MCP_TOOLS).toHaveLength(1);
+  it("declares exactly two tools: signup + sign_in", () => {
+    expect(PUBLIC_MCP_TOOL_NAMES).toEqual(["signup", "sign_in"]);
+    expect(PUBLIC_MCP_TOOLS).toHaveLength(2);
   });
 
-  it("signup is NOT one of the 9 authenticated vault tools", () => {
+  it("neither public tool is one of the 9 authenticated vault tools", () => {
     expect(MCP_TOOL_NAMES).not.toContain("signup");
+    expect(MCP_TOOL_NAMES).not.toContain("sign_in");
   });
 
   it("signup carries a title, an orchestrator-facing description, and zod schemas", () => {
@@ -129,6 +132,32 @@ describe("PUBLIC_MCP_TOOLS registry (unauthenticated /mcp surface)", () => {
     expect(signupOutputSchema.safeParse({ ...payload, loginUrl: "https://x" }).success).toBe(false);
     expect(signupOutputSchema.safeParse({ ...payload, claimUrl: "https://x" }).success).toBe(false);
     expect(signupOutputSchema.safeParse({ ...payload, email: "h@x.com" }).success).toBe(false);
+  });
+
+  it("sign_in requires a valid email and its description says the link is EMAILED, never returned", () => {
+    const signIn = PUBLIC_MCP_TOOLS.find((t) => t.name === "sign_in")!;
+    expect(signIn).toBeDefined();
+    expect(signIn.title.length).toBeGreaterThan(0);
+    expect(signIn.description.length).toBeGreaterThan(50);
+    // Teaches the guardrail model: the link is emailed and never handed back.
+    expect(signIn.description).toMatch(/EMAIL/i);
+    expect(signIn.description).toMatch(/NEVER returned/i);
+    expect(signIn.description).toMatch(/inbox/i);
+    // A valid email is required; anything else is rejected.
+    expect(signInInputSchema.safeParse({ email: "human@example.com" }).success).toBe(true);
+    expect(signInInputSchema.safeParse({ email: "nope" }).success).toBe(false);
+    expect(signInInputSchema.safeParse({}).success).toBe(false);
+  });
+
+  it("sign_in output is the generic strict {status:'sent'} — NO URL leaks", () => {
+    expect(signInOutputSchema.safeParse({ status: "sent" }).success).toBe(true);
+    // Strict shape: a login URL of any kind is a contract violation.
+    expect(signInOutputSchema.safeParse({ status: "sent", loginUrl: "https://x" }).success).toBe(
+      false,
+    );
+    expect(signInOutputSchema.safeParse({ status: "sent", url: "https://x" }).success).toBe(false);
+    // The status is a fixed literal — no other value is valid.
+    expect(signInOutputSchema.safeParse({ status: "queued" }).success).toBe(false);
   });
 });
 

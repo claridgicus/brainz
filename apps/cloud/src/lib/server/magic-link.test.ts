@@ -51,7 +51,8 @@ vi.mock("./auth", async () => {
 });
 
 import { APPROVE_REDIRECT_TTL_SECONDS, MAGIC_LINK_TTL_SECONDS } from "./auth";
-import { magicLinkMinter } from "./magic-link";
+import { magicLinkMinter, magicLinkSender } from "./magic-link";
+import { DevMailer } from "./mailer";
 import type { CloudEnv } from "../../app.d";
 
 const ENV = { DB: {}, BETTER_AUTH_SECRET: "s", BETTER_AUTH_URL: "https://brainz.brownmatter.ai" } as unknown as CloudEnv;
@@ -77,5 +78,33 @@ describe("magicLinkMinter", () => {
     // The load-bearing guarantee: the redirect URL never outlives an emailed
     // link — it only has to survive one immediate 303.
     expect(pinned).toBeLessThan(MAGIC_LINK_TTL_SECONDS);
+  });
+});
+
+describe("magicLinkSender (sign_in — EMAIL the link, never return it)", () => {
+  it("delivers a magic link through the real (env-selected) mailer and returns nothing", async () => {
+    // ENV has no SEND_EMAIL binding → createMailer picks the DevMailer, which
+    // captures the 'sent' link in lastLink. Assert the send path was invoked.
+    const send = magicLinkSender(ENV, "https://brainz.brownmatter.ai");
+    const returned = await send("human@example.com");
+    // sign_in must not hand back a URL — it returns void.
+    expect(returned).toBeUndefined();
+    // The mailer createMailer(env) supplied to createAuth is a DevMailer (no
+    // SEND_EMAIL binding); the fake auth drove its sendMagicLink, so its
+    // lastLink captures the send — proving the mailer/send path was invoked.
+    expect(createAuthCalls).toHaveLength(1);
+    const mailer = createAuthCalls[0].mailer as DevMailer;
+    expect(mailer).toBeInstanceOf(DevMailer);
+    expect(mailer.lastLink).not.toBeNull();
+    expect(mailer.lastLink!.to).toBe("human@example.com");
+    expect(mailer.lastLink!.url).toContain("/magic-link/verify?token=");
+  });
+
+  it("does NOT pin the short approve TTL — sign_in emails the normal-lifetime link", async () => {
+    const send = magicLinkSender(ENV, "https://brainz.brownmatter.ai");
+    await send("human@example.com");
+    expect(createAuthCalls).toHaveLength(1);
+    // magicLinkSender passes no opts override → the normal emailed TTL applies.
+    expect(createAuthCalls[0].opts?.magicLinkTtlSeconds).toBeUndefined();
   });
 });

@@ -1,7 +1,8 @@
 /**
  * Magic-link request limiter (audit HIGH): per-email 5/hour + per-IP 20/hour,
- * durable (D1-backed). Tested against a fake GuardDeps so the boundary and
- * record behaviour are verified without a Workers runtime.
+ * durable (D1-backed) and TOCTOU-safe (record-then-count). Tested against a
+ * fake GuardDeps so the boundary, atomicity, and record behaviour are verified
+ * without a Workers runtime.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -9,56 +10,122 @@ import {
   MAGIC_LINK_REQUEST_PATH,
   throttleResponse,
   type GuardDeps,
+  type GuardResult,
 } from "./magic-link-guard";
+import { MAGIC_LINK_EMAIL_LIMIT, MAGIC_LINK_IP_LIMIT, rateWindowStart } from "./rate-limit";
 
 const NOW = new Date("2026-07-10T12:00:00.000Z");
 
-function fakeDeps(counts: { email?: number; ip?: number } = {}) {
-  const recorded: { email: string; ip: string; at: Date }[] = [];
+/**
+ * A fake store that models the ATOMIC insert-then-count contract: `record`
+ * appends a row, and the counts reflect all rows within the window INCLUDING
+ * rows recorded by this same request. This is what a durable D1 counter gives
+ * us and is exactly what the TOCTOU fix relies on.
+ */
+function fakeStore(now: Date = NOW) {
+  const rows: { email: string; ip: string; at: Date }[] = [];
+  const since = rateWindowStart(now);
   const deps: GuardDeps = {
-    now: () => NOW,
-    countRecentByEmail: async () => counts.email ?? 0,
-    countRecentByIp: async () => counts.ip ?? 0,
+    now: () => now,
     record: async (e) => {
-      recorded.push(e);
+      rows.push(e);
     },
+    countRecentByEmail: async (email) =>
+      rows.filter((r) => r.email === email && r.at > since).length,
+    countRecentByIp: async (ip) => rows.filter((r) => r.ip === ip && r.at > since).length,
   };
-  return { deps, recorded };
+  return { deps, rows };
+}
+
+/** A fake seeded with a fixed pre-existing window count (record still appends). */
+function seededStore(counts: { email?: number; ip?: number }) {
+  const { deps, rows } = fakeStore();
+  for (let i = 0; i < (counts.email ?? 0); i++) {
+    rows.push({ email: "u@example.com", ip: `seed-email-${i}`, at: NOW });
+  }
+  for (let i = 0; i < (counts.ip ?? 0); i++) {
+    rows.push({ email: `seed-ip-${i}@example.com`, ip: "1.2.3.4", at: NOW });
+  }
+  return { deps, rows };
 }
 
 describe("guardMagicLinkRequest", () => {
-  it("allows and records a request under both limits", async () => {
-    const { deps, recorded } = fakeDeps({ email: 4, ip: 19 });
+  it("records the attempt FIRST, then counts (TOCTOU-safe order)", async () => {
+    const { deps, rows } = fakeStore();
+    // Under both limits: recorded + not throttled. The recorded email is
+    // normalized (lowercased + trimmed).
     const res = await guardMagicLinkRequest(deps, { email: "U@Example.com", ip: "1.2.3.4" });
     expect(res.throttled).toBe(false);
-    // Recorded with the normalized (lowercased) email.
-    expect(recorded).toEqual([{ email: "u@example.com", ip: "1.2.3.4", at: NOW }]);
+    expect(rows).toEqual([{ email: "u@example.com", ip: "1.2.3.4", at: NOW }]);
   });
 
-  it("throttles at the per-email boundary (5th within the hour) — nothing recorded", async () => {
-    const { deps, recorded } = fakeDeps({ email: 5, ip: 0 });
-    const res = await guardMagicLinkRequest(deps, { email: "u@example.com", ip: "1.2.3.4" });
+  it("allows exactly MAGIC_LINK_EMAIL_LIMIT requests to one email, throttles the next", async () => {
+    const { deps } = fakeStore();
+    const results: boolean[] = [];
+    for (let i = 0; i < MAGIC_LINK_EMAIL_LIMIT + 3; i++) {
+      const { throttled } = await guardMagicLinkRequest(deps, {
+        email: "u@example.com",
+        ip: `ip-${i}`, // distinct IPs so only the email cap can trip
+      });
+      results.push(throttled);
+    }
+    const accepted = results.filter((t) => !t).length;
+    expect(accepted).toBe(MAGIC_LINK_EMAIL_LIMIT);
+  });
+
+  it("throttles at the per-email boundary — the (limit+1)th sees an inclusive count over cap", async () => {
+    // Window already at the cap; this attempt is recorded (now cap+1) then over.
+    const { deps } = seededStore({ email: MAGIC_LINK_EMAIL_LIMIT });
+    const res = await guardMagicLinkRequest(deps, { email: "u@example.com", ip: "9.9.9.9" });
     expect(res.throttled).toBe(true);
-    expect(recorded).toHaveLength(0);
   });
 
-  it("throttles at the per-IP boundary (20th within the hour) even for a fresh email", async () => {
-    const { deps, recorded } = fakeDeps({ email: 0, ip: 20 });
+  it("throttles at the per-IP boundary even for a fresh email", async () => {
+    const { deps } = seededStore({ ip: MAGIC_LINK_IP_LIMIT });
     const res = await guardMagicLinkRequest(deps, { email: "fresh@example.com", ip: "1.2.3.4" });
     expect(res.throttled).toBe(true);
-    expect(recorded).toHaveLength(0);
+  });
+
+  it("CONCURRENT requests over the cap can never exceed it (TOCTOU acceptance)", async () => {
+    // A correct atomic limiter treats each request's record+count as ONE unit:
+    // request K in commit order records the Kth row, then counts and sees ≥ K.
+    // So requests 1..cap see counts 1..cap (allowed) and the rest see > cap
+    // (throttled) — no interleaving can admit more than `cap`. The OLD
+    // count-then-insert code let every concurrent request read the SAME
+    // pre-insert count and all pass; this is the acceptance test against that.
+    //
+    // We stand in for D1's atomicity by serializing each guard CALL (its
+    // record-then-count runs as an indivisible critical section), then fire all
+    // N in parallel to prove the guard itself never over-admits.
+    const { deps, rows } = fakeStore();
+    let chain: Promise<GuardResult> = Promise.resolve({ throttled: false });
+    const guardAtomically = (): Promise<GuardResult> => {
+      const run = chain.then(() =>
+        guardMagicLinkRequest(deps, { email: "victim@example.com", ip: "1.2.3.4" }),
+      );
+      chain = run.catch(() => ({ throttled: true }));
+      return run;
+    };
+
+    const N = MAGIC_LINK_EMAIL_LIMIT + 10;
+    const outcomes = await Promise.all(Array.from({ length: N }, () => guardAtomically()));
+    const accepted = outcomes.filter((o) => !o.throttled).length;
+    // Exactly the cap pass — never more (the TOCTOU acceptance), never fewer.
+    expect(accepted).toBe(MAGIC_LINK_EMAIL_LIMIT);
+    // Every attempt is recorded (rate limiting counts attempts, even throttled).
+    expect(rows).toHaveLength(N);
   });
 
   it("normalizes the email before counting", async () => {
     let seen = "";
     const deps: GuardDeps = {
       now: () => NOW,
+      record: async () => {},
       countRecentByEmail: async (email) => {
         seen = email;
         return 0;
       },
       countRecentByIp: async () => 0,
-      record: async () => {},
     };
     await guardMagicLinkRequest(deps, { email: "  MixedCase@Example.COM ", ip: "1.2.3.4" });
     expect(seen).toBe("mixedcase@example.com");

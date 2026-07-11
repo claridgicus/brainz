@@ -30,12 +30,16 @@ import { CLOUD_MCP_TOOLS } from "@brainz/contracts";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { apiError, HttpError, requirePlatform } from "$lib/server/api-util";
+import { isProductionEnv } from "$lib/server/auth";
 import { claimDbFrom, handleClaimTool, requestClaim } from "$lib/server/claim";
 import { createDb, schema } from "$lib/server/db";
 import { createMailer } from "$lib/server/mailer";
+import { guardDepsFromDb, guardMagicLinkRequest } from "$lib/server/magic-link-guard";
+import { magicLinkSender } from "$lib/server/magic-link";
 import { resolveApiKey } from "$lib/server/vault-access";
 import { buildMcpServer } from "$lib/server/mcp";
 import { buildPublicMcpServer, signupDepsFromDb } from "$lib/server/public-mcp";
+import { resolveRateLimitIp } from "$lib/server/rate-limit";
 import { vaultClient } from "$lib/server/vault-client";
 
 function unauthorized(message: string): Response {
@@ -67,14 +71,45 @@ const handleMcp: RequestHandler = async (event) => {
   if (event.request.headers.get("authorization") === null) {
     // Absent auth → public server (signup tool only). Invalid auth never
     // lands here — it still 401s below.
+    //
+    // Fail closed on a missing cf-connecting-ip in production (audit LOW): the
+    // signup rate limit is keyed on this IP, so header-less traffic must not
+    // pool into one shared "local" bucket a single actor could exhaust to block
+    // every other header-less signup. In dev the shared bucket is fine.
+    const resolvedIp = resolveRateLimitIp(
+      event.request.headers.get("cf-connecting-ip"),
+      isProductionEnv(platform.env),
+    );
+    if (!resolvedIp.ok) {
+      return new Response(
+        JSON.stringify({ error: "rate limited: missing client IP; retry through the edge" }),
+        { status: 429, headers: { "content-type": "application/json" } },
+      );
+    }
+    // The public sign_in tool emails a magic link via the same env-selected
+    // mailer + origin the login page uses; the URL is never returned.
+    const sendMagicLink = magicLinkSender(platform.env, event.url.origin);
     server = buildPublicMcpServer(
       signupDepsFromDb(db, {
-        ip,
+        ip: resolvedIp.ip,
         // Supplying `email` to signup fires the same claim-request flow as the
         // claim tool; the result is intentionally dropped (claimEmailSent is
         // reported true regardless — no eligibility oracle).
         requestClaim: async ({ userId, email }) => {
           await requestClaim(claimDeps, { userId, email });
+        },
+        // sign_in: rate-limit exactly like the login page's magic-link request
+        // (5/hour/email + 20/hour/IP, atomic/inclusive — the same durable
+        // magic_link_events guard the /api/auth/sign-in/magic-link path uses),
+        // then EMAIL the link. Never returns a URL; delivery is swallowed.
+        requestSignIn: async ({ email }) => {
+          const { throttled } = await guardMagicLinkRequest(guardDepsFromDb(db), {
+            email,
+            ip: resolvedIp.ip,
+          });
+          if (throttled) return { throttled: true };
+          await sendMagicLink(email);
+          return { throttled: false };
         },
       }),
     );

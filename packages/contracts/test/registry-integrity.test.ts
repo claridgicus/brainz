@@ -61,6 +61,7 @@ const INPUT_SAMPLES: Record<AnyToolName, unknown> = {
   complete_task: { id: "task-a", outcome: "Shipped it." },
   create_task: { title: "Fix auth", body: "Details", domain: "auth", tags: ["high"] },
   signup: { vaultName: "Acme Brain" },
+  sign_in: { email: "human@example.com" },
   claim: { email: "human@example.com" },
 };
 
@@ -124,6 +125,7 @@ const OUTPUT_SAMPLES: Record<AnyToolName, unknown> = {
     expiresAt: "2026-07-18T00:00:00.000Z",
     claimEmailSent: true,
   },
+  sign_in: { status: "sent" },
   claim: { status: "sent", expiresAt: "2026-07-12T00:00:00.000Z" },
 };
 
@@ -159,6 +161,7 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOL
       list_concepts: { type: "banana" },
       onboard: { action: "restart" },
       signup: { email: "not-an-email" },
+      sign_in: { email: "not-an-email" },
       claim: { email: "not-an-email" },
     };
     for (const tool of allTools) {

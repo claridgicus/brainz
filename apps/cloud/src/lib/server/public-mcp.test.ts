@@ -1,15 +1,22 @@
 /**
  * Public MCP server tests over fake SignupDeps, exercised through a real MCP
  * client via the SDK's InMemoryTransport — proves the unauthenticated /mcp
- * surface is exactly PUBLIC_MCP_TOOLS and that signup v2 (Wave G) provisions
- * an ANONYMOUS provisional account (placeholder identity, 7-day expiry),
- * returns NO URL of any kind, fires the claim request when an email is
- * supplied, and enforces the per-IP rate limit — all without a Workers
- * runtime.
+ * surface is exactly PUBLIC_MCP_TOOLS (signup + sign_in), that signup v2
+ * (Wave G) provisions an ANONYMOUS provisional account (placeholder identity,
+ * 7-day expiry), returns NO URL of any kind, fires the claim request when an
+ * email is supplied, and enforces the per-IP rate limit with the TOCTOU-safe
+ * record-before-count order — and that sign_in emails a magic link, returns NO
+ * URL, rate-limits like the login page, and never leaks account existence — all
+ * without a Workers runtime.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { MCP_TOOL_NAMES, PUBLIC_MCP_TOOL_NAMES, signupOutputSchema } from "@brainz/contracts";
+import {
+  MCP_TOOL_NAMES,
+  PUBLIC_MCP_TOOL_NAMES,
+  signInOutputSchema,
+  signupOutputSchema,
+} from "@brainz/contracts";
 import { describe, expect, it } from "vitest";
 import { hashApiKey } from "./api-keys";
 import { isPlaceholderEmail, SIGNUP_EXPIRY_MS, UNCLAIMED_WORKSPACE_NAME } from "./claim";
@@ -21,19 +28,28 @@ const NOW = new Date("2026-07-10T00:00:00.000Z");
 function fakeDeps(overrides: Partial<SignupDeps> = {}) {
   const persisted: ProvisionedSignup[] = [];
   const claimRequests: { userId: string; email: string }[] = [];
+  const signInRequests: { email: string }[] = [];
+  const attempts: { ip: string }[] = [];
   const deps: SignupDeps = {
     now: () => NOW,
     ip: "203.0.113.7",
-    countRecentSignups: async () => 0,
+    recordSignupAttempt: async (e) => {
+      attempts.push({ ip: e.ip });
+    },
+    countRecentSignups: async () => attempts.length,
     persistSignup: async (p) => {
       persisted.push(p);
     },
     requestClaim: async (args) => {
       claimRequests.push(args);
     },
+    requestSignIn: async (args) => {
+      signInRequests.push(args);
+      return { throttled: false };
+    },
     ...overrides,
   };
-  return { deps, persisted, claimRequests };
+  return { deps, persisted, claimRequests, signInRequests, attempts };
 }
 
 async function connect(deps: SignupDeps): Promise<Client> {
@@ -57,10 +73,13 @@ function allText(result: Awaited<ReturnType<Client["callTool"]>>): string {
 }
 
 describe("public MCP server (unauthenticated surface)", () => {
-  it("registers exactly the PUBLIC_MCP_TOOLS — signup only, none of the vault tools", async () => {
+  it("registers exactly the PUBLIC_MCP_TOOLS — signup + sign_in, none of the vault tools", async () => {
     const client = await connect(fakeDeps().deps);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name)).toEqual([...PUBLIC_MCP_TOOL_NAMES]);
+    // Both public tools are advertised on tools/list.
+    expect(tools.map((t) => t.name)).toContain("signup");
+    expect(tools.map((t) => t.name)).toContain("sign_in");
     for (const name of MCP_TOOL_NAMES) {
       expect(tools.map((t) => t.name)).not.toContain(name);
     }
@@ -69,7 +88,7 @@ describe("public MCP server (unauthenticated surface)", () => {
   });
 
   it("anonymous signup provisions a provisional user + vault + key — no email needed", async () => {
-    const { deps, persisted, claimRequests } = fakeDeps();
+    const { deps, persisted, claimRequests, attempts } = fakeDeps();
     const client = await connect(deps);
     const result = await client.callTool({
       name: "signup",
@@ -98,7 +117,8 @@ describe("public MCP server (unauthenticated surface)", () => {
     // Only the key hash at rest — never the plaintext.
     expect(p.apiKey.keyHash).toBe(await hashApiKey(payload.apiKey));
     expect(JSON.stringify(p)).not.toContain(payload.apiKey);
-    expect(p.event.ip).toBe("203.0.113.7");
+    // The rate-limit attempt was recorded FIRST (before counting) for this IP.
+    expect(attempts).toEqual([{ ip: "203.0.113.7" }]);
     // No email supplied → no claim request fired.
     expect(claimRequests).toHaveLength(0);
   });
@@ -173,7 +193,8 @@ describe("public MCP server (unauthenticated surface)", () => {
 
   it("an email that already has an account does NOT block signup (no enumeration error)", async () => {
     // Wave G removed the emailExists gate: nothing binds at signup, so there
-    // is nothing to conflict with. The flow succeeds like any other.
+    // is nothing to conflict with. The flow succeeds like any other. (The old
+    // unique-email-race fix is subsumed by this emailless design.)
     const { deps, persisted } = fakeDeps();
     const client = await connect(deps);
     const result = await client.callTool({
@@ -194,14 +215,56 @@ describe("public MCP server (unauthenticated surface)", () => {
   });
 
   it("6th signup in the window from one IP → rate-limit isError, nothing persisted", async () => {
+    // Insert-then-count: the count includes this attempt, so the window already
+    // at the cap makes the inclusive count SIGNUP_RATE_LIMIT + 1 → over.
     const { deps, persisted } = fakeDeps({
-      countRecentSignups: async () => SIGNUP_RATE_LIMIT,
+      countRecentSignups: async () => SIGNUP_RATE_LIMIT + 1,
     });
     const client = await connect(deps);
     const result = await client.callTool({ name: "signup", arguments: {} });
     expect(result.isError).toBe(true);
     expect(text(result)).toMatch(/rate limit/i);
     expect(persisted).toHaveLength(0);
+  });
+
+  it("records the attempt BEFORE the rate-limit decision (TOCTOU-safe order)", async () => {
+    // Even a rate-limited attempt is recorded (attempts count toward the
+    // window). Model an already-full window via a fixed inclusive count.
+    const order: string[] = [];
+    const { deps, persisted } = fakeDeps({
+      recordSignupAttempt: async () => {
+        order.push("record");
+      },
+      countRecentSignups: async () => {
+        order.push("count");
+        return SIGNUP_RATE_LIMIT + 1;
+      },
+    });
+    const client = await connect(deps);
+    const result = await client.callTool({
+      name: "signup",
+      arguments: { email: "human@example.com" },
+    });
+    expect(result.isError).toBe(true);
+    expect(order).toEqual(["record", "count"]);
+    expect(persisted).toHaveLength(0);
+  });
+
+  it("the Nth-under-cap signup passes; the atomic count admits exactly SIGNUP_RATE_LIMIT", async () => {
+    // Shared attempts array across many signups from one IP models the durable
+    // counter; the fake's countRecentSignups returns the inclusive length.
+    const { deps, persisted } = fakeDeps();
+    let accepted = 0;
+    for (let i = 0; i < SIGNUP_RATE_LIMIT + 3; i++) {
+      const client = await connect(deps);
+      const result = await client.callTool({
+        name: "signup",
+        arguments: { email: `human${i}@example.com` },
+      });
+      if ((result.isError ?? false) === false) accepted++;
+    }
+    expect(accepted).toBe(SIGNUP_RATE_LIMIT);
+    expect(persisted).toHaveLength(SIGNUP_RATE_LIMIT);
   });
 
   it("invalid email format → error, nothing persisted", async () => {
@@ -228,5 +291,87 @@ describe("public MCP server (unauthenticated surface)", () => {
     const result = await client.callTool({ name: "signup", arguments: {} });
     expect(result.isError).toBe(true);
     expect(text(result)).toContain("D1 exploded");
+  });
+});
+
+describe("sign_in tool (email a magic link — human must action it)", () => {
+  it("fires the sign-in request (magic-link send path) with the normalized email", async () => {
+    const { deps, signInRequests, persisted } = fakeDeps();
+    const client = await connect(deps);
+    const result = await client.callTool({
+      name: "sign_in",
+      arguments: { email: "Human@Example.COM" },
+    });
+    expect(result.isError ?? false).toBe(false);
+    // The send path was invoked exactly once, with the normalized address.
+    expect(signInRequests).toEqual([{ email: "human@example.com" }]);
+    // sign_in never provisions anything.
+    expect(persisted).toHaveLength(0);
+    const payload = JSON.parse(text(result));
+    expect(signInOutputSchema.safeParse(payload).success).toBe(true);
+    expect(payload.status).toBe("sent");
+  });
+
+  it("returns NO login URL of any kind — the human actions it from their inbox", async () => {
+    const { deps } = fakeDeps();
+    const client = await connect(deps);
+    const result = await client.callTool({
+      name: "sign_in",
+      arguments: { email: "human@example.com" },
+    });
+    expect(result.isError ?? false).toBe(false);
+    const payload = JSON.parse(text(result));
+    expect("loginUrl" in payload).toBe(false);
+    expect("url" in payload).toBe(false);
+    // No block carries anything URL-shaped or a token.
+    expect(allText(result)).not.toMatch(/https?:\/\//);
+    // The confirmation makes clear the link is emailed only.
+    expect(allText(result)).toMatch(/inbox/i);
+  });
+
+  it("gives the SAME generic response whether or not the address has an account (no leak)", async () => {
+    // The send path is invoked identically regardless of eligibility; sign_in
+    // does not consult existence. Two different addresses → identical output.
+    const a = fakeDeps();
+    const b = fakeDeps();
+    const clientA = await connect(a.deps);
+    const clientB = await connect(b.deps);
+    const resA = await clientA.callTool({ name: "sign_in", arguments: { email: "known@example.com" } });
+    const resB = await clientB.callTool({ name: "sign_in", arguments: { email: "unknown@example.com" } });
+    expect(text(resA)).toBe(text(resB));
+    expect(a.signInRequests).toEqual([{ email: "known@example.com" }]);
+    expect(b.signInRequests).toEqual([{ email: "unknown@example.com" }]);
+  });
+
+  it("rate-limit trip → friendly isError, and no email leak about existence", async () => {
+    const { deps } = fakeDeps({
+      requestSignIn: async () => ({ throttled: true }),
+    });
+    const client = await connect(deps);
+    const result = await client.callTool({
+      name: "sign_in",
+      arguments: { email: "human@example.com" },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/rate limit/i);
+    // The throttle message must not reveal whether the account exists.
+    expect(text(result)).not.toMatch(/account (exists|not found)/i);
+  });
+
+  it("invalid email format → error, no send path invoked", async () => {
+    const { deps, signInRequests } = fakeDeps();
+    const client = await connect(deps);
+    let errored = false;
+    try {
+      const result = await client.callTool({
+        name: "sign_in",
+        arguments: { email: "not-an-email" },
+      });
+      errored = result.isError === true;
+    } catch {
+      errored = true;
+    }
+    expect(errored).toBe(true);
+    expect(signInRequests).toHaveLength(0);
   });
 });
