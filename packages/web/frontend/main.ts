@@ -161,19 +161,27 @@ function renderGraph(): void {
   // The force sim runs on the *full* type-filtered set (layout is correct even
   // for nodes the viewport culls out of the DOM).
   sim?.stop();
+  // Layout tuning (mirrors apps/cloud Graph.svelte): wider link distance,
+  // stronger charge, and a hard collide constraint so nodes visibly separate.
   sim = forceSimulation<SimNode, SimLink>(simNodeList)
     .force(
       "link",
       forceLink<SimNode, SimLink>(simLinks)
         .id((d) => d.id)
-        .distance(85)
+        .distance(130)
         .strength(0.4),
     )
-    .force("charge", forceManyBody().strength(-320))
+    .force("charge", forceManyBody().strength(-520).distanceMax(900))
     .force("center", forceCenter(width / 2, height / 2).strength(0.06))
     .force("x", forceX(width / 2).strength(0.045))
     .force("y", forceY(height / 2).strength(0.045))
-    .force("collide", forceCollide<SimNode>().radius((d) => d.r + 6))
+    .force(
+      "collide",
+      forceCollide<SimNode>()
+        .radius((d) => d.r + 14)
+        .strength(0.9)
+        .iterations(2),
+    )
     .alpha(0.9)
     .alphaDecay(0.035)
     .on("tick", tick);
@@ -396,8 +404,9 @@ function attachNodeEvents(g: SVGGElement, sn: SimNode): void {
       g.removeEventListener("pointercancel", onUp);
       if (moved) {
         sim?.alphaTarget(0);
-        sn.fx = null;
-        sn.fy = null;
+        // ANCHOR: keep fx/fy set so the dropped node stays pinned (mirrors the
+        // cloud graph's drag-to-anchor). No per-vault localStorage persistence
+        // here — the static web viewer has no vault-id/toolbar to key or reset.
       } else {
         void selectNode(sn.id);
       }

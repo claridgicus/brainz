@@ -138,3 +138,102 @@ export function stubEdgesFor(
 ): EdgeRenderPlan[] {
 	return planEdges(edges, visibleIds, allIds).filter((p) => p.stub);
 }
+
+// ---------------------------------------------------------------- drag anchors
+// A node the user drags and drops is *anchored* (pinned) at its drop point: its
+// d3 fx/fy stay set so the sim treats it as fixed, and the position is persisted
+// per-vault in localStorage so it restores on reload. These helpers are the pure
+// serialize/apply/reset logic so the Svelte side just wires DOM events to them.
+
+/** A saved anchor position in graph (sim) coordinates. */
+export interface Anchor {
+	x: number;
+	y: number;
+}
+
+/** Map of nodeId → saved anchor. What we round-trip through localStorage. */
+export type AnchorMap = Record<string, Anchor>;
+
+/** localStorage key holding the anchor map for a given vault. */
+export function anchorStorageKey(vaultId: string): string {
+	return `brainz:graph:anchors:${vaultId}`;
+}
+
+/** A minimal shape a d3 sim node satisfies — id plus mutable fixed coords. */
+export interface AnchorableNode {
+	id: string;
+	x?: number | undefined;
+	y?: number | undefined;
+	fx?: number | null | undefined;
+	fy?: number | null | undefined;
+}
+
+/**
+ * Parse a stored anchor payload, tolerating anything malformed. Only entries
+ * shaped `{ x:number, y:number }` (finite) survive; everything else is dropped
+ * so a corrupt localStorage value degrades to "no anchors", never a throw.
+ */
+export function deserializeAnchors(raw: string | null | undefined): AnchorMap {
+	if (!raw) return {};
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return {};
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+	const out: AnchorMap = {};
+	for (const [id, val] of Object.entries(parsed as Record<string, unknown>)) {
+		if (!val || typeof val !== "object") continue;
+		const { x, y } = val as { x?: unknown; y?: unknown };
+		if (typeof x === "number" && typeof y === "number" && Number.isFinite(x) && Number.isFinite(y)) {
+			out[id] = { x, y };
+		}
+	}
+	return out;
+}
+
+/** Serialize an anchor map for storage (stable — plain JSON). */
+export function serializeAnchors(anchors: AnchorMap): string {
+	return JSON.stringify(anchors);
+}
+
+/**
+ * Record (or update) one node's anchor, returning a *new* map (no mutation of
+ * the input). Used on each drag end — dragging an already-anchored node just
+ * overwrites its saved point.
+ */
+export function setAnchor(anchors: AnchorMap, id: string, pos: Anchor): AnchorMap {
+	return { ...anchors, [id]: { x: pos.x, y: pos.y } };
+}
+
+/**
+ * Pin every node that has a saved anchor: set fx/fy (and seed x/y so the first
+ * frame draws it in place). Nodes with no anchor are left free (fx/fy untouched).
+ * Mutates the nodes in place (d3 owns these objects) and returns the set of ids
+ * that were anchored.
+ */
+export function applyAnchors(nodes: AnchorableNode[], anchors: AnchorMap): Set<string> {
+	const applied = new Set<string>();
+	for (const n of nodes) {
+		const a = anchors[n.id];
+		if (!a) continue;
+		n.fx = a.x;
+		n.fy = a.y;
+		n.x = a.x;
+		n.y = a.y;
+		applied.add(n.id);
+	}
+	return applied;
+}
+
+/**
+ * Un-pin every node (clear fx/fy) so a fresh layout can run. Mutates in place.
+ * The Reset flow calls this before restarting the sim from scratch.
+ */
+export function clearAnchorsFromNodes(nodes: AnchorableNode[]): void {
+	for (const n of nodes) {
+		n.fx = null;
+		n.fy = null;
+	}
+}
