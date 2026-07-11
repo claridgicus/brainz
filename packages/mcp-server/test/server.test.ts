@@ -378,11 +378,45 @@ describe("onboarding (onboard tool + nudge)", () => {
     expect(result.content).toHaveLength(1);
     const playbook = result.content[0].text;
     expect(playbook).toContain("Onboarding playbook — Acme CRM");
-    expect(playbook).toContain("20–60 concepts");
+    expect(playbook).not.toContain("20–60 concepts");
+    expect(playbook).toContain("200–800+ concepts");
+    expect(playbook).toContain('"action": "status"');
     expect(playbook).toContain("`domain`");
     expect(playbook).toContain("realized_by");
     expect(playbook).toContain("governs");
     expect(playbook).toContain("node_modules");
+  });
+
+  it("status with an areaList returns a coverage report", async () => {
+    // The demo vault's concepts carry no code_areas, so every reported area is
+    // uncovered — the report shape is what matters here.
+    const status = await callJson("onboard", {
+      action: "status",
+      areaList: ["packages/engine", "packages/core", "apps/cloud/src"],
+    });
+    expect(status.onboarded).toBe(false);
+    expect(Array.isArray(status.coverage.covered)).toBe(true);
+    expect(status.coverage.uncovered).toEqual([
+      "packages/engine",
+      "packages/core",
+      "apps/cloud/src",
+    ]);
+    expect(status.coverage.coveragePct).toBe(0);
+  });
+
+  it("complete with thin coverage (areaList) is rejected, listing uncovered areas", async () => {
+    const result = await callTool("onboard", {
+      action: "complete",
+      summary: "Barely indexed.",
+      areaList: ["packages/engine", "packages/core", "apps/cloud/src"],
+    });
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain("onboarding looks incomplete");
+    expect(text).toContain("packages/engine");
+    // Gate fired before sealing — the vault is still un-onboarded.
+    const status = await callJson("onboard", { action: "status" });
+    expect(status.onboarded).toBe(false);
   });
 
   it("status reports un-onboarded with counts", async () => {

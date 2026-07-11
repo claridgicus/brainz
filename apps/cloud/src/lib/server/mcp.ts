@@ -15,12 +15,24 @@ import {
   type McpToolInput,
   type McpToolName,
 } from "@brainz/contracts";
-import { ONBOARDING_NUDGE, ONBOARDING_SUMMARY_ID, onboardingPlaybook } from "@brainz/engine";
+import {
+  ONBOARDING_NUDGE,
+  ONBOARDING_SUMMARY_ID,
+  computeCoverage,
+  onboardingPlaybook,
+} from "@brainz/engine";
 import { syntheticFilePath } from "./do-helpers";
 import { VaultDoError, type VaultClient } from "./vault-client";
 
 export const SERVER_NAME = "brainz-cloud";
 export const SERVER_VERSION = "0.1.0";
+
+/**
+ * Coverage gate for `onboard {action:"complete"}`: reject completion when more
+ * than this fraction of the caller's reported source areas have zero concepts.
+ * At >40% uncovered the graph is too thin to seal — keep indexing first.
+ */
+export const THIN_COVERAGE_UNCOVERED_FRACTION = 0.4;
 
 type TextContent = { type: "text"; text: string };
 export type ToolResult = { content: TextContent[]; isError?: boolean };
@@ -225,7 +237,7 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
         return ok({ concepts, edges, products, tags, byType, onboarded, openTasks, embeddings });
       }),
 
-    onboard: async ({ action, productName, repoHint, summary }) =>
+    onboard: async ({ action, productName, repoHint, summary, areaList }) =>
       guarded(async () => {
         if (action === "start") {
           const { onboardedAt } = await vault.onboarding();
@@ -273,6 +285,27 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
             (c) => !c.codeAreas || c.codeAreas.length === 0,
           ).length;
           const hasDomainConcepts = (byType.domain ?? 0) > 0;
+          // Coverage gate: if the caller reported its source areas, refuse to
+          // seal a thin graph (too many areas with zero concepts). Without an
+          // areaList we can't judge — warn instead of hard-blocking (empty
+          // vault is already guarded above).
+          let coverage: ReturnType<typeof computeCoverage> | undefined;
+          let coverageNote: string | undefined;
+          if (areaList && areaList.length > 0) {
+            coverage = computeCoverage(concepts, areaList);
+            const uncoveredFraction = coverage.uncovered.length / (areaList.length || 1);
+            if (uncoveredFraction > THIN_COVERAGE_UNCOVERED_FRACTION) {
+              return fail(
+                "onboarding looks incomplete — these areas have no concepts yet: " +
+                  `${coverage.uncovered.join(", ")} (${coverage.coveragePct}% covered). ` +
+                  "Keep indexing each uncovered area, then complete.",
+              );
+            }
+          } else {
+            coverageNote =
+              "no areaList supplied — coverage was not verified; " +
+              "pass the repo's source areas to have completion coverage-gated.";
+          }
           const { concept } = await vault.upsertConcept({
             id: ONBOARDING_SUMMARY_ID,
             title: "Product onboarding summary",
@@ -291,10 +324,33 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
             conceptsLackingCodeAreas,
             hasDomainConcepts,
             byType,
+            // Report only the wire coverage fields (drop the helper's internal
+            // conceptCount — the top-level conceptCount already carries it).
+            ...(coverage
+              ? {
+                  coverage: {
+                    covered: coverage.covered,
+                    uncovered: coverage.uncovered,
+                    coveragePct: coverage.coveragePct,
+                  },
+                }
+              : {}),
+            ...(coverageNote ? { coverageNote } : {}),
           });
         }
-        const { concepts, byType, onboarded } = await vault.stats();
-        return ok({ onboarded, conceptCount: concepts, byType });
+        // status — counts, plus a coverage report when an areaList is supplied.
+        const { concepts: conceptCount, byType, onboarded } = await vault.stats();
+        if (areaList && areaList.length > 0) {
+          const { concepts } = await vault.list();
+          const { covered, uncovered, coveragePct } = computeCoverage(concepts, areaList);
+          return ok({
+            onboarded,
+            conceptCount,
+            byType,
+            coverage: { covered, uncovered, coveragePct },
+          });
+        }
+        return ok({ onboarded, conceptCount, byType });
       }),
 
     list_tasks: async ({ taskStatus, domain }) =>

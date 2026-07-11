@@ -28,8 +28,13 @@ export { bfsRelated } from "./graph.js";
 export { assembleContext } from "./context.js";
 export type { AssembleContextOptions, ContextSource } from "./context.js";
 
-export { ONBOARDING_NUDGE, ONBOARDING_SUMMARY_ID, onboardingPlaybook } from "./onboard.js";
-export type { OnboardingPlaybookOptions } from "./onboard.js";
+export {
+  ONBOARDING_NUDGE,
+  ONBOARDING_SUMMARY_ID,
+  onboardingPlaybook,
+  computeCoverage,
+} from "./onboard.js";
+export type { OnboardingPlaybookOptions, Coverage, CoverageConcept } from "./onboard.js";
 
 export { validateGraph } from "./validate.js";
 export type { GraphIssue, GraphValidation } from "./validate.js";

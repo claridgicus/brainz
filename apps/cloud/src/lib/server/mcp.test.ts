@@ -146,7 +146,14 @@ function fakeVault(): FakeVault {
     list: async () => ({
       count: 1,
       concepts: [
-        { id: "lead-scoring", title: "Lead scoring", type: "feature", status: "active", tags: ["crm"] },
+        {
+          id: "lead-scoring",
+          title: "Lead scoring",
+          type: "feature",
+          status: "active",
+          tags: ["crm"],
+          codeAreas: ["apps/crm/src/scoring/**"],
+        },
       ],
     }),
     search: async () => ({
@@ -473,7 +480,9 @@ describe("onboard tool + nudge", () => {
     const blocks = textBlocks(result);
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toContain("Onboarding playbook — Acme CRM");
-    expect(blocks[0]).toContain("20–60 concepts");
+    expect(blocks[0]).not.toContain("20–60 concepts");
+    expect(blocks[0]).toContain("200–800+ concepts");
+    expect(blocks[0]).toContain('"action": "status"');
     expect(blocks[0]).toContain("`domain`");
     expect(blocks[0]).toContain("realized_by");
     expect(blocks[0]).toContain("governs");
@@ -499,6 +508,24 @@ describe("onboard tool + nudge", () => {
     const payload = JSON.parse(textBlocks(result)[0]);
     expect(onboardStatusOutputSchema.safeParse(payload).success).toBe(true);
     expect(payload).toMatchObject({ onboarded: false, conceptCount: 1 });
+    // No areaList → no coverage report.
+    expect(payload.coverage).toBeUndefined();
+  });
+
+  it("status with an areaList returns a coverage report (covered vs uncovered)", async () => {
+    const result = await client.callTool({
+      name: "onboard",
+      arguments: {
+        action: "status",
+        // fake vault's one concept is anchored under apps/crm/src/scoring/**
+        areaList: ["apps/crm/src", "packages/engine", "apps/other"],
+      },
+    });
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(onboardStatusOutputSchema.safeParse(payload).success).toBe(true);
+    expect(payload.coverage.covered).toEqual(["apps/crm/src"]);
+    expect(payload.coverage.uncovered).toEqual(["packages/engine", "apps/other"]);
+    expect(payload.coverage.coveragePct).toBe(33);
   });
 
   it("complete requires a summary", async () => {
@@ -531,6 +558,86 @@ describe("onboard tool + nudge", () => {
     expect(vault.state.onboardedAt).toBeNull();
   });
 
+  it("complete with THIN coverage (areaList) is rejected, listing uncovered areas", async () => {
+    // Only 1 concept, anchored under apps/crm/src/scoring. Report 4 areas →
+    // 3 uncovered (75% > 40% threshold) → reject.
+    const result = await client.callTool({
+      name: "onboard",
+      arguments: {
+        action: "complete",
+        summary: "Indexed only scoring.",
+        areaList: ["apps/crm/src", "packages/engine", "packages/core", "apps/api"],
+      },
+    });
+    expect(result.isError).toBe(true);
+    const text = textBlocks(result)[0];
+    expect(text).toContain("onboarding looks incomplete");
+    expect(text).toContain("packages/engine");
+    expect(text).toContain("packages/core");
+    expect(text).toContain("apps/api");
+    // Gate fired before any state change.
+    expect(vault.state.onboardedAt).toBeNull();
+    expect(mirrored).toBeNull();
+  });
+
+  it("complete with BROAD coverage (areaList) succeeds and returns coverage", async () => {
+    // 1 area, satisfied by the one concept → 0% uncovered → passes the gate.
+    const result = await client.callTool({
+      name: "onboard",
+      arguments: {
+        action: "complete",
+        summary: "Indexed the scoring domain thoroughly.",
+        areaList: ["apps/crm/src"],
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(onboardCompleteOutputSchema.safeParse(payload).success).toBe(true);
+    expect(payload.coverage.covered).toEqual(["apps/crm/src"]);
+    expect(payload.coverage.uncovered).toEqual([]);
+    expect(payload.coverage.coveragePct).toBe(100);
+    expect(vault.state.onboardedAt).not.toBeNull();
+  });
+
+  it("complete WITHOUT areaList warns via coverageNote but does not hard-block", async () => {
+    const result = await client.callTool({
+      name: "onboard",
+      arguments: { action: "complete", summary: "Indexed the product." },
+    });
+    expect(result.isError).toBeFalsy();
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(onboardCompleteOutputSchema.safeParse(payload).success).toBe(true);
+    expect(payload.coverage).toBeUndefined();
+    expect(payload.coverageNote).toContain("coverage was not verified");
+    expect(vault.state.onboardedAt).not.toBeNull();
+  });
+
+  it("complete still guards the empty vault even when an areaList is supplied", async () => {
+    vault.stats = async () => ({
+      concepts: 0,
+      edges: 0,
+      products: [],
+      tags: [],
+      byType: {},
+      onboarded: false,
+      openTasks: 0,
+      embeddings: "unavailable",
+      keywordIndex: "like",
+    });
+    vault.list = async () => ({ count: 0, concepts: [] });
+    const result = await client.callTool({
+      name: "onboard",
+      arguments: {
+        action: "complete",
+        summary: "Nothing yet.",
+        areaList: ["apps/crm/src"],
+      },
+    });
+    expect(result.isError).toBe(true);
+    expect(textBlocks(result)[0]).toContain("no concepts");
+    expect(vault.state.onboardedAt).toBeNull();
+  });
+
   it("complete stores the summary concept, sets DO state, mirrors to D1, and stops the nudge", async () => {
     const result = await client.callTool({
       name: "onboard",
@@ -539,9 +646,10 @@ describe("onboard tool + nudge", () => {
     const payload = JSON.parse(textBlocks(result)[0]);
     expect(onboardCompleteOutputSchema.safeParse(payload).success).toBe(true);
     expect(payload.summaryConceptId).toBe(ONBOARDING_SUMMARY_ID);
-    // Quality signals surfaced on success (fake vault: 1 feature concept, no codeAreas).
+    // Quality signals surfaced on success (fake vault: 1 feature concept,
+    // anchored with codeAreas → none lacking).
     expect(payload.conceptCount).toBe(1);
-    expect(payload.conceptsLackingCodeAreas).toBe(1);
+    expect(payload.conceptsLackingCodeAreas).toBe(0);
     expect(payload.hasDomainConcepts).toBe(false);
     expect(payload.byType).toEqual({ feature: 1 });
     expect(vault.state.onboardedAt).not.toBeNull();

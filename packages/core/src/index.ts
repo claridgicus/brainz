@@ -19,6 +19,7 @@ export {
   ONBOARDING_NUDGE,
   ONBOARDING_SUMMARY_ID,
   onboardingPlaybook,
+  computeCoverage,
   slugify,
 } from "@brainz/engine";
-export type { OnboardingPlaybookOptions } from "@brainz/engine";
+export type { OnboardingPlaybookOptions, Coverage, CoverageConcept } from "@brainz/engine";

@@ -71,9 +71,119 @@ Give EVERY concept a \`codeAreas\` list — rough paths or globs pointing at whe
 - Canonical relations (free-form strings — these are the conventions): \`part_of\`, \`realized_by\`, \`realizes\`, \`governs\`, \`governed_by\`, \`depends_on\`, \`constrains\`, \`supersedes\`, \`related_to\`.
 - Direction matters: story —realized_by→ feature; spec —governs→ feature.
 
-## 5. Calibrate, then complete
+## 5. Size the effort from the codebase — index every area to saturation
 
-- Target 20–60 concepts for a mid-size product: enough to brief an agent well, few enough to stay true to the artifact.
-- When the graph is written, call \`onboard\` with \`{"action": "complete", "summary": "<2–5 sentences: what was indexed, notable gaps>"}\`. That marks the vault onboarded (the nudges stop) and stores your summary as the \`${ONBOARDING_SUMMARY_ID}\` concept.
+There is NO flat concept cap. The right number of concepts is a function of the artifact, not a fixed target:
+
+- **Size the effort first.** List the top-level source areas — every \`packages/*\`, every \`apps/*/src\` major subtree, and any other major directory — and budget concepts per area. Depth is decided PER AREA, not globally.
+- **Index each area to saturation before moving on.** An area is done when a future agent could answer the questions its code raises from the graph alone — not when you hit some number.
+- **For a LARGE project expect 200–800+ concepts.** A monorepo with many packages/apps will need hundreds. Do NOT stop at a few dozen — under-indexing a large repo is the failure this playbook exists to prevent. A small single-package tool may only need a few dozen; let the codebase decide.
+
+## 6. The continue loop — survey → index → status → repeat
+
+Onboarding a large repo is a LOOP, not a single pass. Brainz gives you a coverage signal each iteration so a fan-out doesn't stop early:
+
+1. **Survey** the tree and build the list of top-level source areas (packages/*, apps/*/src subtrees, major dirs).
+2. **Index the next uncovered area** to saturation with \`upsert_concept\`, anchoring every concept with \`codeAreas\`.
+3. **Call \`onboard\` with \`{"action": "status", "areaList": [<your area list>]}\`** to see coverage: which areas are covered vs still uncovered, plus \`coveragePct\` and \`conceptCount\`. (Brainz can't read your repo, so YOU supply \`areaList\` from your survey.)
+4. **If uncovered areas remain, take the next one and repeat** from step 2. Keep looping until coverage is broad.
+5. **Only when coverage is broad, complete.** Call \`onboard\` with \`{"action": "complete", "summary": "<2–5 sentences: what was indexed, notable gaps>", "areaList": [<your area list>]}\`. Completion is coverage-gated: if too many areas still have zero concepts it is REJECTED with the list of uncovered areas — keep indexing, then complete. On success it marks the vault onboarded (the nudges stop) and stores your summary as the \`${ONBOARDING_SUMMARY_ID}\` concept.
 `;
+}
+
+// --------------------------------------------------------------- coverage
+
+/** One concept as computeCoverage needs it: just its code_areas. */
+export interface CoverageConcept {
+  /** Rough paths or globs pointing at where the concept's knowledge lives. */
+  codeAreas?: string[] | null;
+}
+
+/**
+ * Coverage of the repo's source areas by the vault's concepts.
+ *
+ * Deterministic: `covered` and `uncovered` preserve the input `areaList`
+ * order (deduped). `coveragePct` is covered/total * 100, rounded to an
+ * integer (0 when there are no areas).
+ */
+export interface Coverage {
+  /** Areas that at least one concept's code_areas points under. */
+  covered: string[];
+  /** Areas no concept references — the work still to do. */
+  uncovered: string[];
+  /** Total concepts considered (length of the input list). */
+  conceptCount: number;
+  /** covered / total areas, 0–100, integer. */
+  coveragePct: number;
+}
+
+/**
+ * Normalize a path-ish string for prefix comparison: drop a leading `./`,
+ * strip glob tails (`/**`, `/*`, trailing `*`), and trim a trailing slash.
+ * Backslashes are normalized to `/` so Windows-style code_areas still match.
+ */
+function normalizePath(p: string): string {
+  let s = p.trim().replace(/\\/g, "/");
+  if (s.startsWith("./")) s = s.slice(2);
+  // Strip a trailing glob segment/marker so "a/b/**", "a/b/*", "a/b*" → "a/b".
+  s = s.replace(/\/\*\*$/, "").replace(/\/\*$/, "").replace(/\*+$/, "");
+  s = s.replace(/\/+$/, "");
+  return s;
+}
+
+/**
+ * True when `path` is at or under directory `area` (path-prefix match on
+ * normalized, slash-delimited segments). Both are normalized first, so
+ * globs on either side are tolerated. Segment-aware: `apps/crm` does NOT
+ * match `apps/crm-legacy`, but DOES match `apps/crm` and `apps/crm/x`.
+ */
+function isUnder(path: string, area: string): boolean {
+  const p = normalizePath(path);
+  const a = normalizePath(area);
+  if (a === "") return true; // an empty/root area covers everything
+  if (p === "") return false;
+  return p === a || p.startsWith(`${a}/`);
+}
+
+/**
+ * Compute which source areas the vault's concepts cover.
+ *
+ * @param concepts the vault's concepts (only their `codeAreas` are read).
+ * @param areaList top-level source areas to check (each package dir, each
+ *   app src subtree, major dirs — supplied by the caller, who walked the repo).
+ *
+ * An area is COVERED if any concept has a code_area at or under it. Pure and
+ * deterministic; the coverage machinery the `sync` epic reuses for drift.
+ */
+export function computeCoverage(
+  concepts: readonly CoverageConcept[],
+  areaList: readonly string[],
+): Coverage {
+  // Dedupe areas, preserving first-seen order for a stable result.
+  const areas: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of areaList) {
+    if (typeof raw !== "string") continue;
+    const key = normalizePath(raw);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    areas.push(raw);
+  }
+
+  const allCodeAreas: string[] = [];
+  for (const c of concepts) {
+    for (const ca of c.codeAreas ?? []) {
+      if (typeof ca === "string" && ca.trim() !== "") allCodeAreas.push(ca);
+    }
+  }
+
+  const covered: string[] = [];
+  const uncovered: string[] = [];
+  for (const area of areas) {
+    if (allCodeAreas.some((ca) => isUnder(ca, area))) covered.push(area);
+    else uncovered.push(area);
+  }
+
+  const coveragePct = areas.length === 0 ? 0 : Math.round((covered.length / areas.length) * 100);
+  return { covered, uncovered, conceptCount: concepts.length, coveragePct };
 }

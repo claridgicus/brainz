@@ -11,6 +11,7 @@ import {
 } from "@brainz/contracts";
 import {
   ONBOARDING_NUDGE,
+  computeCoverage,
   onboardingPlaybook,
   type ConceptMeta,
   type Vault,
@@ -18,6 +19,13 @@ import {
 
 export const SERVER_NAME = "brainz";
 export const SERVER_VERSION = "0.1.0";
+
+/**
+ * Coverage gate for `onboard {action:"complete"}`: reject completion when more
+ * than this fraction of the caller's reported source areas have zero concepts
+ * (mirrors apps/cloud's onboard tool).
+ */
+export const THIN_COVERAGE_UNCOVERED_FRACTION = 0.4;
 
 /**
  * Resolve the vault directory from CLI args / environment:
@@ -247,7 +255,7 @@ export function createServer(vault: Vault): McpServer {
         return ok({ ...stats, embeddings: vault.embeddingStatus });
       }),
 
-    onboard: async ({ action, productName, repoHint, summary }) =>
+    onboard: async ({ action, productName, repoHint, summary, areaList }) =>
       guarded(async () => {
         if (action === "start") {
           // Idempotent start: an already-onboarded vault must NOT get a fresh
@@ -289,6 +297,25 @@ export function createServer(vault: Vault): McpServer {
           const conceptsLackingCodeAreas = concepts.filter(
             (c) => !c.codeAreas || c.codeAreas.length === 0,
           ).length;
+          // Coverage gate: refuse to seal a thin graph when the caller reported
+          // its source areas; warn (don't block) when it can't be judged.
+          let coverage: ReturnType<typeof computeCoverage> | undefined;
+          let coverageNote: string | undefined;
+          if (areaList && areaList.length > 0) {
+            coverage = computeCoverage(concepts, areaList);
+            const uncoveredFraction = coverage.uncovered.length / (areaList.length || 1);
+            if (uncoveredFraction > THIN_COVERAGE_UNCOVERED_FRACTION) {
+              return fail(
+                "onboarding looks incomplete — these areas have no concepts yet: " +
+                  `${coverage.uncovered.join(", ")} (${coverage.coveragePct}% covered). ` +
+                  "Keep indexing each uncovered area, then complete.",
+              );
+            }
+          } else {
+            coverageNote =
+              "no areaList supplied — coverage was not verified; " +
+              "pass the repo's source areas to have completion coverage-gated.";
+          }
           const saved = await vault.completeOnboarding(summary);
           return ok({
             ok: true,
@@ -298,9 +325,34 @@ export function createServer(vault: Vault): McpServer {
             conceptsLackingCodeAreas,
             hasDomainConcepts: (stats.byType.domain ?? 0) > 0,
             byType: stats.byType,
+            // Report only the wire coverage fields (drop the helper's internal
+            // conceptCount — the top-level conceptCount already carries it).
+            ...(coverage
+              ? {
+                  coverage: {
+                    covered: coverage.covered,
+                    uncovered: coverage.uncovered,
+                    coveragePct: coverage.coveragePct,
+                  },
+                }
+              : {}),
+            ...(coverageNote ? { coverageNote } : {}),
           });
         }
+        // status — counts, plus a coverage report when an areaList is supplied.
         const stats = vault.stats();
+        if (areaList && areaList.length > 0) {
+          const { covered, uncovered, coveragePct } = computeCoverage(
+            vault.listConcepts(),
+            areaList,
+          );
+          return ok({
+            onboarded: stats.onboarded,
+            conceptCount: stats.concepts,
+            byType: stats.byType,
+            coverage: { covered, uncovered, coveragePct },
+          });
+        }
         return ok({
           onboarded: stats.onboarded,
           conceptCount: stats.concepts,
