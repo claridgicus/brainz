@@ -31,8 +31,10 @@
 		serializeAnchors,
 		setAnchor,
 		typeClusterCenter,
+		typesVisibleAtZoom,
 		type AnchorMap,
 		type EdgeRenderPlan,
+		type FilterMode,
 		type PositionedNode,
 	} from "$lib/graph-view";
 
@@ -47,16 +49,24 @@
 		graph,
 		enabledTypes,
 		vaultId,
+		filterMode = "manual",
 		focusId = null,
 		selectedId = null,
 		onselect,
+		onlodchange,
 	}: {
 		graph: GraphPayload;
 		enabledTypes: string[];
 		vaultId: string;
+		/** "auto" = LOD drives visible types from the zoom scale; "manual" = the
+		 * `enabledTypes` chips do. Defaults to manual so nothing regresses if unset. */
+		filterMode?: FilterMode;
 		focusId?: string | null;
 		selectedId?: string | null;
 		onselect: (id: string) => void;
+		/** Fired (auto mode only) when the zoom-driven visible-type set changes, so
+		 * the parent can reflect which types the LOD is currently showing. */
+		onlodchange?: (types: string[]) => void;
 	} = $props();
 
 	const SVG_NS = "http://www.w3.org/2000/svg";
@@ -88,6 +98,34 @@
 	let focusReveal = new Set<string>();
 	const nodeEls = new Map<string, SVGGElement>();
 	const edgeEls = new Map<string, { el: SVGLineElement; link: SimLink; plan: EdgeRenderPlan }>();
+
+	// -------------------------------------------------------- semantic zoom LOD
+	// In auto mode the visible-type set is DERIVED from the current zoom scale via
+	// typesVisibleAtZoom (furthest out = domains only; zoom in unfolds lower-signal
+	// tiers). `lodTypes` caches the last-emitted auto set for hysteresis (so a wiggle
+	// at a tier boundary doesn't flicker) and to detect when a zoom crosses a tier
+	// (which needs a re-render to add/remove nodes from the sim). In manual mode the
+	// `enabledTypes` prop drives everything and LOD is dormant.
+	let lodTypes = new Set<string>();
+	/** The type set the sim/render should filter by right now. */
+	function effectiveTypeSet(): Set<string> {
+		return filterMode === "auto" ? lodTypes : new Set(enabledTypes);
+	}
+	/**
+	 * Recompute the auto LOD set for the current zoom (with hysteresis off the last
+	 * set). Returns true if the visible-type set CHANGED (a tier was crossed) — the
+	 * caller re-renders only then, so plain panning/zooming within a tier is free.
+	 * No-op (returns false) outside auto mode.
+	 */
+	function recomputeLod(): boolean {
+		if (filterMode !== "auto") return false;
+		const next = typesVisibleAtZoom(view.k, { prev: lodTypes });
+		const changed = next.size !== lodTypes.size || [...next].some((t) => !lodTypes.has(t));
+		if (!changed) return false;
+		lodTypes = next;
+		onlodchange?.([...next]);
+		return true;
+	}
 
 	// ------------------------------------------------------------ drag anchors
 	// User-dropped nodes are pinned (fx/fy kept) and their position persisted per
@@ -147,7 +185,9 @@
 
 	function visibleGraph(): GraphPayload {
 		const focus = focusId ? neighborhood(graph.edges, focusId, 2) : null;
-		const filtered = filterGraph(graph, { types: new Set(enabledTypes), focus });
+		// LOD (auto) or the chips (manual) decide the ELIGIBLE type set; culling then
+		// picks which of those eligible nodes are actually in the DOM (see cull()).
+		const filtered = filterGraph(graph, { types: effectiveTypeSet(), focus });
 		// Sticky click-focus reveals the focused node's 1-hop neighbors even if
 		// their type is toggled off — union those revealed nodes (and the edges
 		// among the resulting set) back in so the sim + DOM can show them. When
@@ -162,18 +202,31 @@
 		return { nodes, edges };
 	}
 
-	function renderGraph(): void {
+	/**
+	 * (Re)build the sim over the currently-visible (LOD/manual-filtered) set.
+	 * `gentle` = a soft reheat (low alpha) used when a zoom tier crossing adds or
+	 * removes a few nodes: kept nodes hold their positions and the layout eases to
+	 * a new settle instead of the jarring full relayout a fresh load / Reset does.
+	 */
+	function renderGraph(gentle = false): void {
 		const { nodes, edges } = visibleGraph();
 		empty = nodes.length === 0;
 
 		const width = svg.clientWidth || 900;
 		const height = svg.clientHeight || 600;
 
+		// New nodes entering on a tier crossing: seed them near the canvas center
+		// (with a tiny jitter) so they ease in from the middle rather than flying
+		// in from (0,0). Kept nodes already carry their settled positions.
 		const nodeList: SimNode[] = nodes.map((n) => {
 			const r = radiusForTypeDegree(n.type, n.degree);
 			let sn = simNodes.get(n.id);
 			if (!sn) {
 				sn = { id: n.id, data: n, r };
+				if (gentle) {
+					sn.x = width / 2 + (Math.random() - 0.5) * 40;
+					sn.y = height / 2 + (Math.random() - 0.5) * 40;
+				}
 				simNodes.set(n.id, sn);
 			}
 			sn.data = n;
@@ -224,7 +277,9 @@
 					.strength(0.9)
 					.iterations(2),
 			)
-			.alpha(0.9)
+			// Gentle reheat on a tier crossing so anchored/settled nodes barely move;
+			// full reheat on a fresh load / Reset.
+			.alpha(gentle ? 0.3 : 0.9)
 			.alphaDecay(0.035)
 			.on("tick", tick);
 
@@ -562,6 +617,9 @@
 		view.y = cy - ((cy - view.y) / view.k) * k;
 		view.k = k;
 		applyView();
+		// Semantic zoom: if this zoom crossed a LOD tier (auto mode), gently
+		// re-include/exclude the affected type(s) without a jarring full relayout.
+		if (recomputeLod()) renderGraph(true);
 	}
 
 	/**
@@ -675,11 +733,21 @@
 		};
 	});
 
-	// Re-render whenever the data or filters change.
+	// Re-render whenever the data or filters change. In auto mode, (re)seed the LOD
+	// set from the current zoom first so the effective type set is fresh; entering
+	// auto (e.g. after Reset) recomputes from scratch. In manual mode the
+	// `enabledTypes` chips drive the filter directly.
 	$effect(() => {
 		void graph;
 		void enabledTypes;
 		void focusId;
+		void filterMode;
+		if (filterMode === "auto") {
+			// Force a recompute from a cleared cache so switching into auto (or a data
+			// change) always re-derives the tier for the current scale.
+			lodTypes = new Set();
+			recomputeLod();
+		}
 		renderGraph();
 	});
 

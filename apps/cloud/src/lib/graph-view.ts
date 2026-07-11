@@ -25,6 +25,138 @@ export function defaultVisibleTypes(): string[] {
 	return DEFAULT_VISIBLE_TYPES.filter((t) => all.has(t));
 }
 
+// -------------------------------------------------------- semantic zoom LOD
+// Level-of-detail as you zoom: furthest out the graph shows only the top-signal
+// structural types (domains); zooming in progressively unfolds lower-signal
+// types until, fully zoomed, everything is visible. This is the DEFAULT view
+// mode ("auto") until the user manually touches a type-filter chip, which flips
+// to "manual" and hands control to the chips.
+//
+// SIGNAL RANKING (rank 0 = highest signal, shown first / at min zoom):
+//   rank 0: domain                              — top-level areas, the spine
+//   rank 1: feature, spec, constraint           — what's built + its contracts
+//   rank 2: story, workflow, pattern, decision  — behaviour + rationale
+//   rank 3: glossary, concept, task             — leaf detail / high-cardinality
+//   rank 4: pending                             — unresolved stubs, lowest signal
+// Types within a rank appear together. Any unranked/unknown type is treated as
+// the lowest rank so it only shows fully zoomed in (never hidden forever).
+//
+// THRESHOLD CURVE: the d3 zoom scale runs ~[LOD_MIN_SCALE, LOD_MAX_SCALE]
+// (0.3 .. 2.2 — the meaningful band inside the wheel's 0.12..8 clamp; the default
+// view opens at k=1, which lands on ranks 0-1). A rank r (of maxRank) becomes
+// visible once the scale crosses its threshold, spaced evenly (linearly) across
+// that band:
+//   threshold(r) = LOD_MIN_SCALE + (r / maxRank) * (LOD_MAX_SCALE - LOD_MIN_SCALE)
+// so rank 0 is visible at (and below) min scale, and the last rank only at max
+// scale. Because a type is shown when scale >= its threshold, zooming IN is
+// monotonic: it only ever ADDS types, never removes them.
+//
+// HYSTERESIS: to stop types flickering when the scale hovers on a threshold, we
+// apply a symmetric dead-band. A rank turns ON at threshold*(1+LOD_HYSTERESIS)
+// and only turns OFF again below threshold*(1-LOD_HYSTERESIS). The caller passes
+// the previously-visible set (`prev`) so a rank that's already on stays on until
+// the scale drops clearly below its threshold — a tiny wiggle at the boundary
+// never toggles it.
+
+/** Rank of each concept type; lower = higher signal, revealed earlier. */
+export const TYPE_SIGNAL_RANK: Record<string, number> = {
+	domain: 0,
+	feature: 1,
+	spec: 1,
+	constraint: 1,
+	story: 2,
+	workflow: 2,
+	pattern: 2,
+	decision: 2,
+	glossary: 3,
+	concept: 3,
+	task: 3,
+	pending: 4,
+};
+
+/** The lowest-signal rank (unknown types fall back to this — shown only fully in). */
+export const MAX_SIGNAL_RANK = 4;
+
+/** Signal rank for a type (unknown → MAX_SIGNAL_RANK so it reveals last, never never). */
+export function signalRank(type: string): number {
+	return TYPE_SIGNAL_RANK[type] ?? MAX_SIGNAL_RANK;
+}
+
+/** d3 zoom scale at/below which only rank-0 (domains) show. */
+export const LOD_MIN_SCALE = 0.3;
+/** d3 zoom scale at/above which every rank (all types) shows. */
+export const LOD_MAX_SCALE = 2.2;
+/** Symmetric dead-band (fraction of a threshold) that a rank must clear to flip. */
+export const LOD_HYSTERESIS = 0.1;
+
+/** The scale threshold at which a given rank first becomes eligible. */
+export function lodThresholdForRank(rank: number, maxRank = MAX_SIGNAL_RANK): number {
+	if (maxRank <= 0) return LOD_MIN_SCALE;
+	const clamped = Math.max(0, Math.min(maxRank, rank));
+	return LOD_MIN_SCALE + (clamped / maxRank) * (LOD_MAX_SCALE - LOD_MIN_SCALE);
+}
+
+export interface TypesVisibleAtZoomOpts {
+	/** Types to consider (defaults to the full palette). */
+	types?: readonly string[];
+	/**
+	 * The set that was visible at the previous scale. Enables hysteresis: a rank
+	 * already on stays on until the scale drops clearly below its threshold. Omit
+	 * (or pass empty) for a fresh, hysteresis-free evaluation.
+	 */
+	prev?: Set<string> | null;
+}
+
+/**
+ * The set of concept types visible at a given d3 zoom `scale`, derived purely
+ * from the signal ranking + threshold curve above. Domains-only at/below
+ * LOD_MIN_SCALE; every type at/above LOD_MAX_SCALE; monotonic in scale (zooming
+ * in only adds types). With `opts.prev` supplied, applies hysteresis so a small
+ * scale wiggle around a threshold doesn't toggle a type on/off.
+ */
+export function typesVisibleAtZoom(scale: number, opts: TypesVisibleAtZoomOpts = {}): Set<string> {
+	const types = opts.types ?? ALL_TYPES;
+	const prev = opts.prev ?? null;
+	const out = new Set<string>();
+	for (const type of types) {
+		const rank = signalRank(type);
+		// Rank 0 (domains) is the always-on baseline — the graph is never emptier
+		// than "domains only", so no threshold/hysteresis applies to it.
+		if (rank <= 0) {
+			out.add(type);
+			continue;
+		}
+		const threshold = lodThresholdForRank(rank);
+		const wasOn = prev?.has(type) ?? false;
+		// ON above the upper band; OFF below the lower band; inside the band keep
+		// the previous state (hysteresis).
+		const on = wasOn
+			? scale >= threshold * (1 - LOD_HYSTERESIS)
+			: scale >= threshold * (1 + LOD_HYSTERESIS);
+		if (on) out.add(type);
+	}
+	return out;
+}
+
+/** Graph filter modes: LOD-driven ("auto") vs chip-driven ("manual"). */
+export type FilterMode = "auto" | "manual";
+
+/**
+ * Resolve the EFFECTIVE visible-type set from the current mode: in "auto" the
+ * LOD set (from `typesVisibleAtZoom`) drives visibility; in "manual" the user's
+ * chip selection does. Returned as a fresh array (stable order = ALL_TYPES) so
+ * it can seed the existing enabled-types state without surprises.
+ */
+export function effectiveVisibleTypes(
+	mode: FilterMode,
+	lodSet: Set<string>,
+	manualSet: Set<string>,
+	types: readonly string[] = ALL_TYPES,
+): string[] {
+	const chosen = mode === "auto" ? lodSet : manualSet;
+	return types.filter((t) => chosen.has(t));
+}
+
 // ------------------------------------------------------- type size + clustering
 // Nodes are sized by concept type (generality) so the graph reads as nested
 // scopes: broad, structural types are large; leaf/detail types are small. Same-
@@ -281,6 +413,16 @@ export type AnchorMap = Record<string, Anchor>;
 /** localStorage key holding the anchor map for a given vault. */
 export function anchorStorageKey(vaultId: string): string {
 	return `brainz:graph:anchors:${vaultId}`;
+}
+
+/** localStorage key holding the LOD filter mode ("auto"/"manual") for a vault. */
+export function filterModeStorageKey(vaultId: string): string {
+	return `brainz:graph:filter-mode:${vaultId}`;
+}
+
+/** Coerce a stored value into a valid FilterMode, defaulting to "auto". */
+export function parseFilterMode(raw: string | null | undefined): FilterMode {
+	return raw === "manual" ? "manual" : "auto";
 }
 
 /** A minimal shape a d3 sim node satisfies — id plus mutable fixed coords. */
