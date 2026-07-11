@@ -85,8 +85,15 @@
 	function showAllTypes() {
 		enabledTypes = [...ALL_TYPES];
 	}
-	function resetTypes() {
+	// One clear "Reset graph": restore default type filters AND clear the drag
+	// anchors (un-pin + re-layout, handled inside Graph.resetGraph). Confirm first
+	// since it discards the user's manual node placements.
+	function resetGraph() {
+		if (typeof confirm === "function" && !confirm("Reset the graph? This clears pinned node positions and restores the default type filters.")) {
+			return;
+		}
 		enabledTypes = defaultVisibleTypes();
+		graphRef?.resetGraph();
 	}
 
 	// ------------------------------------------------------------ selection
@@ -192,15 +199,23 @@
 					<span class="dot" style="background:{TYPE_COLORS[t]}; color:{TYPE_COLORS[t]}"></span>{t}
 				</button>
 			{/each}
+			{#if !allEnabled}
+				<button
+					type="button"
+					class="chip chip-action"
+					onclick={showAllTypes}
+					title="Render every concept type"
+				>
+					Show all
+				</button>
+			{/if}
 			<button
 				type="button"
 				class="chip chip-action"
-				onclick={allEnabled ? resetTypes : showAllTypes}
-				title={allEnabled
-					? "Show only the default high-signal types"
-					: "Render every concept type"}
+				onclick={resetGraph}
+				title="Restore default type filters and clear pinned node positions"
 			>
-				{allEnabled ? "Reset" : "Show all"}
+				Reset graph
 			</button>
 		</div>
 
@@ -230,6 +245,7 @@
 					bind:this={graphRef}
 					{graph}
 					{enabledTypes}
+					vaultId={vault.id}
 					{focusId}
 					{selectedId}
 					onselect={(id) => void select(id)}

@@ -1,12 +1,20 @@
 import { describe, expect, it } from "vitest";
 import type { Edge } from "@brainz/contracts";
 import {
+	anchorStorageKey,
+	applyAnchors,
+	clearAnchorsFromNodes,
 	defaultVisibleTypes,
+	deserializeAnchors,
 	isNodeInViewport,
 	nodesInViewport,
 	planEdges,
+	serializeAnchors,
+	setAnchor,
 	stubEdgesFor,
 	toScreen,
+	type AnchorableNode,
+	type AnchorMap,
 	type PositionedNode,
 	type ViewTransform,
 } from "./graph-view";
@@ -107,5 +115,94 @@ describe("planEdges / stubEdgesFor", () => {
 		const stubs = stubEdgesFor(edges, visible, allIds);
 		expect(stubs).toHaveLength(1);
 		expect(stubs[0]!.towardId).toBe("c");
+	});
+});
+
+describe("anchorStorageKey", () => {
+	it("namespaces the key per vault", () => {
+		expect(anchorStorageKey("v1")).toBe("brainz:graph:anchors:v1");
+		expect(anchorStorageKey("v2")).not.toBe(anchorStorageKey("v1"));
+	});
+});
+
+describe("anchors serialize/deserialize round-trip", () => {
+	it("round-trips a map through storage form", () => {
+		const anchors: AnchorMap = { a: { x: 10, y: 20 }, b: { x: -3.5, y: 99 } };
+		expect(deserializeAnchors(serializeAnchors(anchors))).toEqual(anchors);
+	});
+
+	it("returns empty for null/empty/whitespace", () => {
+		expect(deserializeAnchors(null)).toEqual({});
+		expect(deserializeAnchors(undefined)).toEqual({});
+		expect(deserializeAnchors("")).toEqual({});
+	});
+
+	it("returns empty for non-JSON garbage without throwing", () => {
+		expect(deserializeAnchors("{not json")).toEqual({});
+		expect(deserializeAnchors("42")).toEqual({});
+		expect(deserializeAnchors("[1,2,3]")).toEqual({});
+	});
+
+	it("drops entries with missing / non-finite / wrong-typed coords", () => {
+		const raw = JSON.stringify({
+			ok: { x: 1, y: 2 },
+			noY: { x: 1 },
+			stringX: { x: "5", y: 2 },
+			nan: { x: Number.NaN, y: 2 }, // serializes to null → dropped
+			nullVal: null,
+			numVal: 7,
+		});
+		expect(deserializeAnchors(raw)).toEqual({ ok: { x: 1, y: 2 } });
+	});
+});
+
+describe("setAnchor", () => {
+	it("adds a new anchor without mutating the input", () => {
+		const before: AnchorMap = { a: { x: 1, y: 1 } };
+		const after = setAnchor(before, "b", { x: 2, y: 3 });
+		expect(after).toEqual({ a: { x: 1, y: 1 }, b: { x: 2, y: 3 } });
+		expect(before).toEqual({ a: { x: 1, y: 1 } }); // unchanged
+	});
+
+	it("overwrites an existing anchor (drag an already-pinned node)", () => {
+		const after = setAnchor({ a: { x: 1, y: 1 } }, "a", { x: 9, y: 9 });
+		expect(after).toEqual({ a: { x: 9, y: 9 } });
+	});
+});
+
+describe("applyAnchors", () => {
+	const nodes = (): AnchorableNode[] => [
+		{ id: "a", x: 0, y: 0 },
+		{ id: "b", x: 0, y: 0 },
+		{ id: "c", x: 0, y: 0 },
+	];
+
+	it("pins anchored nodes (fx/fy + seeds x/y) and leaves others free", () => {
+		const ns = nodes();
+		const applied = applyAnchors(ns, { a: { x: 11, y: 22 }, c: { x: 5, y: 6 } });
+		expect([...applied].sort()).toEqual(["a", "c"]);
+		expect(ns[0]).toMatchObject({ fx: 11, fy: 22, x: 11, y: 22 });
+		expect(ns[2]).toMatchObject({ fx: 5, fy: 6, x: 5, y: 6 });
+		// b had no anchor → fx/fy untouched (undefined), free to lay out.
+		expect(ns[1]!.fx).toBeUndefined();
+		expect(ns[1]!.fy).toBeUndefined();
+	});
+
+	it("ignores anchors for ids not in the node set", () => {
+		const ns = nodes();
+		const applied = applyAnchors(ns, { ghost: { x: 1, y: 1 } });
+		expect(applied.size).toBe(0);
+		expect(ns.every((n) => n.fx == null && n.fy == null)).toBe(true);
+	});
+});
+
+describe("clearAnchorsFromNodes", () => {
+	it("un-pins every node so a fresh layout can run", () => {
+		const ns: AnchorableNode[] = [
+			{ id: "a", fx: 1, fy: 2 },
+			{ id: "b", fx: 3, fy: 4 },
+		];
+		clearAnchorsFromNodes(ns);
+		expect(ns.every((n) => n.fx === null && n.fy === null)).toBe(true);
 	});
 });

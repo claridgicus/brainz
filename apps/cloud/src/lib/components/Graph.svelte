@@ -17,8 +17,15 @@
 	import type { Edge, GraphNode, GraphPayload } from "@brainz/contracts";
 	import { filterGraph, neighborhood, radiusFor, TYPE_COLORS } from "$lib/graph-data";
 	import {
+		anchorStorageKey,
+		applyAnchors,
+		clearAnchorsFromNodes,
+		deserializeAnchors,
 		nodesInViewport,
 		planEdges,
+		serializeAnchors,
+		setAnchor,
+		type AnchorMap,
 		type EdgeRenderPlan,
 		type PositionedNode,
 	} from "$lib/graph-view";
@@ -33,12 +40,14 @@
 	let {
 		graph,
 		enabledTypes,
+		vaultId,
 		focusId = null,
 		selectedId = null,
 		onselect,
 	}: {
 		graph: GraphPayload;
 		enabledTypes: string[];
+		vaultId: string;
 		focusId?: string | null;
 		selectedId?: string | null;
 		onselect: (id: string) => void;
@@ -67,6 +76,27 @@
 	let hovered: string | null = null; // survives cull passes so re-mounted nodes re-highlight
 	const nodeEls = new Map<string, SVGGElement>();
 	const edgeEls = new Map<string, { el: SVGLineElement; link: SimLink; plan: EdgeRenderPlan }>();
+
+	// ------------------------------------------------------------ drag anchors
+	// User-dropped nodes are pinned (fx/fy kept) and their position persisted per
+	// vault in localStorage, restored on mount so the layout survives reloads.
+	let anchors: AnchorMap = {};
+	function loadAnchors(): AnchorMap {
+		if (typeof localStorage === "undefined") return {};
+		try {
+			return deserializeAnchors(localStorage.getItem(anchorStorageKey(vaultId)));
+		} catch {
+			return {};
+		}
+	}
+	function saveAnchors(): void {
+		if (typeof localStorage === "undefined") return;
+		try {
+			localStorage.setItem(anchorStorageKey(vaultId), serializeAnchors(anchors));
+		} catch {
+			/* storage full/disabled — in-memory anchors still hold for this session */
+		}
+	}
 
 	// Keep off-screen nodes just outside the frame mounted so panning doesn't
 	// pop them in at the very edge.
@@ -131,22 +161,39 @@
 			relation: e.relation,
 		}));
 
+		// Restore saved anchors: pin dropped nodes to their remembered spots so the
+		// free nodes lay out around them. Runs before the sim starts.
+		anchors = loadAnchors();
+		applyAnchors(nodeList, anchors);
+
 		sim?.stop();
 		simNodeList = nodeList;
 		simLinks = links;
+		// Layout tuning for visible separation without jitter or blow-up:
+		//  - link distance 130 (was 85): edges hold nodes further apart.
+		//  - charge -520 (was -320): stronger mutual repulsion opens up clusters.
+		//  - collide r + 14 padding (was +6), strength 0.9, 2 iterations: a hard
+		//    non-overlap constraint so circles never sit on top of each other.
+		// Centering/x-y gravity kept gentle so small graphs don't collapse or fly.
 		sim = forceSimulation<SimNode, SimLink>(nodeList)
 			.force(
 				"link",
 				forceLink<SimNode, SimLink>(links)
 					.id((d) => d.id)
-					.distance(85)
+					.distance(130)
 					.strength(0.4),
 			)
-			.force("charge", forceManyBody().strength(-320))
+			.force("charge", forceManyBody().strength(-520).distanceMax(900))
 			.force("center", forceCenter(width / 2, height / 2).strength(0.06))
 			.force("x", forceX(width / 2).strength(0.045))
 			.force("y", forceY(height / 2).strength(0.045))
-			.force("collide", forceCollide<SimNode>().radius((d) => d.r + 6))
+			.force(
+				"collide",
+				forceCollide<SimNode>()
+					.radius((d) => d.r + 14)
+					.strength(0.9)
+					.iterations(2),
+			)
 			.alpha(0.9)
 			.alphaDecay(0.035)
 			.on("tick", tick);
@@ -170,6 +217,7 @@
 		g.classList.add("node");
 		if (sn.data.pending) g.classList.add("pending");
 		if (sn.id === selectedId) g.classList.add("selected");
+		if (anchors[sn.id]) g.classList.add("pinned");
 		g.dataset["id"] = sn.id;
 
 		const circle = document.createElementNS(SVG_NS, "circle");
@@ -370,8 +418,15 @@
 				g.removeEventListener("pointercancel", onUp);
 				if (moved) {
 					sim?.alphaTarget(0);
-					sn.fx = null;
-					sn.fy = null;
+					// ANCHOR: keep fx/fy set (do NOT clear) so the node stays pinned
+					// at its drop point, then persist it per-vault.
+					const ax = sn.fx ?? sn.x ?? 0;
+					const ay = sn.fy ?? sn.y ?? 0;
+					sn.fx = ax;
+					sn.fy = ay;
+					anchors = setAnchor(anchors, sn.id, { x: ax, y: ay });
+					saveAnchors();
+					g.classList.add("pinned");
 				} else {
 					onselect(sn.id);
 				}
@@ -417,6 +472,28 @@
 		view.y = cy - ((cy - view.y) / view.k) * k;
 		view.k = k;
 		applyView();
+	}
+
+	/**
+	 * Reset the layout (exported: the "Reset graph" control calls via bind:this).
+	 * Clears every persisted anchor for this vault, un-pins all nodes (fx/fy) so
+	 * they're free again, then re-runs the force sim from scratch. Type prefs are
+	 * reset by the parent (+page.svelte) alongside this.
+	 */
+	export function resetGraph(): void {
+		anchors = {};
+		if (typeof localStorage !== "undefined") {
+			try {
+				localStorage.removeItem(anchorStorageKey(vaultId));
+			} catch {
+				/* ignore storage errors */
+			}
+		}
+		// Un-pin the live sim nodes and drop the pinned cue from mounted elements.
+		clearAnchorsFromNodes(simNodeList);
+		for (const g of nodeEls.values()) g.classList.remove("pinned");
+		// Re-layout from scratch.
+		renderGraph();
 	}
 
 	/** Pan/zoom so `id` is centered (exported: parents call via bind:this). */
@@ -621,6 +698,14 @@
 	}
 	svg :global(g.node.selected text) {
 		fill: var(--text);
+	}
+
+	/* Pinned (anchored) nodes read as fixed: a subtle dashed ring in the accent
+	   hue that doesn't overpower the selected/hover states. */
+	svg :global(g.node.pinned circle) {
+		stroke: var(--accent);
+		stroke-width: 1.5;
+		stroke-dasharray: 2 2;
 	}
 
 	/* Hover: halo the hovered node, dim everything outside its neighborhood. */
