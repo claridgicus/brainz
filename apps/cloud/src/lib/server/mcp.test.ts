@@ -7,6 +7,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
+  claimOutputSchema,
+  CLOUD_MCP_TOOLS,
   getMcpTool,
   MCP_TOOL_NAMES,
   onboardCompleteOutputSchema,
@@ -16,7 +18,7 @@ import {
 } from "@brainz/contracts";
 import { ONBOARDING_NUDGE, ONBOARDING_SUMMARY_ID } from "@brainz/engine";
 import { beforeEach, describe, expect, it } from "vitest";
-import { buildMcpServer, type McpServerHooks } from "./mcp";
+import { buildMcpServer, ok, type McpServerHooks } from "./mcp";
 import { VaultDoError, type VaultClient } from "./vault-client";
 
 interface FakeTask {
@@ -499,5 +501,40 @@ describe("onboard tool + nudge", () => {
 
     const status = await client.callTool({ name: "onboard", arguments: { action: "status" } });
     expect(JSON.parse(textBlocks(status)[0]).onboarded).toBe(true);
+  });
+});
+
+describe("extraTools hook (cloud-only registrations, e.g. claim)", () => {
+  it("registers CLOUD_MCP_TOOLS alongside the vault tools and routes calls to the handler", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const client = await connect(fakeVault(), {
+      extraTools: CLOUD_MCP_TOOLS.map((def) => ({
+        def,
+        handler: async (args: Record<string, unknown>) => {
+          calls.push(args);
+          return ok({ status: "sent", expiresAt: "2026-07-11T00:00:00.000Z" });
+        },
+      })),
+    });
+
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(
+      [...MCP_TOOL_NAMES, "claim"].sort(),
+    );
+
+    const result = await client.callTool({
+      name: "claim",
+      arguments: { email: "human@example.com" },
+    });
+    expect(result.isError ?? false).toBe(false);
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(claimOutputSchema.safeParse(payload).success).toBe(true);
+    expect(calls).toEqual([{ email: "human@example.com" }]);
+  });
+
+  it("without the hook, the surface stays exactly MCP_TOOLS (no claim)", async () => {
+    const client = await connect();
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).not.toContain("claim");
   });
 });

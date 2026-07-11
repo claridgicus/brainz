@@ -3,17 +3,23 @@
  * gets: exactly one tool, `signup` (PUBLIC_MCP_TOOLS in @brainz/contracts).
  * A present-but-invalid bearer never reaches this server; it still 401s.
  *
- * `signup` provisions a complete account for an orchestrator's human:
- * a Better Auth-compatible user row (emailVerified false, NO credential
- * account row — auth is passwordless / magic-link only), a first vault, and a
- * working API key. It then mints a one-time MAGIC SIGN-IN LINK for the human
- * (`loginUrl`) — opening it signs them straight into the dashboard. Only the
- * SHA-256 hash of the key is stored; the plaintext key and the magic link
- * appear exactly once, in the tool result, and are never logged.
+ * Signup v2 (Wave G — agent self-signup guardrails): `signup` provisions an
+ * ANONYMOUS, PROVISIONAL workspace — a Better Auth-compatible user row with a
+ * placeholder identity (`unclaimed-<userId>@pending.brainz.invalid`, name
+ * "Unclaimed workspace", emailVerified false, expires_at = now + 7 days), a
+ * first vault, and a working API key. NO login or claim URL is ever returned
+ * (a URL in an agent's tool result sits in orchestrator logs and proves
+ * nothing about a human). Persistence requires the claim flow ($lib/server/
+ * claim): the human approves an EMAILED link. Supplying `email` here merely
+ * fires that same claim request; `claimEmailSent: true` is reported regardless
+ * of the address's eligibility (no account-existence oracle — and no
+ * "already exists" signup error either, since no email binds at signup).
  *
- * Persistence + link minting go through the small `SignupDeps` port so the
- * flow is unit-testable without a Workers runtime; the route wires it to
- * drizzle/D1 (`signupDepsFromDb`) and to Better Auth's magic-link minting.
+ * Only the SHA-256 hash of the API key is stored; the plaintext appears
+ * exactly once, in the tool result, and is never logged. Persistence + the
+ * claim request go through the small `SignupDeps` port so the flow is
+ * unit-testable without a Workers runtime; the route wires it to drizzle/D1
+ * (`signupDepsFromDb`) and to the claim domain.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
@@ -26,6 +32,7 @@ import {
 import { slugify } from "@brainz/engine";
 import { count, eq, gt, and } from "drizzle-orm";
 import { generateApiKey, hashApiKey, keyPrefixOf } from "./api-keys";
+import { placeholderEmail, SIGNUP_EXPIRY_MS, UNCLAIMED_WORKSPACE_NAME } from "./claim";
 import { exceedsSignupRateLimit, rateWindowStart } from "./rate-limit";
 import type { Db } from "./db";
 import { schema } from "./db";
@@ -46,22 +53,24 @@ export interface SignupDeps {
   /** Client IP (CF-Connecting-IP), the rate-limit key. */
   ip: string;
   countRecentSignups(ip: string, since: Date): Promise<number>;
-  emailExists(email: string): Promise<boolean>;
   /** Persist the account rows atomically. */
   persistSignup(p: ProvisionedSignup): Promise<void>;
   /**
-   * Mint a one-time magic sign-in link for this email that lands on /dashboard.
-   * Called AFTER the account rows are persisted so the link resolves to the
-   * new user. Returns the full URL delivered to the human as `loginUrl`.
+   * Fire a claim request for the freshly provisioned owner (same semantics as
+   * the authenticated `claim` tool: approval link EMAILED to the human, or a
+   * notice email to an already-registered address — never returned). Called
+   * only when the caller supplied `email`, AFTER the rows are persisted.
+   * Failures must not fail the signup — `claimEmailSent` reports true
+   * regardless of the address's eligibility.
    */
-  createLoginLink(email: string): Promise<string>;
+  requestClaim(args: { userId: string; email: string }): Promise<void>;
 }
 
 export const DEFAULT_VAULT_NAME = "My vault";
 
 /**
  * The signup flow. Returns an MCP tool result; the ONLY place the plaintext
- * API key and magic sign-in link ever appear.
+ * API key ever appears. Never returns a URL of any kind.
  */
 export async function handleSignup(input: SignupInput, deps: SignupDeps): Promise<ToolResult> {
   return guarded(async () => {
@@ -69,7 +78,6 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
     if (!parsed.success) {
       return fail(`invalid signup input: ${parsed.error.issues[0]?.message ?? "bad arguments"}`);
     }
-    const email = parsed.data.email.trim().toLowerCase();
     const now = deps.now();
 
     // Per-IP rate limit: 5 signups per rolling hour.
@@ -77,13 +85,6 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
     if (exceedsSignupRateLimit(recent)) {
       return fail(
         "rate limit exceeded: at most 5 signups per hour from one IP — wait and try again later",
-      );
-    }
-
-    if (await deps.emailExists(email)) {
-      return fail(
-        `an account for ${email} already exists — your human can sign in at the /login page ` +
-          "(enter this email, click the magic link) and create an API key from a vault's settings page instead",
       );
     }
 
@@ -95,18 +96,20 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
     const apiKey = generateApiKey();
     const userId = crypto.randomUUID();
     const vaultId = crypto.randomUUID();
+    const expiresAt = new Date(now.getTime() + SIGNUP_EXPIRY_MS);
 
-    // Better Auth-compatible user row: emailVerified false and NO credential
-    // account row — the human signs in via a magic link, never a password.
+    // Anonymous provisional account: placeholder identity, unverified, and
+    // EXPIRING — the /claim approval flow is the only path to permanence.
     await deps.persistSignup({
       user: {
         id: userId,
-        name: email.split("@")[0] || email,
-        email,
+        name: UNCLAIMED_WORKSPACE_NAME,
+        email: placeholderEmail(userId),
         emailVerified: false,
         image: null,
         createdAt: now,
         updatedAt: now,
+        expiresAt,
       },
       vault: {
         id: vaultId,
@@ -128,22 +131,28 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
       event: { id: crypto.randomUUID(), ip: deps.ip, createdAt: now },
     });
 
-    // Mint the human's one-time sign-in link now that the user exists.
-    const loginUrl = await deps.createLoginLink(email);
+    // Optional email: fire the claim request (approval link EMAILED to the
+    // human — never returned here). claimEmailSent is true whenever an email
+    // was supplied, regardless of eligibility or delivery: reporting anything
+    // finer would be an account-existence oracle.
+    const email = parsed.data.email?.trim().toLowerCase();
+    if (email) {
+      try {
+        await deps.requestClaim({ userId, email });
+      } catch {
+        // Deliberately swallowed — see above.
+      }
+    }
 
     const output: SignupOutput = {
       apiKey,
-      loginUrl,
       vaultSlug,
-      email,
+      expiresAt: expiresAt.toISOString(),
+      claimEmailSent: Boolean(email),
     };
     // First content block is the strict SignupOutput JSON (the wire shape).
-    // Append a SECOND, human-oriented guidance block documenting the handoff-
-    // exposure model for the loginUrl (task-agent-loginurl-hardening): the URL
-    // is session-granting and is NOT emailed, so it must not be persisted in
-    // orchestrator logs. It is single-use (consumed on first open) and expires
-    // sooner than an emailed link (~10 min). This is additive — it does not
-    // change the SignupOutput shape parsed from the first block.
+    // A second, additive guidance block teaches the guardrail model: secret
+    // key, 7-day unclaimed expiry, claim-to-persist. No URL appears anywhere.
     const base = ok(output);
     return {
       ...base,
@@ -152,12 +161,12 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
         {
           type: "text" as const,
           text:
-            "SECURITY — handling loginUrl: this is a one-time, session-granting magic link for your " +
-            "human, NOT an emailed link. Hand it to the human directly and do NOT log, echo, or persist " +
-            "it (a logged loginUrl is a logged session). It is single-use (expires the moment it is first " +
-            "opened) and expires in ~10 minutes — shorter than an emailed link — so deliver it promptly; " +
-            "if it lapses, the human can request a fresh magic link at /login. The apiKey keeps working " +
-            "regardless.",
+            "SECURITY & PERSISTENCE — keep the apiKey SECRET (never log, echo, or print it; a logged " +
+            "key is a leaked workspace). This workspace is PROVISIONAL: it expires on " +
+            `${expiresAt.toISOString().slice(0, 10)} unless a human claims it. To persist it, call the ` +
+            "authenticated `claim` tool with your human's email — the approval link is EMAILED to them " +
+            "and never shown to you; ask your human to open that email and approve (never ask them to " +
+            "forward it).",
         },
       ],
     };
@@ -194,31 +203,23 @@ export function buildPublicMcpServer(deps: SignupDeps): McpServer {
 
 /**
  * Wire SignupDeps to the D1 control plane (all account rows in one atomic
- * batch) and to a magic-link minter. `createLoginLink` is supplied by the
- * route, where the per-request Better Auth instance + request headers live.
+ * batch) and to the claim domain. `requestClaim` is supplied by the route,
+ * where the mailer + request origin live.
  */
 export function signupDepsFromDb(
   db: Db,
-  opts: { ip: string; createLoginLink: (email: string) => Promise<string> },
+  opts: { ip: string; requestClaim: (args: { userId: string; email: string }) => Promise<void> },
 ): SignupDeps {
   return {
     now: () => new Date(),
     ip: opts.ip,
-    createLoginLink: opts.createLoginLink,
+    requestClaim: opts.requestClaim,
     countRecentSignups: async (ip, since) => {
       const rows = await db
         .select({ n: count() })
         .from(schema.signupEvent)
         .where(and(eq(schema.signupEvent.ip, ip), gt(schema.signupEvent.createdAt, since)));
       return rows[0]?.n ?? 0;
-    },
-    emailExists: async (email) => {
-      const rows = await db
-        .select({ id: schema.user.id })
-        .from(schema.user)
-        .where(eq(schema.user.email, email))
-        .limit(1);
-      return rows.length > 0;
     },
     persistSignup: async (p) => {
       await db.batch([

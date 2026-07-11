@@ -5,6 +5,10 @@
  *   2. no external http(s) ASSET references anywhere in the build —
  *      scripts, stylesheets, images, fonts, iframes must all be self-hosted.
  *      (Anchor hrefs to the app / GitHub are expected and allowed.)
+ *   3. SEO head is complete on every prerendered page (canonical, OG tags,
+ *      og:image, large twitter card, JSON-LD), the social-card PNGs exist at
+ *      their expected dimensions, and sitemap.xml covers exactly the
+ *      prerendered pages.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, extname } from "node:path";
@@ -126,6 +130,83 @@ for (const file of cssFiles) {
 	}
 }
 
+// --- 3. SEO head on every prerendered page ----------------------------------
+// 404.html is the client-rendered fallback shell — its head is empty by design.
+const SITE_URL = "https://brownmatter.ai";
+const OG_IMAGE = `${SITE_URL}/og.png`;
+const prerendered = htmlFiles.filter((f) => !f.endsWith("404.html"));
+for (const file of prerendered) {
+	const name = file.slice(buildDir.length + 1);
+	const html = readFileSync(file, "utf8");
+	const required = [
+		['<link rel="canonical"', "canonical link"],
+		['property="og:title"', "og:title"],
+		['property="og:description"', "og:description"],
+		[`property="og:image" content="${OG_IMAGE}"`, `og:image pointing at ${OG_IMAGE}`],
+		['name="twitter:card" content="summary_large_image"', "twitter:card summary_large_image"],
+		['<script type="application/ld+json">', "JSON-LD structured data"],
+		['<meta name="description"', "meta description"],
+	];
+	for (const [needle, label] of required) {
+		if (!html.includes(needle)) errors.push(`${name}: missing ${label}`);
+	}
+	// Every canonical/og:url must be a SITE_URL page, never a *.pages.dev or localhost.
+	const canonical = html.match(/<link rel="canonical" href="([^"]*)"/)?.[1];
+	if (canonical && !canonical.startsWith(SITE_URL)) {
+		errors.push(`${name}: canonical points off-site: ${canonical}`);
+	}
+}
+
+// --- 4. social-card PNGs exist at the expected dimensions --------------------
+function pngSize(path) {
+	const buf = readFileSync(path);
+	return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+for (const [file, width, height] of [
+	["og.png", 1200, 630],
+	["apple-touch-icon.png", 180, 180],
+]) {
+	try {
+		const got = pngSize(join(buildDir, file));
+		if (got.width !== width || got.height !== height) {
+			errors.push(`${file}: is ${got.width}×${got.height}, expected ${width}×${height}`);
+		}
+	} catch {
+		errors.push(`${file}: missing from build/ — run \`node scripts/generate-og.mjs\` and commit`);
+	}
+}
+
+// --- 5. sitemap.xml covers exactly the prerendered pages ---------------------
+{
+	const expected = prerendered
+		.map((f) => {
+			const rel = f.slice(buildDir.length + 1).replaceAll("\\", "/");
+			if (rel === "index.html") return `${SITE_URL}/`;
+			return `${SITE_URL}/${rel.replace(/\/index\.html$/, "").replace(/\.html$/, "")}`;
+		})
+		.sort();
+	let inSitemap = [];
+	try {
+		const xml = readFileSync(join(buildDir, "sitemap.xml"), "utf8");
+		inSitemap = [...xml.matchAll(/<loc>([^<]*)<\/loc>/g)].map((m) => m[1]).sort();
+	} catch {
+		errors.push("sitemap.xml: missing from build/ — `npm run build` generates it");
+	}
+	if (inSitemap.length > 0 && JSON.stringify(inSitemap) !== JSON.stringify(expected)) {
+		errors.push(
+			`sitemap.xml out of sync — has [${inSitemap.join(", ")}], pages are [${expected.join(", ")}]`,
+		);
+	}
+	try {
+		const robots = readFileSync(join(buildDir, "robots.txt"), "utf8");
+		if (!robots.includes(`Sitemap: ${SITE_URL}/sitemap.xml`)) {
+			errors.push("robots.txt: missing the Sitemap directive");
+		}
+	} catch {
+		errors.push("robots.txt: missing from build/");
+	}
+}
+
 if (errors.length > 0) {
 	console.error(`check-build: FAILED (${errors.length} problem${errors.length === 1 ? "" : "s"})`);
 	for (const e of errors) console.error(`  - ${e}`);
@@ -133,5 +214,5 @@ if (errors.length > 0) {
 }
 
 console.log(
-	`check-build: OK — ${htmlFiles.length} HTML files, CTA links present, no external asset references.`,
+	`check-build: OK — ${htmlFiles.length} HTML files, CTA links present, no external asset references, SEO head + social cards + sitemap verified.`,
 );

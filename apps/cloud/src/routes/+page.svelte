@@ -16,6 +16,9 @@
 		<a href="/login" class="btn">Sign in</a>
 		<a href="/signup" class="btn btn-primary">Sign up</a>
 	</div>
+	<p class="agent-link muted">
+		Or <a href="/skill">let your agent set it up &rarr;</a>
+	</p>
 	<p class="pitch-link muted">
 		New here? <a href="https://brownmatter.ai" rel="noopener">Read the pitch at brownmatter.ai</a>
 	</p>
@@ -56,6 +59,10 @@
 		display: flex;
 		gap: 12px;
 		margin-bottom: 18px;
+	}
+	.agent-link {
+		font-size: 13.5px;
+		margin-bottom: 6px;
 	}
 	.pitch-link {
 		font-size: 13.5px;

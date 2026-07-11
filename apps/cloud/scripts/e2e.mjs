@@ -8,12 +8,16 @@
  * typed relations, code_areas, new ontology types) → search → related →
  * context (budget respected, Code areas line) → graph (pending node) → API key
  * (plaintext once) → MCP over HTTP with the bearer key (initialize,
- * tools/list = 9 tools, get_context, upsert_concept, onboarding nudge,
+ * tools/list, get_context, upsert_concept, onboarding nudge,
  * onboard status/start/complete + nudge disappearing) → verify via REST →
- * revoked key gets 401 → PUBLIC signup over unauthenticated MCP (exactly one
- * tool, provision account/vault/key, magic loginUrl signs the human in,
- * duplicate-email + per-IP rate limit, invalid bearer still 401) → assert NO
- * password endpoints work → magic-link request rate-limit trips.
+ * revoked key gets 401 → Wave G journey over unauthenticated MCP: ANONYMOUS
+ * signup (no URL of any kind returned) → key works → `claim` tool → mailer
+ * captures the EMAILED approval URL → /claim/<token> page → approve → human
+ * session on /dashboard, key still works, token single-use → signup w/ email
+ * auto-fires the claim + decline path → per-IP rate limit → invalid bearer
+ * still 401 → NO password endpoints → magic-link request rate-limit trips →
+ * restart with backdated expiries: unclaimed keys 401 "workspace expired
+ * unclaimed", the claimed key keeps working.
  *
  * Email capture: no send_email binding exists in `wrangler dev`, so the app
  * uses DevMailer, which logs `[DevMailer] magic link for <email>: <url>` to
@@ -36,6 +40,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import {
   apiKeyCreateResponseSchema,
   apiKeyListResponseSchema,
+  claimOutputSchema,
   contextResponseSchema,
   getContextOutputSchema,
   getMcpTool,
@@ -156,16 +161,45 @@ async function main() {
   run("npx", ["wrangler", "d1", "migrations", "apply", "brainz", "--local", "--persist-to", STATE_DIR]);
 
   console.log(`-- starting wrangler dev on :${PORT}…`);
-  const dev = spawn(
-    "npx",
-    // --local: remote bindings (Workers AI) disabled so no Cloudflare login is
-    // needed; the vault degrades to keyword-only search, which we assert.
-    ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", STATE_DIR, "--show-interactive-dev-session=false"],
-    { cwd: appDir, stdio: ["ignore", "pipe", "pipe"] },
-  );
+  // --local: remote bindings (Workers AI) disabled so no Cloudflare login is
+  // needed; the vault degrades to keyword-only search, which we assert.
+  const DEV_ARGS = ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", STATE_DIR, "--show-interactive-dev-session=false"];
   let devLog = "";
-  dev.stdout.on("data", (d) => (devLog += d));
-  dev.stderr.on("data", (d) => (devLog += d));
+  function startDev() {
+    // detached → own process group, so stopDev can kill wrangler AND its
+    // workerd child (a SIGKILLed wrangler otherwise orphans workerd on the
+    // port, and the next instance silently loses the race for it).
+    const proc = spawn("npx", DEV_ARGS, { cwd: appDir, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    proc.stdout.on("data", (d) => (devLog += d));
+    proc.stderr.on("data", (d) => (devLog += d));
+    return proc;
+  }
+  // Stop wrangler dev and WAIT until the port actually closes (graceful
+  // SIGTERM first — wrangler tears workerd down itself — then a group
+  // SIGKILL as a last resort).
+  async function stopDev(proc) {
+    try {
+      process.kill(-proc.pid, "SIGTERM");
+    } catch {
+      proc.kill("SIGTERM");
+    }
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      try {
+        await fetch(`${BASE}/`, { redirect: "manual" });
+      } catch {
+        return; // connection refused — port is free
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    try {
+      process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      proc.kill("SIGKILL");
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  let dev = startDev();
 
   const MAGIC_RE = /\/api\/auth\/magic-link\/verify\?[^\s"'<>)]+/;
 
@@ -211,6 +245,39 @@ async function main() {
           const urlMatch = contents.match(MAGIC_RE);
           if (urlMatch) {
             // Absolute URL in the MIME already; make relative ones absolute.
+            return urlMatch[0].startsWith("http") ? urlMatch[0] : `${BASE}${urlMatch[0]}`;
+          }
+        } catch {
+          /* file not flushed yet — retry */
+        }
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return null;
+  }
+
+  // Capture the EMAILED claim-approval URL for `email` (Wave G). Same two
+  // mailer paths as captureLink: DevMailer logs
+  //   "[DevMailer] claim approval for <email>: <url>"
+  // and the miniflare send_email stub writes the raw MIME to a .eml file, from
+  // which we pull the /claim/<64-hex> URL (soft QP line breaks unfolded).
+  const CLAIM_RE = /https?:\/\/[^\s"'<>)]*\/claim\/[0-9a-f]{64}|\/claim\/[0-9a-f]{64}/;
+  async function captureClaimLink(email, marker) {
+    const escEmail = email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const devRe = new RegExp(`\\[DevMailer\\] claim approval for ${escEmail}: (\\S+)`);
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const slice = devLog.slice(marker);
+      const dev = slice.match(devRe);
+      if (dev) return dev[1];
+      for (const block of slice.split("send_email binding called")) {
+        const fileMatch = block.match(/(\S+\.eml)/);
+        if (!fileMatch) continue;
+        try {
+          const contents = readFileSync(fileMatch[1], "utf8").replace(/=\r?\n/g, "");
+          if (!contents.includes(email)) continue;
+          const urlMatch = contents.match(CLAIM_RE);
+          if (urlMatch) {
             return urlMatch[0].startsWith("http") ? urlMatch[0] : `${BASE}${urlMatch[0]}`;
           }
         } catch {
@@ -457,9 +524,8 @@ async function main() {
     const tools = await mcp.listTools();
     const toolNames = tools.tools.map((t) => t.name).sort();
     step(
-      "MCP tools/list returns the contract tools (incl. onboard + task tools)",
-      toolNames.length === MCP_TOOL_NAMES.length &&
-        JSON.stringify(toolNames) === JSON.stringify([...MCP_TOOL_NAMES].sort()) &&
+      "MCP tools/list returns the contract tools + cloud-only claim",
+      JSON.stringify(toolNames) === JSON.stringify([...MCP_TOOL_NAMES, "claim"].sort()) &&
         toolNames.includes("onboard") &&
         toolNames.includes("take_task"),
       toolNames.join(", "),
@@ -715,35 +781,46 @@ async function main() {
     const pubTools = await pub.listTools();
     const pubNames = pubTools.tools.map((t) => t.name);
     step(
-      "unauthenticated tools/list is exactly [signup] — none of the 9 vault tools",
+      "unauthenticated tools/list is exactly [signup] — no vault tools, no claim",
       JSON.stringify(pubNames) === JSON.stringify(["signup"]) &&
-        !pubNames.some((n) => MCP_TOOL_NAMES.includes(n)),
+        !pubNames.some((n) => MCP_TOOL_NAMES.includes(n)) &&
+        !pubNames.includes("claim"),
       pubNames.join(", "),
     );
 
-    const claimEmail = `agent-${Date.now()}@example.com`;
+    // Signup v2 (Wave G) is ANONYMOUS: no email required, provisional 7-day
+    // workspace, and NEVER a URL of any kind in the result.
     const signupRes = await pub.callTool({
       name: "signup",
-      arguments: { email: claimEmail, vaultName: "Agent Vault" },
+      arguments: { vaultName: "Agent Vault" },
     });
     step(
-      "public signup tool call succeeds",
+      "public anonymous signup (no email) succeeds",
       signupRes.isError !== true,
       signupRes.isError ? (signupRes.content.find((c) => c.type === "text")?.text ?? "").slice(0, 160) : "",
     );
-    const signupPayload = JSON.parse(signupRes.content.find((c) => c.type === "text").text);
+    const signupBlocks = signupRes.content.filter((c) => c.type === "text").map((c) => c.text);
+    const signupPayload = JSON.parse(signupBlocks[0]);
     assertParse(signupOutputSchema, signupPayload, "signup output parses with contract schema");
-    // The loginUrl is a real Better Auth magic link (single-use). wrangler dev
-    // rewrites the host to the custom domain, so assert the PATH + slug.
-    const loginUrl = new URL(signupPayload.loginUrl);
     step(
-      "loginUrl is a magic-link/verify link and slug derives from vaultName",
-      /\/api\/auth\/magic-link\/verify$/.test(loginUrl.pathname) &&
-        loginUrl.searchParams.get("token") &&
-        signupPayload.vaultSlug === "agent-vault",
-      `${signupPayload.vaultSlug} ${loginUrl.pathname}`,
+      "signup output: slug from vaultName, claimEmailSent false, ~7-day expiresAt",
+      signupPayload.vaultSlug === "agent-vault" &&
+        signupPayload.claimEmailSent === false &&
+        new Date(signupPayload.expiresAt).getTime() > Date.now() + 6 * 24 * 3600 * 1000,
+      `${signupPayload.vaultSlug} expires ${signupPayload.expiresAt}`,
     );
-    step("signup output has no legacy claimUrl field", !("claimUrl" in signupPayload));
+    step(
+      "signup result carries NO URL of any kind (no loginUrl/claimUrl, nothing http)",
+      !("loginUrl" in signupPayload) &&
+        !("claimUrl" in signupPayload) &&
+        !signupBlocks.some((t) => /https?:\/\//.test(t)),
+    );
+    step(
+      "signup appends the guardrail guidance block (secret key, expiry, claim)",
+      signupBlocks.length === 2 && /SECRET/i.test(signupBlocks[1]) && /`claim`/.test(signupBlocks[1]),
+      (signupBlocks[1] ?? "").slice(0, 70),
+    );
+    const claimedKey = signupPayload.apiKey;
 
     // the returned apiKey works immediately on the authenticated MCP surface
     const agentTransport = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), {
@@ -759,33 +836,99 @@ async function main() {
         getMcpTool("vault_stats").outputSchema.safeParse(agentStatsPayload).success,
       `concepts=${agentStatsPayload?.concepts}`,
     );
-    await agentMcp.close();
 
-    // 13. the human follows the magic loginUrl → signed straight into dashboard
-    // (own cookie jar — the human's browser). Unknown-until-now credential path:
-    // there is no password to set; the link IS the sign-in.
+    // 13. CLAIM-TO-PERSIST: the authenticated surface carries the cloud-only
+    // `claim` tool; the approval link travels by EMAIL only (mailer capture).
+    const agentTools = await agentMcp.listTools();
+    const agentToolNames = agentTools.tools.map((t) => t.name).sort();
+    step(
+      "authenticated tools/list = MCP_TOOLS + claim (cloud-only)",
+      JSON.stringify(agentToolNames) === JSON.stringify([...MCP_TOOL_NAMES, "claim"].sort()),
+      agentToolNames.join(", "),
+    );
+
+    const claimEmail = `claimer-${Date.now()}@example.com`;
+    const claimMarker = devLog.length;
+    const claimRes = await agentMcp.callTool({ name: "claim", arguments: { email: claimEmail } });
+    const claimBlocks = claimRes.content.filter((c) => c.type === "text").map((c) => c.text);
+    step(
+      "claim tool call succeeds",
+      claimRes.isError !== true,
+      claimRes.isError ? (claimBlocks[0] ?? "").slice(0, 160) : "",
+    );
+    const claimPayload = JSON.parse(claimBlocks[0]);
+    assertParse(claimOutputSchema, claimPayload, "claim output parses with contract schema");
+    step(
+      "claim result is {status: sent} with a future expiry and NO URL/token",
+      claimPayload.status === "sent" &&
+        new Date(claimPayload.expiresAt).getTime() > Date.now() &&
+        !claimBlocks.some((t) => /https?:\/\/|\/claim\//.test(t)),
+    );
+
+    const claimUrl = await captureClaimLink(claimEmail, claimMarker);
+    step("mailer captured the EMAILED approval URL", Boolean(claimUrl), (claimUrl ?? "").slice(0, 70));
+    const claimPath = new URL(claimUrl).pathname;
+    step("approval URL is /claim/<64-hex-token>", /^\/claim\/[0-9a-f]{64}$/.test(claimPath), claimPath);
+
+    // The approval page shows what's being approved (load contract).
+    const claimPage = await fetch(`${BASE}${claimPath}`, { headers: { origin: BASE } });
+    const claimPageHtml = await claimPage.text();
+    step(
+      "claim page renders the email + vault being attached",
+      claimPage.status === 200 &&
+        claimPageHtml.includes(claimEmail) &&
+        claimPageHtml.includes("Agent Vault"),
+      `status ${claimPage.status}`,
+    );
+
+    // Approve (plain form POST): atomic bind, then a 303 to a short-lived
+    // magic-link verify URL that signs THIS browser in, landing on /dashboard.
+    // `accept: text/html` = the plain-browser form flow (redirects are real
+    // 303s, failures real 400s); without it SvelteKit answers with the JSON
+    // ActionResult envelope instead.
+    const approveRes = await fetch(`${BASE}${claimPath}?/approve`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: BASE, accept: "text/html", "content-type": "application/x-www-form-urlencoded" },
+      body: "",
+    });
+    const verifyLocation = approveRes.headers.get("location") ?? "";
+    step(
+      "approve action 303-redirects to the magic-link verify URL",
+      approveRes.status === 303 && /\/api\/auth\/magic-link\/verify\?/.test(verifyLocation),
+      `status ${approveRes.status} → ${verifyLocation.slice(0, 70)}`,
+    );
+
     const humanJar = new Map();
-    const followLogin = await fetch(`${BASE}${loginUrl.pathname}${loginUrl.search}`, {
+    const approveVerifyUrl = new URL(verifyLocation, BASE);
+    const approveVerified = await fetch(`${BASE}${approveVerifyUrl.pathname}${approveVerifyUrl.search}`, {
       method: "GET",
       redirect: "manual",
       headers: { origin: BASE },
     });
-    for (const raw of followLogin.headers.getSetCookie?.() ?? []) {
-      const [pair] = raw.split(";");
-      const eq = pair.indexOf("=");
-      if (eq > 0) humanJar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
-    }
+    storeCookies(approveVerified, humanJar);
     step(
-      "following signup loginUrl signs the human in (redirect + session cookie)",
-      (followLogin.status === 302 || followLogin.status === 303) && humanJar.size > 0,
-      `status ${followLogin.status} → ${followLogin.headers.get("location")}`,
+      "following the approve redirect signs the human in (session cookie)",
+      (approveVerified.status === 302 || approveVerified.status === 303) && humanJar.size > 0,
+      `status ${approveVerified.status} → ${approveVerified.headers.get("location")}`,
     );
 
-    const humanCookie = [...humanJar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
+    const humanCookie = cookieHeader(humanJar);
+    const humanSession = await fetch(`${BASE}/api/auth/get-session`, {
+      headers: { origin: BASE, cookie: humanCookie },
+    });
+    const humanSessionJson = await humanSession.json().catch(() => null);
+    step(
+      "claim bound the email and verified it (account permanent)",
+      humanSessionJson?.user?.email === claimEmail &&
+        humanSessionJson?.user?.emailVerified === true,
+      `email=${humanSessionJson?.user?.email} verified=${humanSessionJson?.user?.emailVerified}`,
+    );
+
     const humanVaults = await fetch(`${BASE}/api/vaults`, { headers: { cookie: humanCookie } });
     const humanVaultsJson = await humanVaults.json().catch(() => null);
     step(
-      "signed-in session sees the agent-created vault via GET /api/vaults",
+      "claimed session sees the agent-created vault via GET /api/vaults",
       humanVaults.status === 200 &&
         humanVaultsJson?.vaults?.some((v) => v.slug === signupPayload.vaultSlug),
       JSON.stringify(humanVaultsJson?.vaults?.map((v) => v.slug)),
@@ -794,51 +937,91 @@ async function main() {
     const dash = await fetch(`${BASE}/dashboard`, { headers: { cookie: humanCookie } });
     const dashHtml = await dash.text();
     step(
-      "dashboard loads for the signed-in session and lists the vault",
+      "dashboard loads for the claimed session and lists the vault",
       dash.status === 200 && dashHtml.includes("Agent Vault"),
       `status ${dash.status}`,
     );
 
-    // The magic link is single-use: following it again must NOT mint a session.
-    const reuseJar = new Map();
-    const reused = await fetch(`${BASE}${loginUrl.pathname}${loginUrl.search}`, {
-      method: "GET",
+    // The agent's key KEEPS working after the claim.
+    const statsAfterClaim = await agentMcp.callTool({ name: "vault_stats", arguments: {} });
+    step("agent apiKey still works after the claim is approved", statsAfterClaim.isError !== true);
+
+    // Single-use: a consumed token never approves twice.
+    const approveAgain = await fetch(`${BASE}${claimPath}?/approve`, {
+      method: "POST",
       redirect: "manual",
-      headers: { origin: BASE },
+      headers: { origin: BASE, accept: "text/html", "content-type": "application/x-www-form-urlencoded" },
+      body: "",
     });
-    for (const raw of reused.headers.getSetCookie?.() ?? []) {
-      const [pair] = raw.split(";");
-      const eq = pair.indexOf("=");
-      if (eq > 0) reuseJar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
-    }
-    step(
-      "magic link is single-use (second follow mints no session cookie)",
-      reuseJar.size === 0,
-      `cookies=${reuseJar.size}, → ${reused.headers.get("location")}`,
-    );
+    step("re-approving a consumed claim token → 400", approveAgain.status === 400, `status ${approveAgain.status}`);
 
-    // 14. duplicate email + per-IP rate limit (5/hour), still over the public server
-    const dup = await pub.callTool({ name: "signup", arguments: { email: claimEmail } });
-    const dupText = dup.content.find((c) => c.type === "text")?.text ?? "";
+    // …and claiming an already-claimed workspace is an isError.
+    const reclaim = await agentMcp.callTool({
+      name: "claim",
+      arguments: { email: `again-${Date.now()}@example.com` },
+    });
+    const reclaimText = reclaim.content.find((c) => c.type === "text")?.text ?? "";
     step(
-      "second signup with the same email → isError with sign-in guidance",
-      dup.isError === true && dupText.includes("already exists") && dupText.includes("/login"),
-      dupText.slice(0, 90),
+      "claim on an already-claimed workspace → isError with settings guidance",
+      reclaim.isError === true && /already claimed/.test(reclaimText),
+      reclaimText.slice(0, 80),
     );
+    await agentMcp.close();
 
+    // 13b. signup WITH email auto-fires the same claim request; decline path.
+    const declineEmail = `decliner-${Date.now()}@example.com`;
+    const declineMarker = devLog.length;
+    const signup2 = await pub.callTool({
+      name: "signup",
+      arguments: { vaultName: "Second Vault", email: declineEmail },
+    });
+    const signup2Payload = JSON.parse(signup2.content.find((c) => c.type === "text").text);
+    step(
+      "signup with email reports claimEmailSent true (still no URL, no dup-email error)",
+      signup2.isError !== true &&
+        signup2Payload.claimEmailSent === true &&
+        !("loginUrl" in signup2Payload),
+      JSON.stringify(signup2Payload).slice(0, 100),
+    );
+    const declineUrl = await captureClaimLink(declineEmail, declineMarker);
+    step("signup-supplied email got the approval email (mailer capture)", Boolean(declineUrl));
+    const declinePath = new URL(declineUrl).pathname;
+    const declineRes = await fetch(`${BASE}${declinePath}?/decline`, {
+      method: "POST",
+      headers: { origin: BASE, accept: "text/html", "content-type": "application/x-www-form-urlencoded" },
+      body: "",
+    });
+    const declineHtml = await declineRes.text();
+    step(
+      "decline action confirms nothing was attached",
+      declineRes.status === 200 && /Claim declined/i.test(declineHtml),
+      `status ${declineRes.status}`,
+    );
+    const declinedApprove = await fetch(`${BASE}${declinePath}?/approve`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: BASE, accept: "text/html", "content-type": "application/x-www-form-urlencoded" },
+      body: "",
+    });
+    step("approving a declined claim → 400", declinedApprove.status === 400, `status ${declinedApprove.status}`);
+
+    // 13c. a third anonymous signup stays UNCLAIMED for the expiry journey (§20).
+    const expiryRes = await pub.callTool({ name: "signup", arguments: { vaultName: "Expiring Vault" } });
+    const expiryPayload = JSON.parse(expiryRes.content.find((c) => c.type === "text").text);
+    step(
+      "expiry-journey signup succeeds (left unclaimed)",
+      expiryRes.isError !== true && /^bz_/.test(expiryPayload.apiKey ?? ""),
+    );
+    const expiringKey = expiryPayload.apiKey;
+
+    // 14. per-IP rate limit (5/hour): three signups so far, two more pass, the 6th trips
     let more = true;
-    for (let i = 2; i <= 5; i++) {
-      const r = await pub.callTool({
-        name: "signup",
-        arguments: { email: `agent-${Date.now()}-${i}@example.com` },
-      });
+    for (let i = 4; i <= 5; i++) {
+      const r = await pub.callTool({ name: "signup", arguments: { vaultName: `Filler ${i}` } });
       if (r.isError) more = false;
     }
-    step("signups 2-5 from the same IP within the hour still succeed", more);
-    const sixth = await pub.callTool({
-      name: "signup",
-      arguments: { email: `agent-${Date.now()}-6@example.com` },
-    });
+    step("signups 4-5 from the same IP within the hour still succeed", more);
+    const sixth = await pub.callTool({ name: "signup", arguments: {} });
     const sixthText = sixth.content.find((c) => c.type === "text")?.text ?? "";
     step(
       "6th signup from the same IP within the hour → rate-limit isError",
@@ -1076,15 +1259,66 @@ async function main() {
       rlSixth.status === 429 && !/exist|found/i.test(JSON.stringify(rlBody)),
       `status ${rlSixth.status}`,
     );
+
+    // ================================================================
+    // 20. EXPIRY ENFORCEMENT (Wave G) — signup → never claim → clock past
+    // expiry → key 401s. Backdating expires_at needs exclusive D1 access, so
+    // bounce wrangler dev around a `d1 execute`. Placeholder-email owners are
+    // exactly the still-unclaimed provisional accounts; the CLAIMED account
+    // (permanent, expires_at NULL) is untouched and must keep working.
+    // ================================================================
+    console.log("-- restarting wrangler dev with backdated unclaimed expiries…");
+    await stopDev(dev);
+    run("npx", [
+      "wrangler", "d1", "execute", "brainz", "--local", "--persist-to", STATE_DIR,
+      "--command", "UPDATE user SET expires_at = 1000 WHERE email LIKE '%@pending.brainz.invalid'",
+    ]);
+    dev = startDev();
+    await waitForReady(dev);
+
+    const expiredInit = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${expiringKey}`,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "x", version: "0" } } }),
+    };
+    const expiredMcp = await fetch(`${BASE}/mcp`, expiredInit);
+    const expiredMcpBody = await expiredMcp.text();
+    step(
+      "expired unclaimed key on /mcp → 401 with the workspace-expired message",
+      expiredMcp.status === 401 && /workspace expired unclaimed/.test(expiredMcpBody),
+      `status ${expiredMcp.status} — ${expiredMcpBody.slice(0, 90)}`,
+    );
+    const expiredRest = await fetch(`${BASE}/api/vaults/any-vault-id/stats`, {
+      headers: { authorization: `Bearer ${expiringKey}` },
+    });
+    const expiredRestBody = await expiredRest.text();
+    step(
+      "expired unclaimed key on REST → 401 with the workspace-expired message",
+      expiredRest.status === 401 && /workspace expired unclaimed/.test(expiredRestBody),
+      `status ${expiredRest.status} — ${expiredRestBody.slice(0, 90)}`,
+    );
+    // The claimed workspace's key still works — approval made it permanent.
+    const claimedInit = {
+      ...expiredInit,
+      headers: { ...expiredInit.headers, authorization: `Bearer ${claimedKey}` },
+    };
+    const claimedStill = await fetch(`${BASE}/mcp`, claimedInit);
+    step(
+      "claimed workspace's key still works past the window (account permanent)",
+      claimedStill.status === 200,
+      `status ${claimedStill.status}`,
+    );
   } catch (err) {
     failed++;
     process.exitCode = 1;
     console.error("\nE2E aborted:", err);
     console.error("\n-- last wrangler dev output --\n", devLog.slice(-3000));
   } finally {
-    dev.kill("SIGTERM");
-    await new Promise((r) => setTimeout(r, 500));
-    if (dev.exitCode === null) dev.kill("SIGKILL");
+    await stopDev(dev);
   }
 
   console.log(`\n== E2E summary: ${passed} passed, ${failed} failed ==`);

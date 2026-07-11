@@ -537,29 +537,31 @@ export const MCP_TOOLS = [
 // ------------------------------------------------- public (unauthenticated)
 
 export const signupInputSchema = z.object({
-  email: z
-    .string()
-    .email()
-    .describe("Your human's email address — the account is created for them."),
   vaultName: z
     .string()
     .min(1)
     .max(120)
     .optional()
     .describe('Name for the first vault (default "My vault").'),
+  email: z
+    .string()
+    .email()
+    .optional()
+    .describe(
+      "Optional: your human's email. Supplying it fires the same claim-request flow as the `claim` " +
+        "tool — an approval link is EMAILED to the human (never returned to you). The email is NOT " +
+        "bound to the workspace until the human approves it.",
+    ),
 });
 
 export const signupOutputSchema = z
   .object({
     apiKey: z.string(),
-    /**
-     * A magic sign-in link for the human: opening it signs them straight into
-     * the dashboard (single-use, ~15 min TTL). Replaces the old set-password
-     * claim URL — auth is passwordless now.
-     */
-    loginUrl: z.string(),
     vaultSlug: z.string(),
-    email: z.string(),
+    /** ISO timestamp: when the workspace expires if it is never claimed (~7 days). */
+    expiresAt: z.string(),
+    /** True whenever an `email` was supplied (regardless of the address's eligibility). */
+    claimEmailSent: z.boolean(),
   })
   .strict();
 
@@ -567,21 +569,21 @@ export const signupOutputSchema = z
  * PUBLIC_MCP_TOOLS — the toolset an UNAUTHENTICATED /mcp connection sees on
  * Brainz Cloud: exactly one tool, `signup`. It is deliberately NOT part of
  * MCP_TOOLS (the local stdio server has no accounts, and the authenticated
- * remote surface stays the 9 vault tools).
+ * remote surface stays the vault tools).
  */
 export const PUBLIC_MCP_TOOLS = [
   {
     name: "signup",
-    title: "Sign up (provision an account for your human)",
+    title: "Sign up (provision an anonymous workspace)",
     description:
-      "Provision a Brainz Cloud account for your human: creates the account, a first knowledge vault, " +
-      "and a working API key, plus a one-time magic sign-in link. Keep the returned apiKey yourself — send it " +
-      "as `Authorization: Bearer <apiKey>` to this same /mcp endpoint and the 9 vault tools unlock " +
-      "immediately, no human action required. Deliver the loginUrl to your human: opening it signs them " +
-      "straight into the dashboard — no password to set (auth is passwordless / magic-link only). The " +
-      "link is single-use and expires in ~15 minutes; the API key keeps working regardless. Call this " +
-      "once per email — if the email already has an account, you'll get an error telling your human to " +
-      "sign in instead.",
+      "Provision an ANONYMOUS, PROVISIONAL Brainz Cloud workspace: a first knowledge vault and a " +
+      "working API key — no email required, no human action required. Keep the returned apiKey " +
+      "SECRET: never log, echo, or print it. Send it as `Authorization: Bearer <apiKey>` to this " +
+      "same /mcp endpoint and the vault tools unlock immediately. The workspace EXPIRES in 7 days " +
+      "(see `expiresAt`) unless a human claims it: call the `claim` tool (authenticated) with your " +
+      "human's email — the approval link is EMAILED to them and is NEVER returned to you. signup " +
+      "returns no URL of any kind. Optionally pass `email` now to fire that same claim request in " +
+      "one call.",
     inputSchema: signupInputSchema,
     outputSchema: signupOutputSchema,
   },
@@ -591,6 +593,56 @@ export type PublicMcpTool = (typeof PUBLIC_MCP_TOOLS)[number];
 export type PublicMcpToolName = PublicMcpTool["name"];
 export type SignupInput = z.infer<typeof signupInputSchema>;
 export type SignupOutput = z.infer<typeof signupOutputSchema>;
+
+// ------------------------------------------------------- cloud-only (authed)
+
+export const claimInputSchema = z.object({
+  email: z
+    .string()
+    .email()
+    .describe(
+      "Your human's email address. The claim-approval link is EMAILED there — you never see it.",
+    ),
+});
+
+export const claimOutputSchema = z
+  .object({
+    status: z.literal("sent"),
+    /** ISO timestamp: when the emailed approval link expires (24 h). */
+    expiresAt: z.string(),
+  })
+  .strict();
+
+/**
+ * CLOUD_MCP_TOOLS — cloud-only tools registered by apps/cloud's AUTHENTICATED
+ * remote MCP server alongside the vault tools. The local stdio server
+ * (@brainz/mcp-server) never sees these: they concern accounts, which only
+ * exist on Brainz Cloud. Deliberately NOT part of MCP_TOOLS.
+ */
+export const CLOUD_MCP_TOOLS = [
+  {
+    name: "claim",
+    title: "Claim this workspace for your human",
+    description:
+      "Make this provisional workspace permanent by attaching it to your human's email. The " +
+      "approval link is EMAILED to the human — it is NEVER returned to you, so do not ask for it " +
+      "or try to open it; tell your human to check their inbox and approve. Call this ONCE with " +
+      "your human's email, then wait: the result only confirms the email was sent (`expiresAt` is " +
+      "the approval link's 24-hour deadline). Until the human approves, the workspace still " +
+      "expires on its 7-day signup schedule. Errors if the workspace is already claimed.",
+    inputSchema: claimInputSchema,
+    outputSchema: claimOutputSchema,
+  },
+] as const;
+
+export type CloudMcpTool = (typeof CLOUD_MCP_TOOLS)[number];
+export type CloudMcpToolName = CloudMcpTool["name"];
+export type ClaimInput = z.infer<typeof claimInputSchema>;
+export type ClaimOutput = z.infer<typeof claimOutputSchema>;
+
+export const CLOUD_MCP_TOOL_NAMES = CLOUD_MCP_TOOLS.map(
+  (t) => t.name,
+) as readonly CloudMcpToolName[];
 
 export const PUBLIC_MCP_TOOL_NAMES = PUBLIC_MCP_TOOLS.map(
   (t) => t.name,
@@ -639,3 +691,15 @@ export interface PublicMcpToolDef {
 
 const _publicMcpToolDefs: readonly PublicMcpToolDef[] = PUBLIC_MCP_TOOLS;
 void _publicMcpToolDefs;
+
+/** Widened view of a cloud-only registry entry (same shape, cloud tool names). */
+export interface CloudMcpToolDef {
+  readonly name: CloudMcpToolName;
+  readonly title: string;
+  readonly description: string;
+  readonly inputSchema: z.AnyZodObject;
+  readonly outputSchema: z.ZodTypeAny;
+}
+
+const _cloudMcpToolDefs: readonly CloudMcpToolDef[] = CLOUD_MCP_TOOLS;
+void _cloudMcpToolDefs;

@@ -10,6 +10,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   MCP_TOOLS,
+  type CloudMcpToolDef,
   type McpToolDef,
   type McpToolInput,
   type McpToolName,
@@ -45,6 +46,12 @@ type ToolHandlers = {
   [N in McpToolName]: (args: McpToolInput<N>) => Promise<ToolResult>;
 };
 
+/** A cloud-only tool registration: contract def (CLOUD_MCP_TOOLS) + handler. */
+export interface ExtraTool {
+  readonly def: CloudMcpToolDef;
+  handler(args: Record<string, unknown>): Promise<ToolResult>;
+}
+
 export interface McpServerHooks {
   /**
    * Called when `onboard {action: "complete"}` succeeds — mirrors the DO's
@@ -52,6 +59,13 @@ export interface McpServerHooks {
    * must not fail the tool call; the DO meta is the tool-facing source of truth.
    */
   onOnboarded?: (onboardedAt: Date) => Promise<void>;
+  /**
+   * Cloud-only tools registered ALONGSIDE the vault tools (e.g. `claim` from
+   * CLOUD_MCP_TOOLS — account concerns that only exist on Brainz Cloud). The
+   * route supplies the wired handlers; the local stdio server never sees
+   * these. Handlers must follow the isError convention (use `guarded`).
+   */
+  extraTools?: readonly ExtraTool[];
 }
 
 /** Build the MCP server for one vault (stateless: one per request). */
@@ -344,6 +358,19 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
         inputSchema: tool.inputSchema.shape,
       },
       async (args: Record<string, unknown>) => handler(args),
+    );
+  }
+
+  // Cloud-only extras (e.g. the `claim` tool) — never part of MCP_TOOLS.
+  for (const extra of hooks.extraTools ?? []) {
+    server.registerTool(
+      extra.def.name,
+      {
+        title: extra.def.title,
+        description: extra.def.description,
+        inputSchema: extra.def.inputSchema.shape,
+      },
+      async (args: Record<string, unknown>) => extra.handler(args ?? {}),
     );
   }
 

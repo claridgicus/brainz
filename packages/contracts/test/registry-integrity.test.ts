@@ -15,6 +15,8 @@ import {
   apiKeySchema,
   cliReindexJsonSchema,
   cliShowJsonSchema,
+  CLOUD_MCP_TOOLS,
+  CLOUD_MCP_TOOL_NAMES,
   conceptListResponseSchema,
   contextRequestSchema,
   contextResponseSchema,
@@ -28,14 +30,17 @@ import {
   vaultListResponseSchema,
   vaultSchema,
   vaultUpdateRequestSchema,
+  type CloudMcpToolName,
   type McpToolName,
   type PublicMcpToolName,
 } from "../src/index.js";
 
 // ------------------------------------------------------- registry integrity
 
-/** A realistic, minimal INPUT sample for every tool (authed + public). */
-const INPUT_SAMPLES: Record<McpToolName | PublicMcpToolName, unknown> = {
+type AnyToolName = McpToolName | PublicMcpToolName | CloudMcpToolName;
+
+/** A realistic, minimal INPUT sample for every tool (authed + public + cloud). */
+const INPUT_SAMPLES: Record<AnyToolName, unknown> = {
   search_concepts: { query: "lead scoring" },
   get_concept: { id: "lead-scoring" },
   get_related: { id: "lead-scoring", depth: 2 },
@@ -55,7 +60,8 @@ const INPUT_SAMPLES: Record<McpToolName | PublicMcpToolName, unknown> = {
   take_task: { takenBy: "fleet-1" },
   complete_task: { id: "task-a", outcome: "Shipped it." },
   create_task: { title: "Fix auth", body: "Details", domain: "auth", tags: ["high"] },
-  signup: { email: "human@example.com", vaultName: "Acme Brain" },
+  signup: { vaultName: "Acme Brain" },
+  claim: { email: "human@example.com" },
 };
 
 const META = {
@@ -67,7 +73,7 @@ const META = {
 } as const;
 
 /** A realistic OUTPUT sample for every tool (get_context's is its JSON footer). */
-const OUTPUT_SAMPLES: Record<McpToolName | PublicMcpToolName, unknown> = {
+const OUTPUT_SAMPLES: Record<AnyToolName, unknown> = {
   search_concepts: { hits: [{ id: "a", title: "A", type: "feature", score: 1.2, snippet: "…" }] },
   get_concept: {
     ...META,
@@ -114,19 +120,22 @@ const OUTPUT_SAMPLES: Record<McpToolName | PublicMcpToolName, unknown> = {
   },
   signup: {
     apiKey: "bz_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    loginUrl: "https://example.com/api/auth/magic-link/verify?token=" + "0".repeat(32),
     vaultSlug: "acme-brain",
-    email: "human@example.com",
+    expiresAt: "2026-07-18T00:00:00.000Z",
+    claimEmailSent: true,
   },
+  claim: { status: "sent", expiresAt: "2026-07-12T00:00:00.000Z" },
 };
 
-describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS)", () => {
-  const allTools = [...MCP_TOOLS, ...PUBLIC_MCP_TOOLS];
+describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOLS)", () => {
+  const allTools = [...MCP_TOOLS, ...PUBLIC_MCP_TOOLS, ...CLOUD_MCP_TOOLS];
 
-  it("names are unique across BOTH registries combined", () => {
+  it("names are unique across ALL registries combined", () => {
     const names = allTools.map((t) => t.name);
     expect(new Set(names).size).toBe(names.length);
-    expect(names).toHaveLength(MCP_TOOL_NAMES.length + PUBLIC_MCP_TOOL_NAMES.length);
+    expect(names).toHaveLength(
+      MCP_TOOL_NAMES.length + PUBLIC_MCP_TOOL_NAMES.length + CLOUD_MCP_TOOL_NAMES.length,
+    );
   });
 
   it("every tool's inputSchema parses its sample payload", () => {
@@ -140,7 +149,7 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS)", () => {
   it("every tool's inputSchema rejects a wrong-typed payload", () => {
     // vault_stats takes {} and (non-strict) tolerates junk keys; every other
     // tool must reject a payload whose required field has the wrong type.
-    const bad: Partial<Record<McpToolName | PublicMcpToolName, unknown>> = {
+    const bad: Partial<Record<AnyToolName, unknown>> = {
       search_concepts: { query: 42 },
       get_concept: { id: 42 },
       get_related: { id: "x", depth: "deep" },
@@ -150,6 +159,7 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS)", () => {
       list_concepts: { type: "banana" },
       onboard: { action: "restart" },
       signup: { email: "not-an-email" },
+      claim: { email: "not-an-email" },
     };
     for (const tool of allTools) {
       const sample = bad[tool.name];

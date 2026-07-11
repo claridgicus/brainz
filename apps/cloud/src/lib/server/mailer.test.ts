@@ -16,6 +16,8 @@ vi.mock("cloudflare:email", () => ({
 }));
 
 import {
+  claimApprovalTemplate,
+  claimNoticeTemplate,
   createMailer,
   DevMailer,
   FROM_ADDRESS,
@@ -128,5 +130,81 @@ describe("templates", () => {
     expect(tpl.subject).toContain("Acme Brain");
     expect(tpl.html).toContain("Acme Brain");
     expect(tpl.html).toContain("https://x/invite/tok");
+  });
+
+  it("claim-approval template shows what's being approved: agent framing, vault, key prefix, 24h", () => {
+    const tpl = claimApprovalTemplate({
+      url: "https://x/claim/tok",
+      vaultName: "Agent Vault",
+      keyName: "agent-signup",
+      keyPrefix: "bz_a1B2c…",
+    });
+    expect(tpl.subject).toMatch(/agent/i);
+    expect(tpl.html).toContain("💩 Brainz");
+    expect(tpl.html).toContain("Agent Vault");
+    expect(tpl.html).toContain("agent-signup");
+    expect(tpl.html).toContain("bz_a1B2c…");
+    expect(tpl.html).toContain("https://x/claim/tok");
+    expect(tpl.text).toContain("https://x/claim/tok");
+    expect(tpl.html).toMatch(/24 hours/);
+    // Exactly one action button.
+    expect((tpl.html.match(/<a /g) ?? []).length).toBe(1);
+  });
+
+  it("claim-notice template has NO token link — only the sign-in page", () => {
+    const tpl = claimNoticeTemplate();
+    expect(tpl.subject).toMatch(/agent/i);
+    expect(tpl.html).toContain("💩 Brainz");
+    expect(tpl.html).toMatch(/already have an account/i);
+    expect(tpl.html).not.toContain("/claim/");
+    expect(tpl.text).not.toContain("/claim/");
+    expect(tpl.html).toContain("https://brainz.brownmatter.ai/login");
+  });
+});
+
+describe("claim emails through the mailers", () => {
+  it("MailChannelsMailer sends the approval email as raw MIME with the claim URL", async () => {
+    const send = vi.fn().mockResolvedValue({ messageId: "x" });
+    const binding = { send } as unknown as SendEmail;
+    await new MailChannelsMailer(binding).sendClaimApproval({
+      to: "human@example.com",
+      url: "https://brainz.brownmatter.ai/claim/deadbeef",
+      vaultName: "Agent Vault",
+      keyName: "agent-signup",
+      keyPrefix: "bz_a1B2c…",
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    const msg = send.mock.calls[0][0] as { from: string; to: string; raw: string };
+    expect(msg.from).toBe(FROM_ADDRESS);
+    expect(msg.to).toBe("human@example.com");
+    expect(msg.raw).toContain("Agent Vault");
+    expect(msg.raw).toContain("/claim/deadbeef");
+  });
+
+  it("DevMailer captures lastLink for approval emails (e2e harness seam)", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mailer = new DevMailer();
+    await mailer.sendClaimApproval({
+      to: "human@example.com",
+      url: "http://localhost:8788/claim/deadbeef",
+      vaultName: "V",
+      keyName: "k",
+      keyPrefix: "bz_x…",
+    });
+    expect(mailer.lastLink).toEqual({
+      to: "human@example.com",
+      url: "http://localhost:8788/claim/deadbeef",
+    });
+    expect(spy.mock.calls[0].join(" ")).toContain("/claim/deadbeef");
+    spy.mockRestore();
+  });
+
+  it("DevMailer records notice sends without ever logging a token", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mailer = new DevMailer();
+    await mailer.sendClaimNotice({ to: "human@example.com" });
+    expect(mailer.lastLink?.to).toBe("human@example.com");
+    expect(spy.mock.calls[0].join(" ")).not.toContain("/claim/");
+    spy.mockRestore();
   });
 });

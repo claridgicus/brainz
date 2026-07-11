@@ -102,15 +102,14 @@ Concept writes parse the submitted markdown body with engine's `parseNote` (wiki
 
 ### Agent-driven signup over MCP (public toolset)
 
-An orchestrator agent must be able to provision an account for its human straight from the MCP endpoint:
+An orchestrator agent must be able to provision a workspace straight from the MCP endpoint — **without an email** — and the workspace only becomes permanent once a human approves attaching their email (see Wave G below, which supersedes this section's earlier email-at-signup + `claimUrl`/`loginUrl` designs):
 
-- **Unauthenticated `/mcp` connections** no longer 401: they get a PUBLIC MCP server exposing exactly one tool, `signup` `{email, vaultName?}`. (Invalid/revoked bearer still 401s — only *absent* auth gets the public server.)
-- `signup` creates: a Better Auth user (email, NO password — credential set later by the human), a first vault (name default "My vault"), an API key, and a single-use **claim token** (`account_claims` table: id, user_id, token_hash SHA-256, created_at, expires_at +7d, claimed_at). Returns `{ apiKey: "bz_…", claimUrl: "https://brainz.brownmatter.ai/claim/<token>", vaultSlug, email }` — with tool-description text telling the agent to deliver the claim URL to its human and keep the key for MCP access.
-- Duplicate email → isError with a "this email already has an account — sign in at /login" message (no info leak beyond existence; acceptable for v1).
-- **Rate limiting**: per-IP (CF-Connecting-IP) counter, max 5 signups/hour — D1 or a small DO counter; 429-style isError beyond it. Email format validated.
-- `/claim/[token]` page (UI): validates token (unexpired, unclaimed), shows the account email, lets the human set a password (Better Auth credential creation using the existing PBKDF2 hasher), signs them in, marks claim used, redirects to /dashboard. Expired/used → clear error page with a "sign up again" path.
-- Claimless accounts persist (their API key keeps working); only the claim token expires.
-- Contract: the `signup` tool schema lives in `@brainz/contracts` as `PUBLIC_MCP_TOOLS` (same shape as MCP_TOOLS; NOT added to the 8 vault tools — the local stdio server has no accounts). Docs (`apps/marketing` /docs + app MCP snippets) mention the flow.
+- **Unauthenticated `/mcp` connections** no longer 401: they get a PUBLIC MCP server exposing exactly one tool, `signup` `{vaultName?, email?}`. (Invalid/revoked bearer still 401s — only *absent* auth gets the public server.)
+- `signup` creates a **provisional** account: a Better Auth user row with a placeholder identity (`unclaimed-<userId>@pending.brainz.invalid`, `emailVerified: false`, `expires_at = now + 7 days`), a first vault (default "My vault"), and an API key. Returns `{ apiKey: "bz_…", vaultSlug, expiresAt, claimEmailSent }` — NO login or claim URL is ever returned to the agent (a returned URL sits in orchestrator logs and proves nothing about a human).
+- If `email` is supplied, it is NOT bound to the account — it merely triggers the same claim-request flow as the `claim` tool (Wave G), and `claimEmailSent: true` is returned regardless of the address's eligibility (no account-existence oracle).
+- **Rate limiting**: per-IP (CF-Connecting-IP) counter, max 5 signups/hour — D1 `signup_events`; 429-style isError beyond it.
+- Provisional accounts EXPIRE unclaimed: bearer auth (REST + MCP) rejects keys whose owner is past `expires_at` with a clear "workspace expired unclaimed — sign up again" message. Persistence requires the Wave G claim flow.
+- Contract: the `signup` tool schema lives in `@brainz/contracts` as `PUBLIC_MCP_TOOLS` (same shape as MCP_TOOLS; NOT added to the vault tools — the local stdio server has no accounts). Docs (app MCP snippets + the self-onboard skill, Wave G) mention the flow.
 
 ### Onboarding (`onboard` tool + CLI command)
 
@@ -175,7 +174,7 @@ The tenant unit becomes the **project** — human-readable name, many users ↔ 
 Auth becomes **magic-link only — passwordless**. Email delivery via Cloudflare's `send_email` Worker binding (MailChannels transport).
 
 - **Better Auth**: enable the `magicLink` plugin; REMOVE email+password (no credential provider). Sign-in = enter email → receive a one-time link → click → session. Sign-up = same flow (first magic-link for an unknown email creates the user). Keep GitHub OAuth conditional as-is.
-- **The claim/invite flows collapse into magic links**: agent `signup` still provisions user+vault+API key and returns a `loginUrl` (a magic link that signs the human straight in) instead of a set-password claim page. The `account_claims`/password (`password.ts`, PBKDF2) machinery is REMOVED; project invites (Wave P) likewise become magic-link joins. `/claim/[token]` route retired (or redirects to magic-link sign-in).
+- **The claim/invite flows collapse into magic links**: ~~agent `signup` still provisions user+vault+API key and returns a `loginUrl` (a magic link that signs the human straight in)~~ **SUPERSEDED by Wave G — `signup` returns no URL of any kind; the agent-held `loginUrl` (and its 10-min `AGENT_MAGIC_LINK_TTL_SECONDS` minter) is removed.** The old `account_claims`/password (`password.ts`, PBKDF2) machinery stays REMOVED; project invites (Wave P) likewise become magic-link joins. `/claim/[token]` is revived by Wave G as the claim-approval page (not a set-password page).
 - **Email**: `Mailer` interface (`sendMagicLink({to, url})`, `sendInvite(...)`) with two implementations: `MailChannelsMailer` (uses the `SEND_EMAIL` binding — `wrangler.jsonc` `send_email: [{ name: "SEND_EMAIL" }]`, `nodejs_compat`; from `no-reply@brownmatter.ai`, DKIM-signed) and a `DevMailer` (logs the URL to stderr — used in `wrangler dev`/tests where no binding/DKIM exists). Select by binding presence. HTML + text templates, Brownmatter-branded, one clear button. Never log the token in prod; DevMailer logging is dev-only.
 - **Security hardenings folded in** (from the audit):
   - **Rate limiting** (was HIGH): magic-link REQUEST endpoint gets a D1-backed per-IP + per-email limiter (e.g. 5/hour/email, 20/hour/IP) mirroring the `signup_events` pattern — survives per-request Worker instances (Better Auth's in-memory limiter does not). Prevents mail-bombing an address and enumeration.
@@ -183,6 +182,37 @@ Auth becomes **magic-link only — passwordless**. Email delivery via Cloudflare
 - **Magic-link tokens**: single-use, short TTL (~15 min), hashed at rest — Better Auth plugin defaults, verified. Delivered only via the Mailer.
 - **Deploy-day (user)**: create the MailChannels account, add the DKIM TXT + domain-lockdown records for brownmatter.ai so `no-reply@brownmatter.ai` sends. Until then DevMailer/console is the fallback (documented). Also delete the stale `brain.brownmatter.ai` DNS record (currently 530).
 - Contracts/UI: signup output `claimUrl`→`loginUrl` (CONTRACTS_VERSION bump); login/signup pages become one email-entry form + "check your inbox" state; settings/docs mention passwordless. E2E: request-link → DevMailer captures URL → follow it → session; rate-limit boundary; no password paths remain.
+
+### Agent self-signup guardrails: anonymous signup + claim-to-persist + self-onboard skill (Wave G)
+
+Threat model this wave closes (from the July 2026 review): (1) `signup` required an email and immediately created a PERMANENT account + key with no human approval ever; (2) the returned `loginUrl` was a session-granting URL handed into agent context/logs — the agent could open it itself, minting a session and laundering `emailVerified: true` without any inbox proof; (3) email squatting — an agent could register any unowned address, whose real owner would later magic-link in and silently inherit a vault with an attacker-held API key; (4) signup's "already exists" error was an account-enumeration oracle. The fix inverts the model: **anonymous ephemeral signup; persistence requires the inbox owner to approve an EMAILED link.**
+
+**Signup v2 (public MCP `signup`)** — see the amended "Agent-driven signup" section above. Summary: `{vaultName?, email?}` → provisional account (placeholder email `unclaimed-<userId>@pending.brainz.invalid`, `expires_at = now + 7d` — new nullable `expires_at` D1 column on `user`), vault, API key; output `{apiKey, vaultSlug, expiresAt, claimEmailSent}` (strict; CONTRACTS_VERSION bump); never any URL. Supplying `email` just auto-fires a claim request.
+
+**`claim` tool (authenticated MCP surface — cloud-only, NOT in `MCP_TOOLS`)**:
+
+- Contract lives in `@brainz/contracts` as a cloud-only registry (e.g. `CLOUD_MCP_TOOLS`) registered ONLY by apps/cloud's authenticated server alongside the vault tools; the local stdio server never sees it.
+- Input `{email}` (validated format). Resolves the calling key → vault → owner. Already-claimed owner (`expires_at` null / non-placeholder email) → isError "already claimed — manage keys in settings".
+- Mints a **claim token**: 32 random bytes, SHA-256 hash at rest in new `account_claims` table `(id, user_id, email, token_hash unique, created_at, expires_at +24h, approved_at nullable)`. A new request supersedes (deletes) the user's prior pending claims.
+- Delivery is **EMAIL ONLY** via the Mailer (`sendClaimApproval({to, url, vaultName, keyName, keyPrefix})`, branded template: "An agent set up a Brainz workspace and wants to attach it to your email — review and approve"). The URL (`/claim/<token>`) is NEVER present in the tool result. If the address already has an account, send a notice email instead (no token: "an agent tried to attach a workspace to your address — you already have an account; sign in to review"). Tool output is identical either way: `{status: "sent", expiresAt}` — no enumeration oracle.
+- Rate limits: claim requests are counted in `magic_link_events` under the existing guard limits (5/hour/email, 20/hour/IP) — same abuse surface (unsolicited email to arbitrary addresses).
+
+**`/claim/[token]` approval page (revived route)**:
+
+- Load: SHA-256 the token, fetch unexpired unapproved claim; show what's being approved — the email being bound, vault name, API key name + `keyPrefix`, workspace created date, and copy stating an agent will retain access via that key. Invalid/expired/used → clear error page with "ask your agent to request a new claim" guidance.
+- **Approve** (form action, atomic): re-validate; set `user.email = claim.email`, `emailVerified = true`, clear `user.expires_at`, fix placeholder `name`; stamp `approved_at`; delete the user's other pending claims; sign the human in (server-side session mint — e.g. an internally-minted magic-link verify redirect served ONLY to this browser; implementation is agent's call) and land on /dashboard. Single-use: a consumed token never approves twice.
+- **Decline** (form action): delete the pending claim; the workspace simply expires on schedule. Copy tells the human nothing else is needed and nothing was attached to their email.
+- Approval is the ONLY path that flips a provisional account permanent; the session-create `emailVerified` hook (Wave A hardening) stays as-is.
+
+**Expiry enforcement**: `resolveApiKey` (the single bearer-auth chokepoint for REST + MCP) loads the key's vault owner and rejects when `expires_at < now` (401, "workspace expired unclaimed — sign up again, or ask your human to approve the claim email"). Hard deletion/purge of expired rows + DO storage is deferred (expired accounts are inert); an admin purge script may come later.
+
+**Self-onboard skill (user-facing deliverable)**: a single copy-paste markdown doc a user drops into their agent of choice (Claude Code, Cursor, any MCP client) so the AGENT can set Brainz up end-to-end.
+
+- Canonical file: `apps/cloud/static/skill.md`, served at `https://brainz.brownmatter.ai/skill.md`; plus a `/skill` page in the app UI (marketing-style, session not required) that renders it with a one-click "copy system prompt" button; splash page links to it ("Set up via your agent").
+- Content = a SYSTEM PROMPT for the agent covering: what Brainz is (shared product-knowledge graph for agent fleets); connecting over MCP (`claude mcp add --transport http brainz https://brainz.brownmatter.ai/mcp --header "Authorization: Bearer bz_..."` + raw `.mcp.json` equivalent); calling `signup` unauthenticated (keep `apiKey` secret — never log/echo it; note the 7-day unclaimed expiry); persisting via `claim` (ask the human for their email, call `claim`, tell the human to open the approval email — the agent never sees the link); running `onboard` to index the product; the vault toolset (search/get_context/upsert/tasks/sync) and when to use each; security rules (never print keys, never ask the human to forward the approval email).
+- The skill text must match the shipped contracts exactly (tool names, input shapes, expiry windows) — treat drift as a bug.
+
+**Verification (Wave G)**: unit tests for signup v2 (anonymous + with-email), claim request (eligible / already-claimed / already-registered / rate-limited), approval action (happy, expired, reuse, decline), expiry enforcement at `resolveApiKey`; e2e: signup → key works → claim → DevMailer captures approval URL → approve → human session on /dashboard → key still works and account is permanent; and signup → never claim → clock past expiry → key 401s.
 
 ### Brand model
 

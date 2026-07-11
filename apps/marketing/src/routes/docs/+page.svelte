@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Seo from "$lib/components/Seo.svelte";
 	import { APP_URL, MCP_URL, SIGNUP_URL, SITE_URL } from "$lib/links";
 
 	const title = "Docs — Get started with Brainz";
@@ -146,19 +147,21 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 	];
 </script>
 
-<svelte:head>
-	<title>{title}</title>
-	<meta name="description" content={description} />
-	<link rel="canonical" href="{SITE_URL}/docs" />
-	<meta property="og:type" content="article" />
-	<meta property="og:site_name" content="Brownmatter" />
-	<meta property="og:title" content={title} />
-	<meta property="og:description" content={description} />
-	<meta property="og:url" content="{SITE_URL}/docs" />
-	<meta name="twitter:card" content="summary" />
-	<meta name="twitter:title" content={title} />
-	<meta name="twitter:description" content={description} />
-</svelte:head>
+<Seo
+	{title}
+	{description}
+	path="/docs"
+	type="article"
+	schema={[
+		{
+			"@type": "TechArticle",
+			headline: title,
+			description,
+			url: `${SITE_URL}/docs`,
+			author: { "@id": `${SITE_URL}/#organization` },
+		},
+	]}
+/>
 
 <div class="container prose docs">
 	<header class="docs-head">

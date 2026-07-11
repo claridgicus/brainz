@@ -6,7 +6,7 @@
   "description": "Marketing site for Brainz (brownmatter.ai) — static SvelteKit, deployed to Cloudflare Workers static assets.",
   "scripts": {
     "dev": "vite dev",
-    "build": "vite build",
+    "build": "vite build && node scripts/generate-sitemap.mjs",
     "preview": "wrangler dev",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "node scripts/check-build.mjs",

@@ -4,6 +4,7 @@
 
 <svelte:head>
 	<title>{page.status} — Brownmatter</title>
+	<meta name="robots" content="noindex" />
 </svelte:head>
 
 <div class="container wrap">

@@ -325,7 +325,9 @@ async function main() {
       settings.html.includes("onboard"),
     );
 
-    // 10. anon auth pages: signup SSR (no /claim route under passwordless auth).
+    // 10. anon auth pages: signup SSR. (/claim/[token] — the Wave G claim
+    // approval page — is exercised end-to-end in e2e.mjs, where a real
+    // emailed token exists.)
     const signupPage = await page("/signup", { cookie: false });
     step(
       "anon /signup → 200 with the signup form",

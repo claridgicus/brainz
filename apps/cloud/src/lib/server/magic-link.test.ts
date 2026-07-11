@@ -1,7 +1,9 @@
 /**
- * magicLinkMinter (task-agent-loginurl-hardening): the agent-signup `loginUrl`
- * is minted with a DISTINCT, SHORTER TTL than an emailed link so a leaked-but-
- * unopened handoff link (tool results are often logged) goes stale sooner.
+ * magicLinkMinter (Wave G): mints the verify URL the /claim/[token] APPROVE
+ * action 303-redirects the approving browser to — its ONLY caller. It must
+ * pin the tight APPROVE_REDIRECT_TTL_SECONDS (the URL is consumed by the
+ * immediate redirect, never emailed, never handed to an agent — the retired
+ * signup `loginUrl` path is gone).
  *
  * We mock `./auth` so `createAuth` returns a fake Better Auth whose
  * `signInMagicLink` drives the capturing mailer exactly as the real plugin
@@ -24,7 +26,7 @@ const createAuthCalls: Array<{
 vi.mock("./auth", async () => {
   const actual = await vi.importActual<typeof import("./auth")>("./auth");
   return {
-    // Keep the real constants (AGENT_MAGIC_LINK_TTL_SECONDS, PRODUCTION_ORIGIN).
+    // Keep the real constants (APPROVE_REDIRECT_TTL_SECONDS, PRODUCTION_ORIGIN).
     ...actual,
     createAuth: (
       env: Record<string, unknown>,
@@ -48,7 +50,7 @@ vi.mock("./auth", async () => {
   };
 });
 
-import { AGENT_MAGIC_LINK_TTL_SECONDS, MAGIC_LINK_TTL_SECONDS } from "./auth";
+import { APPROVE_REDIRECT_TTL_SECONDS, MAGIC_LINK_TTL_SECONDS } from "./auth";
 import { magicLinkMinter } from "./magic-link";
 import type { CloudEnv } from "../../app.d";
 
@@ -66,14 +68,14 @@ describe("magicLinkMinter", () => {
     expect(url).toContain("callbackURL=/dashboard");
   });
 
-  it("pins the shorter agent TTL (<= the emailed default) on the auth instance", async () => {
+  it("pins the tight approve-redirect TTL (<< the emailed default) on the auth instance", async () => {
     const mint = magicLinkMinter(ENV, "https://brainz.brownmatter.ai");
     await mint("human@example.com");
     expect(createAuthCalls).toHaveLength(1);
     const pinned = createAuthCalls[0].opts?.magicLinkTtlSeconds;
-    expect(pinned).toBe(AGENT_MAGIC_LINK_TTL_SECONDS);
-    // The load-bearing guarantee: agent links never outlive an emailed link.
-    expect(pinned).toBeLessThanOrEqual(MAGIC_LINK_TTL_SECONDS);
+    expect(pinned).toBe(APPROVE_REDIRECT_TTL_SECONDS);
+    // The load-bearing guarantee: the redirect URL never outlives an emailed
+    // link — it only has to survive one immediate 303.
     expect(pinned).toBeLessThan(MAGIC_LINK_TTL_SECONDS);
   });
 });

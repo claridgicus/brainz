@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("$app/server", () => ({ getRequestEvent: () => ({}) }));
 
 import {
-  AGENT_MAGIC_LINK_TTL_SECONDS,
+  APPROVE_REDIRECT_TTL_SECONDS,
   MAGIC_LINK_TTL_SECONDS,
   PRODUCTION_ORIGIN,
   resolveSecret,
@@ -76,13 +76,13 @@ describe("shouldMarkEmailVerified (verify-email-on-signin)", () => {
   });
 });
 
-describe("agent-minted magic link TTL (agent-loginurl-hardening)", () => {
+describe("claim-approve redirect TTL (Wave G — replaces the agent loginUrl TTL)", () => {
   it("is strictly shorter than the emailed default", () => {
-    expect(AGENT_MAGIC_LINK_TTL_SECONDS).toBeLessThan(MAGIC_LINK_TTL_SECONDS);
+    expect(APPROVE_REDIRECT_TTL_SECONDS).toBeLessThan(MAGIC_LINK_TTL_SECONDS);
   });
 
-  it("is a positive, realistic hand-off window (<= 10 min)", () => {
-    expect(AGENT_MAGIC_LINK_TTL_SECONDS).toBeGreaterThan(0);
-    expect(AGENT_MAGIC_LINK_TTL_SECONDS).toBeLessThanOrEqual(10 * 60);
+  it("is a tight window — the URL only ever lives as an immediate 303 Location", () => {
+    expect(APPROVE_REDIRECT_TTL_SECONDS).toBeGreaterThan(0);
+    expect(APPROVE_REDIRECT_TTL_SECONDS).toBeLessThanOrEqual(60);
   });
 });

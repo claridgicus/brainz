@@ -40,6 +40,23 @@ export interface Mailer {
   sendMagicLink(args: { to: string; url: string }): Promise<void>;
   /** Deliver a project-invite link (Wave P uses this; optional for now). */
   sendInvite?(args: { to: string; url: string; projectName: string }): Promise<void>;
+  /**
+   * Deliver a claim-approval link (Wave G): an agent provisioned a workspace
+   * and wants to attach it to this email — the human reviews and approves at
+   * `url`. Email is the ONLY channel this URL ever travels on.
+   */
+  sendClaimApproval?(args: {
+    to: string;
+    url: string;
+    vaultName: string;
+    keyName: string;
+    keyPrefix: string;
+  }): Promise<void>;
+  /**
+   * Notice to an ALREADY-REGISTERED address an agent tried to claim: no token,
+   * no link to act on — just "sign in to review".
+   */
+  sendClaimNotice?(args: { to: string }): Promise<void>;
 }
 
 /** Sender identity — must be an address on the DKIM-configured sending domain. */
@@ -106,6 +123,47 @@ export function magicLinkTemplate(url: string): Template {
     buttonLabel: "Sign in to Brainz",
     url,
     footnote: "This link works once. Requesting a new one invalidates older links.",
+  });
+}
+
+export function claimApprovalTemplate(args: {
+  url: string;
+  vaultName: string;
+  keyName: string;
+  keyPrefix: string;
+}): Template {
+  return brandedEmail({
+    subject: "An agent set up a Brainz workspace for you — review and approve",
+    preheader: "Approve attaching an agent-created Brainz workspace to your email.",
+    heading: "An agent set up a Brainz workspace",
+    intro:
+      `An AI agent created a Brainz workspace (vault "${args.vaultName}") and wants to attach it ` +
+      `to your email. The agent keeps access through its API key "${args.keyName}" ` +
+      `(${args.keyPrefix}). If you approve, the workspace becomes yours and stays; if you do ` +
+      "nothing, it expires on its own. Review the details and decide below.",
+    buttonLabel: "Review and approve",
+    url: args.url,
+    footnote:
+      "This link expires in 24 hours and works once. If you didn't expect this, you can ignore it — " +
+      "nothing was attached to your email.",
+  });
+}
+
+/** Sign-in page linked from the claim notice (no token — informational only). */
+const NOTICE_SIGN_IN_URL = "https://brainz.brownmatter.ai/login";
+
+export function claimNoticeTemplate(): Template {
+  return brandedEmail({
+    subject: "An agent tried to attach a Brainz workspace to your email",
+    preheader: "You already have a Brainz account — sign in to review.",
+    heading: "A workspace claim named your email",
+    intro:
+      "An AI agent tried to attach a newly created Brainz workspace to your address — but you " +
+      "already have an account, so nothing was attached and no action is needed. If this was " +
+      "your agent, sign in and create an API key from your own vault's settings instead.",
+    buttonLabel: "Sign in to review",
+    url: NOTICE_SIGN_IN_URL,
+    footnote: "If this wasn't your agent, you can safely ignore this email.",
   });
 }
 
@@ -186,6 +244,20 @@ export class MailChannelsMailer implements Mailer {
   async sendInvite({ to, url, projectName }: { to: string; url: string; projectName: string }): Promise<void> {
     await this.send(to, inviteTemplate(url, projectName));
   }
+
+  async sendClaimApproval(args: {
+    to: string;
+    url: string;
+    vaultName: string;
+    keyName: string;
+    keyPrefix: string;
+  }): Promise<void> {
+    await this.send(args.to, claimApprovalTemplate(args));
+  }
+
+  async sendClaimNotice({ to }: { to: string }): Promise<void> {
+    await this.send(to, claimNoticeTemplate());
+  }
 }
 
 /**
@@ -224,6 +296,29 @@ export class DevMailer implements Mailer {
     this.lastLink = { to, url };
     // eslint-disable-next-line no-console
     console.error(`[DevMailer] invite for ${to} to ${projectName}: ${url}`);
+  }
+
+  async sendClaimApproval({
+    to,
+    url,
+  }: {
+    to: string;
+    url: string;
+    vaultName: string;
+    keyName: string;
+    keyPrefix: string;
+  }): Promise<void> {
+    this.lastLink = { to, url };
+    // eslint-disable-next-line no-console
+    console.error(`[DevMailer] claim approval for ${to}: ${url}`);
+  }
+
+  async sendClaimNotice({ to }: { to: string }): Promise<void> {
+    // No token URL exists for a notice; capture the sign-in destination so
+    // harnesses can still observe the send.
+    this.lastLink = { to, url: "/login" };
+    // eslint-disable-next-line no-console
+    console.error(`[DevMailer] claim notice for ${to} (already registered — no token)`);
   }
 }
 

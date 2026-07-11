@@ -1,39 +1,32 @@
 /**
- * Mint a magic sign-in link WITHOUT emailing it — for the public-MCP `signup`
- * flow, which hands the URL back to the calling agent as `loginUrl` instead.
+ * Mint a magic sign-in link WITHOUT emailing it — used EXCLUSIVELY by the
+ * /claim/[token] APPROVE action (Wave G) to sign the approving human's
+ * browser in server-side: the action mints a verify URL and 303-redirects
+ * THIS browser to it, landing on /dashboard. The URL never appears anywhere
+ * else — not in tool results, not in logs, not in email.
+ *
+ * IT MUST NEVER BE CALLED FROM SIGNUP (or any agent-facing flow): the retired
+ * `loginUrl` design handed a session-granting URL into agent context, where
+ * orchestrator logs could launder a session without any inbox proof. Wave G
+ * removed that path entirely — signup returns no URL of any kind.
  *
  * Better Auth's magic-link plugin builds the token + verification row and then
  * calls the configured `sendMagicLink`. We spin up a per-call Better Auth
  * instance whose mailer simply CAPTURES the URL, then invoke the same
  * `signInMagicLink` endpoint — so the token is created/hashed exactly as a
- * normal magic link and we get the URL to return.
- *
- * HANDOFF-EXPOSURE MODEL (task-agent-loginurl-hardening): this URL is NOT
- * emailed — it is returned in the signup TOOL RESULT, which many orchestrators
- * log. So unlike an emailed link (which proves inbox control and lands only in
- * the human's mailbox), a full session-granting URL can end up sitting in
- * orchestrator logs. Two properties bound that exposure:
- *   1. SINGLE-USE — already enforced by Better Auth: the verification token is
- *      consumed atomically on the first `/magic-link/verify` call, so a token
- *      mints at most one session regardless of the deprecated `allowedAttempts`
- *      option. We rely on that; we do NOT build a custom token store.
- *   2. SHORTER TTL — we mint these with AGENT_MAGIC_LINK_TTL_SECONDS (10 min),
- *      strictly shorter than the 15-min emailed default, to shrink the window in
- *      which a leaked-but-unopened link is still live. The installed magicLink
- *      plugin has no per-request expiry (`expiresIn` is plugin-level), so we pin
- *      the shorter TTL on this minter's own auth instance via createAuth's
- *      `magicLinkTtlSeconds` override.
+ * normal magic link (single-use: consumed atomically on first verify) and we
+ * get the URL to redirect to. The instance is pinned to the very short
+ * APPROVE_REDIRECT_TTL_SECONDS since the redirect consumes it immediately.
  *
  * The link lands on /dashboard after verification (callbackURL).
  *
  * Better Auth derives its base URL from the request Host when BETTER_AUTH_URL
  * is unset, and it validates the request origin, so we pass a clean synthetic
  * Headers with an explicit host + origin (BETTER_AUTH_URL in production, else
- * the inbound request origin). The MCP transport's own request headers don't
- * reliably carry a usable Host, which is why we build them ourselves.
+ * the inbound request origin).
  */
 import type { CloudEnv } from "../../app.d";
-import { AGENT_MAGIC_LINK_TTL_SECONDS, createAuth, PRODUCTION_ORIGIN } from "./auth";
+import { APPROVE_REDIRECT_TTL_SECONDS, createAuth, PRODUCTION_ORIGIN } from "./auth";
 import type { Mailer } from "./mailer";
 
 /**
@@ -57,11 +50,10 @@ export function magicLinkMinter(
     };
     // Pin the base URL so Better Auth can build the verify URL even in local
     // dev (where BETTER_AUTH_URL is unset and it would otherwise try to derive
-    // it from headers the MCP transport doesn't reliably provide). Pin the
-    // shorter agent TTL so this handed-off link expires sooner than an emailed
-    // one (see the handoff-exposure model above).
+    // it from headers). Pin the short approve-redirect TTL — the URL is
+    // consumed by the immediate 303 that follows.
     const auth = createAuth({ ...env, BETTER_AUTH_URL: base }, capturingMailer, {
-      magicLinkTtlSeconds: AGENT_MAGIC_LINK_TTL_SECONDS,
+      magicLinkTtlSeconds: APPROVE_REDIRECT_TTL_SECONDS,
     });
     // Synthetic headers with a trusted host/origin so Better Auth can resolve
     // its base URL and pass the origin check.

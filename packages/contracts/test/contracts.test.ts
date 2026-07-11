@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
   CANONICAL_RELATIONS,
+  claimInputSchema,
+  claimOutputSchema,
+  CLOUD_MCP_TOOLS,
+  CLOUD_MCP_TOOL_NAMES,
   CONCEPT_TYPES,
   CONTRACTS_VERSION,
   MCP_TOOLS,
@@ -25,8 +29,8 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "6"', () => {
-    expect(CONTRACTS_VERSION).toBe("6");
+  it('is "7"', () => {
+    expect(CONTRACTS_VERSION).toBe("7");
   });
 });
 
@@ -87,33 +91,75 @@ describe("PUBLIC_MCP_TOOLS registry (unauthenticated /mcp surface)", () => {
     const [signup] = PUBLIC_MCP_TOOLS;
     expect(signup.title.length).toBeGreaterThan(0);
     expect(signup.description.length).toBeGreaterThan(50);
-    // The description must tell the agent what to do with each credential.
-    expect(signup.description).toMatch(/loginUrl/);
+    // The description must teach the guardrail model: anonymous signup, 7-day
+    // unclaimed expiry, persistence via the claim tool, keep the key secret,
+    // and NEVER any URL in the result.
     expect(signup.description).toMatch(/apiKey/i);
+    expect(signup.description).toMatch(/7 days?/i);
+    expect(signup.description).toMatch(/claim/);
+    expect(signup.description).toMatch(/never log|never returned/i);
+    expect(signup.description).toMatch(/no URL/i);
+    expect(signup.description).not.toMatch(/loginUrl/);
     expect(signup.inputSchema).toBeInstanceOf(z.ZodObject);
     expect(signup.outputSchema).toBeInstanceOf(z.ZodType);
   });
 
-  it("signup input requires a valid email; vaultName is optional", () => {
+  it("signup input is fully optional (anonymous); email is validated when present", () => {
+    expect(signupInputSchema.safeParse({}).success).toBe(true);
+    expect(signupInputSchema.safeParse({ vaultName: "Acme brain" }).success).toBe(true);
     expect(signupInputSchema.safeParse({ email: "human@example.com" }).success).toBe(true);
     expect(
       signupInputSchema.safeParse({ email: "human@example.com", vaultName: "Acme brain" }).success,
     ).toBe(true);
     expect(signupInputSchema.safeParse({ email: "not-an-email" }).success).toBe(false);
-    expect(signupInputSchema.safeParse({}).success).toBe(false);
+    expect(signupInputSchema.safeParse({ vaultName: "" }).success).toBe(false);
   });
 
-  it("signup output round-trips and is strict", () => {
+  it("signup output round-trips, is strict, and carries NO URL or email fields", () => {
     const payload = {
       apiKey: "bz_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      loginUrl: "https://brainz.brownmatter.ai/api/auth/magic-link/verify?token=abc123",
       vaultSlug: "my-vault",
-      email: "human@example.com",
+      expiresAt: "2026-07-17T00:00:00.000Z",
+      claimEmailSent: false,
     };
     const parsed = signupOutputSchema.safeParse(payload);
     expect(parsed.success).toBe(true);
     expect(parsed.success && parsed.data).toEqual(payload);
-    expect(signupOutputSchema.safeParse({ ...payload, claimToken: "leak" }).success).toBe(false);
+    // A URL of any kind in the output is a contract violation (strict shape).
+    expect(signupOutputSchema.safeParse({ ...payload, loginUrl: "https://x" }).success).toBe(false);
+    expect(signupOutputSchema.safeParse({ ...payload, claimUrl: "https://x" }).success).toBe(false);
+    expect(signupOutputSchema.safeParse({ ...payload, email: "h@x.com" }).success).toBe(false);
+  });
+});
+
+describe("CLOUD_MCP_TOOLS registry (cloud-only authenticated surface)", () => {
+  it("declares exactly one tool: claim — never part of MCP_TOOLS", () => {
+    expect(CLOUD_MCP_TOOL_NAMES).toEqual(["claim"]);
+    expect(CLOUD_MCP_TOOLS).toHaveLength(1);
+    expect(MCP_TOOL_NAMES).not.toContain("claim");
+  });
+
+  it("claim's description tells the agent the link is emailed, never returned", () => {
+    const [claim] = CLOUD_MCP_TOOLS;
+    expect(claim.title.length).toBeGreaterThan(0);
+    expect(claim.description).toMatch(/email/i);
+    expect(claim.description).toMatch(/NEVER returned/i);
+    expect(claim.description).toMatch(/human/i);
+    expect(claim.description).toMatch(/once/i);
+  });
+
+  it("claim input requires a valid email", () => {
+    expect(claimInputSchema.safeParse({ email: "human@example.com" }).success).toBe(true);
+    expect(claimInputSchema.safeParse({ email: "nope" }).success).toBe(false);
+    expect(claimInputSchema.safeParse({}).success).toBe(false);
+  });
+
+  it("claim output is strict {status: 'sent', expiresAt} — no token, no URL", () => {
+    const payload = { status: "sent", expiresAt: "2026-07-12T00:00:00.000Z" };
+    expect(claimOutputSchema.safeParse(payload).success).toBe(true);
+    expect(claimOutputSchema.safeParse({ ...payload, url: "https://x" }).success).toBe(false);
+    expect(claimOutputSchema.safeParse({ ...payload, token: "t" }).success).toBe(false);
+    expect(claimOutputSchema.safeParse({ status: "queued", expiresAt: payload.expiresAt }).success).toBe(false);
   });
 });
 

@@ -1,10 +1,25 @@
 <script lang="ts">
 	import GraphMotif from "$lib/components/GraphMotif.svelte";
-	import { APP_URL, MCP_URL, SIGNUP_URL, SITE_URL } from "$lib/links";
+	import Seo from "$lib/components/Seo.svelte";
+	import { APP_URL, GITHUB_URL, MCP_URL, SIGNUP_URL } from "$lib/links";
 
 	const title = "Brownmatter — Brainz gives your agent fleet a shared brain";
 	const description =
 		"Brownmatter makes Brainz: a free product-knowledge graph for AI agent orchestration. Orchestrators query it over MCP; get_context returns a token-budgeted markdown briefing for every coding subagent.";
+
+	const schema = [
+		{
+			"@type": "SoftwareApplication",
+			name: "Brainz",
+			applicationCategory: "DeveloperApplication",
+			operatingSystem: "Web",
+			url: APP_URL,
+			sameAs: [GITHUB_URL],
+			description:
+				"A product-knowledge graph for AI agent orchestration, queried over MCP. Hosted free at brainz.brownmatter.ai or local-first via the open source CLI.",
+			offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+		},
+	];
 
 	const mcpSnippet = `{
   "mcpServers": {
@@ -33,19 +48,7 @@ Scores leads 0-100. Recomputed on every
 ← { "apiKey": "bz_…", "loginUrl": "${APP_URL}/api/auth/magic-link/verify?token=…", "vaultSlug": "my-vault" }`;
 </script>
 
-<svelte:head>
-	<title>{title}</title>
-	<meta name="description" content={description} />
-	<link rel="canonical" href={SITE_URL} />
-	<meta property="og:type" content="website" />
-	<meta property="og:site_name" content="Brownmatter" />
-	<meta property="og:title" content={title} />
-	<meta property="og:description" content={description} />
-	<meta property="og:url" content={SITE_URL} />
-	<meta name="twitter:card" content="summary" />
-	<meta name="twitter:title" content={title} />
-	<meta name="twitter:description" content={description} />
-</svelte:head>
+<Seo {title} {description} path="/" {schema} />
 
 <!-- ============================================================ hero -->
 <section class="hero">

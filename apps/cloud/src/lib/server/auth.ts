@@ -35,24 +35,18 @@ export const PRODUCTION_ORIGIN = "https://brainz.brownmatter.ai";
 export const MAGIC_LINK_TTL_SECONDS = 15 * 60;
 
 /**
- * Agent-minted links (the signup tool's `loginUrl`) get a DISTINCT, SHORTER TTL
- * than an emailed link.
- *
- * HANDOFF-EXPOSURE MODEL: an emailed magic link proves inbox control and lands
- * only in the human's mailbox. An agent-minted link is returned in an MCP TOOL
- * RESULT that many orchestrators log — so a full, session-granting URL can sit
- * in orchestrator logs, proving nothing about the human. Shrinking its lifetime
- * shrinks that exposure window. Single-use is already enforced by Better Auth
- * (the token is consumed atomically on first verify — see the minter notes), so
- * the residual risk is a leaked-but-unopened link; a shorter TTL bounds it.
- *
- * 10 min (< the 15-min emailed default) is short enough to bound the exposure
- * yet long enough for a realistic agent→human hand-off. Per-request expiry is
- * NOT supported by the installed magicLink plugin (`expiresIn` is plugin-level
- * only), so the minter builds a separate auth instance pinned to this TTL — see
- * createAuth's `magicLinkTtlSeconds` override.
+ * TTL for the server-minted verify URL the /claim/[token] APPROVE action
+ * redirects the approving human's browser to (Wave G). This URL is never
+ * emailed and NEVER handed to an agent — it exists only as the 303 Location
+ * of the approve form response, consumed immediately by the same browser —
+ * so a very short TTL suffices; 60 s comfortably covers slow redirects while
+ * bounding any exposure. Per-request expiry is NOT supported by the installed
+ * magicLink plugin (`expiresIn` is plugin-level only), so the minter builds a
+ * separate auth instance pinned to this TTL — see createAuth's
+ * `magicLinkTtlSeconds` override. (Replaces the retired agent `loginUrl`
+ * minting: signup no longer returns a URL of any kind.)
  */
-export const AGENT_MAGIC_LINK_TTL_SECONDS = 10 * 60;
+export const APPROVE_REDIRECT_TTL_SECONDS = 60;
 
 /**
  * Idempotently decide whether a sign-in should flip `emailVerified` true.
@@ -99,12 +93,13 @@ export function resolveSecret(env: CloudEnv): string {
 
 /**
  * @param mailerOverride When set, the magic-link callback delivers through this
- *   mailer instead of the env-selected one. The signup flow passes a capturing
- *   mailer so it can return the link as `loginUrl` rather than emailing it.
+ *   mailer instead of the env-selected one. The claim-approve minter passes a
+ *   capturing mailer so it can redirect the approving browser to the verify
+ *   URL rather than emailing it (see $lib/server/magic-link).
  * @param opts.magicLinkTtlSeconds Overrides the magic-link `expiresIn`. The
- *   agent-signup minter passes AGENT_MAGIC_LINK_TTL_SECONDS (shorter than the
- *   emailed default) — see the handoff-exposure model above. Defaults to
- *   MAGIC_LINK_TTL_SECONDS for the normal emailed flow.
+ *   claim-approve minter passes APPROVE_REDIRECT_TTL_SECONDS (far shorter than
+ *   the emailed default — the URL is consumed by an immediate redirect).
+ *   Defaults to MAGIC_LINK_TTL_SECONDS for the normal emailed flow.
  */
 export function createAuth(
   env: CloudEnv,

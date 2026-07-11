@@ -18,6 +18,13 @@ export const user = sqliteTable("user", {
   image: text("image"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  /**
+   * Wave G: provisional (agent-signed-up, unclaimed) accounts carry an expiry
+   * (~7 days from signup); bearer auth rejects keys of expired owners. NULL =
+   * permanent (human-created, or claimed via the /claim approval flow — the
+   * ONLY path that clears it).
+   */
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }),
 });
 
 export const session = sqliteTable("session", {
@@ -107,6 +114,36 @@ export const magicLinkEvent = sqliteTable(
   (t) => [
     index("magic_link_events_email_created_at").on(t.email, t.createdAt),
     index("magic_link_events_ip_created_at").on(t.ip, t.createdAt),
+  ],
+);
+
+// ----------------------------------------------------------- account claims
+
+/**
+ * Pending claim-to-persist requests (Wave G): an agent asks to attach its
+ * provisional workspace to a human's email; the human approves via an EMAILED
+ * `/claim/<token>` link. Only the SHA-256 hash of the 32-byte token is stored;
+ * tokens live 24 h; a new request supersedes (deletes) the user's prior
+ * pending claims; `approved_at` stamps consumption (single-use). Indexes:
+ * token_hash is the lookup key (unique), user_id serves the supersede/cleanup
+ * queries, email serves audit/abuse queries.
+ */
+export const accountClaim = sqliteTable(
+  "account_claims",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+    approvedAt: integer("approved_at", { mode: "timestamp_ms" }),
+  },
+  (t) => [
+    index("account_claims_user_id").on(t.userId),
+    index("account_claims_email").on(t.email),
   ],
 );
 
