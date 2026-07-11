@@ -14,8 +14,14 @@
 		type SimulationLinkDatum,
 		type SimulationNodeDatum,
 	} from "d3-force";
-	import type { GraphNode, GraphPayload } from "@brainz/contracts";
+	import type { Edge, GraphNode, GraphPayload } from "@brainz/contracts";
 	import { filterGraph, neighborhood, radiusFor, TYPE_COLORS } from "$lib/graph-data";
+	import {
+		nodesInViewport,
+		planEdges,
+		type EdgeRenderPlan,
+		type PositionedNode,
+	} from "$lib/graph-view";
 
 	interface SimNode extends SimulationNodeDatum {
 		id: string;
@@ -50,13 +56,44 @@
 	let viewport: SVGGElement;
 	let edgesG: SVGGElement;
 	let nodesG: SVGGElement;
-	const nodeEls = new Map<string, SVGGElement>();
-	const lineEls: { el: SVGLineElement; link: SimLink }[] = [];
 	const view = { x: 0, y: 0, k: 1 };
+
+	// The sim runs over the full type-filtered node/edge set (`simNodeList` /
+	// `simLinks`); the DOM only holds the *viewport-culled* subset. `nodeEls` and
+	// `edgeEls` are keyed by id and pooled — a cull pass adds/removes elements to
+	// match what's in view rather than rebuilding everything.
+	let simNodeList: SimNode[] = [];
+	let simLinks: SimLink[] = [];
+	let hovered: string | null = null; // survives cull passes so re-mounted nodes re-highlight
+	const nodeEls = new Map<string, SVGGElement>();
+	const edgeEls = new Map<string, { el: SVGLineElement; link: SimLink; plan: EdgeRenderPlan }>();
+
+	// Keep off-screen nodes just outside the frame mounted so panning doesn't
+	// pop them in at the very edge.
+	const CULL_MARGIN = 60;
+	// Unique key for an edge element (matches how planEdges identifies edges).
+	const edgeKey = (e: Edge): string => `${e.from}|${e.relation}|${e.to}`;
 
 	function applyView(): void {
 		viewport.setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`);
 		svg.classList.toggle("labels-hidden", view.k < 0.45);
+		scheduleCull();
+	}
+
+	// ------------------------------------------------------------ cull scheduling
+	// Pan/zoom and each sim tick both want to re-evaluate what's in the viewport,
+	// but re-evaluating on every raw event thrashes. Coalesce into one pass per
+	// animation frame. We track the pending rAF handle (not a sticky boolean):
+	// a dropped frame — e.g. the tab is backgrounded, which pauses rAF — must not
+	// wedge scheduling forever, so each call cancels any stale handle and arms a
+	// fresh one. The handle is cleared inside the callback.
+	let cullRaf = 0;
+	function scheduleCull(): void {
+		if (cullRaf) cancelAnimationFrame(cullRaf);
+		cullRaf = requestAnimationFrame(() => {
+			cullRaf = 0;
+			cull();
+		});
 	}
 
 	const toGraphCoords = (cx: number, cy: number): [number, number] => {
@@ -95,6 +132,8 @@
 		}));
 
 		sim?.stop();
+		simNodeList = nodeList;
+		simLinks = links;
 		sim = forceSimulation<SimNode, SimLink>(nodeList)
 			.force(
 				"link",
@@ -112,70 +151,160 @@
 			.alphaDecay(0.035)
 			.on("tick", tick);
 
+		// Reset the DOM pools; cull() (re)mounts only the in-view subset.
 		edgesG.innerHTML = "";
 		nodesG.innerHTML = "";
 		nodeEls.clear();
-		lineEls.length = 0;
-
-		for (const link of links) {
-			const line = document.createElementNS(SVG_NS, "line");
-			if (link.relation !== "references") line.classList.add("typed");
-			line.addEventListener("pointerenter", (ev) => showTooltip(ev, link.relation));
-			line.addEventListener("pointermove", (ev) => showTooltip(ev, link.relation));
-			line.addEventListener("pointerleave", hideTooltip);
-			edgesG.append(line);
-			lineEls.push({ el: line, link });
-		}
-
-		for (const sn of nodeList) {
-			const g = document.createElementNS(SVG_NS, "g");
-			g.classList.add("node");
-			if (sn.data.pending) g.classList.add("pending");
-			if (sn.id === selectedId) g.classList.add("selected");
-			g.dataset["id"] = sn.id;
-
-			const circle = document.createElementNS(SVG_NS, "circle");
-			circle.setAttribute("r", String(sn.r));
-			circle.setAttribute("fill", TYPE_COLORS[sn.data.type] ?? TYPE_COLORS["pending"]!);
-
-			const label = document.createElementNS(SVG_NS, "text");
-			label.textContent = sn.data.title;
-			label.setAttribute("dy", String(sn.r + 13));
-
-			const title = document.createElementNS(SVG_NS, "title");
-			title.textContent = `${sn.data.title} (${sn.data.type}${sn.data.pending ? ", pending" : ""})`;
-
-			g.append(circle, label, title);
-			attachNodeEvents(g, sn);
-			nodesG.append(g);
-			nodeEls.set(sn.id, g);
-		}
-		tick();
+		edgeEls.clear();
+		// Drop hover state that references now-gone nodes.
+		if (hovered && !simNodes.has(hovered)) hovered = null;
+		cull();
 	}
 
 	const linkId = (end: SimLink["source"]): string =>
 		typeof end === "object" ? end.id : String(end);
 
-	function tick(): void {
-		for (const { el, link } of lineEls) {
+	// ------------------------------------------------------------ node/edge factories
+	function makeNodeEl(sn: SimNode): SVGGElement {
+		const g = document.createElementNS(SVG_NS, "g");
+		g.classList.add("node");
+		if (sn.data.pending) g.classList.add("pending");
+		if (sn.id === selectedId) g.classList.add("selected");
+		g.dataset["id"] = sn.id;
+
+		const circle = document.createElementNS(SVG_NS, "circle");
+		circle.setAttribute("r", String(sn.r));
+		circle.setAttribute("fill", TYPE_COLORS[sn.data.type] ?? TYPE_COLORS["pending"]!);
+
+		const label = document.createElementNS(SVG_NS, "text");
+		label.textContent = sn.data.title;
+		label.setAttribute("dy", String(sn.r + 13));
+
+		const title = document.createElementNS(SVG_NS, "title");
+		title.textContent = `${sn.data.title} (${sn.data.type}${sn.data.pending ? ", pending" : ""})`;
+
+		g.append(circle, label, title);
+		attachNodeEvents(g, sn);
+		return g;
+	}
+
+	function makeEdgeEl(link: SimLink): SVGLineElement {
+		const line = document.createElementNS(SVG_NS, "line");
+		if (link.relation !== "references") line.classList.add("typed");
+		line.addEventListener("pointerenter", (ev) => showTooltip(ev, link.relation));
+		line.addEventListener("pointermove", (ev) => showTooltip(ev, link.relation));
+		line.addEventListener("pointerleave", hideTooltip);
+		return line;
+	}
+
+	// ------------------------------------------------------------ viewport culling
+	// Reconcile the DOM (nodeEls / edgeEls) so it holds exactly the nodes whose
+	// current post-force position is inside the viewport, plus the edges among
+	// them and "stub" edges pointing off-screen. Off-screen node elements and
+	// off-to-off edges are REMOVED from the DOM entirely (not CSS-hidden).
+	function cull(): void {
+		if (!nodesG || !edgesG) return;
+		const rect = svg.getBoundingClientRect();
+		const positioned: PositionedNode[] = simNodeList.map((sn) => ({
+			id: sn.id,
+			x: sn.x ?? 0,
+			y: sn.y ?? 0,
+			r: sn.r,
+		}));
+		const visibleIds = nodesInViewport(positioned, view, rect, CULL_MARGIN);
+		const allIds = new Set(simNodeList.map((sn) => sn.id));
+
+		// --- nodes: mount newly-visible, drop newly-hidden.
+		for (const sn of simNodeList) {
+			const inView = visibleIds.has(sn.id);
+			const el = nodeEls.get(sn.id);
+			if (inView && !el) {
+				const g = makeNodeEl(sn);
+				nodesG.append(g);
+				nodeEls.set(sn.id, g);
+			} else if (!inView && el) {
+				el.remove();
+				nodeEls.delete(sn.id);
+			}
+		}
+
+		// --- edges: full (both in view) or stub (anchor in view, points off).
+		const edgeList: Edge[] = simLinks.map((l) => ({
+			from: linkId(l.source),
+			to: linkId(l.target),
+			relation: l.relation,
+		}));
+		const plans = planEdges(edgeList, visibleIds, allIds);
+		const wanted = new Set(plans.map((p) => edgeKey(p.edge)));
+
+		for (const [key, entry] of edgeEls) {
+			if (!wanted.has(key)) {
+				entry.el.remove();
+				edgeEls.delete(key);
+			}
+		}
+		// simLinks and edgeList share indices (edgeList is a 1:1 map of simLinks);
+		// build a key→SimLink lookup so a plan can recover its source SimLink.
+		const linkByKey = new Map<string, SimLink>();
+		for (let i = 0; i < simLinks.length; i++) linkByKey.set(edgeKey(edgeList[i]!), simLinks[i]!);
+
+		for (const plan of plans) {
+			const key = edgeKey(plan.edge);
+			let entry = edgeEls.get(key);
+			if (!entry) {
+				const src = linkByKey.get(key);
+				if (!src) continue;
+				const el = makeEdgeEl(src);
+				edgesG.append(el);
+				entry = { el, link: src, plan };
+				edgeEls.set(key, entry);
+			} else {
+				entry.plan = plan;
+			}
+			entry.el.classList.toggle("stub", plan.stub);
+		}
+
+		reapplyHover();
+		positionElements();
+	}
+
+	function positionElements(): void {
+		for (const { el, link, plan } of edgeEls.values()) {
 			const s = link.source as SimNode;
 			const t = link.target as SimNode;
 			if (typeof s !== "object" || typeof t !== "object") continue;
-			const dx = (t.x ?? 0) - (s.x ?? 0);
-			const dy = (t.y ?? 0) - (s.y ?? 0);
+			// Orient the line from the on-screen anchor toward the other end. For a
+			// stub the "toward" end is off-screen; we keep the real geometry but the
+			// visible-node end is trimmed to its circle border.
+			const sx = s.x ?? 0;
+			const sy = s.y ?? 0;
+			const tx = t.x ?? 0;
+			const ty = t.y ?? 0;
+			const dx = tx - sx;
+			const dy = ty - sy;
 			const dist = Math.hypot(dx, dy) || 1;
 			const ux = dx / dist;
 			const uy = dy / dist;
 			// Trim ends so lines meet circle borders and arrowheads stay visible.
-			el.setAttribute("x1", String((s.x ?? 0) + ux * (s.r + 1)));
-			el.setAttribute("y1", String((s.y ?? 0) + uy * (s.r + 1)));
-			el.setAttribute("x2", String((t.x ?? 0) - ux * (t.r + 3)));
-			el.setAttribute("y2", String((t.y ?? 0) - uy * (t.r + 3)));
+			// A stub's off-screen end isn't drawn to the node border (its node is
+			// gone) — but trimming by that node's radius is still correct geometry.
+			el.setAttribute("x1", String(sx + ux * (s.r + 1)));
+			el.setAttribute("y1", String(sy + uy * (s.r + 1)));
+			el.setAttribute("x2", String(tx - ux * (t.r + 3)));
+			el.setAttribute("y2", String(ty - uy * (t.r + 3)));
+			void plan;
 		}
 		for (const [id, g] of nodeEls) {
 			const sn = simNodes.get(id);
 			if (sn) g.setAttribute("transform", `translate(${sn.x ?? 0},${sn.y ?? 0})`);
 		}
+	}
+
+	function tick(): void {
+		positionElements();
+		// Nodes drift across the viewport boundary as the layout settles — keep the
+		// mounted set in sync (throttled to one pass per frame).
+		scheduleCull();
 	}
 
 	// ----------------------------------------------------- hover / tooltip
@@ -188,20 +317,28 @@
 	}
 
 	function setHover(id: string | null): void {
-		if (id === null) {
+		hovered = id;
+		reapplyHover();
+	}
+
+	// Apply the current `hovered` highlight to whatever elements are mounted now
+	// (called on hover changes AND after each cull, so re-mounted neighbours
+	// pick up their highlight classes).
+	function reapplyHover(): void {
+		if (hovered === null) {
 			svg.classList.remove("hovering");
 			for (const g of nodeEls.values()) g.classList.remove("active", "nbr");
-			for (const { el } of lineEls) el.classList.remove("hl");
+			for (const { el } of edgeEls.values()) el.classList.remove("hl");
 			return;
 		}
 		svg.classList.add("hovering");
-		const nbrs = neighborhood(graph.edges, id, 1);
+		const nbrs = neighborhood(graph.edges, hovered, 1);
 		for (const [nid, g] of nodeEls) {
-			g.classList.toggle("active", nid === id);
-			g.classList.toggle("nbr", nid !== id && nbrs.has(nid));
+			g.classList.toggle("active", nid === hovered);
+			g.classList.toggle("nbr", nid !== hovered && nbrs.has(nid));
 		}
-		for (const { el, link } of lineEls) {
-			el.classList.toggle("hl", linkId(link.source) === id || linkId(link.target) === id);
+		for (const { el, link } of edgeEls.values()) {
+			el.classList.toggle("hl", linkId(link.source) === hovered || linkId(link.target) === hovered);
 		}
 	}
 
