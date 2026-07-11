@@ -10,4 +10,12 @@ export default defineConfig({
     // hoisted zod v3 — wrangler would otherwise resolve both to v3.
     noExternal: ["better-auth", /^@better-auth\//, "zod", "better-call"],
   },
+  build: {
+    rollupOptions: {
+      // `cloudflare:email` is a workerd built-in module (provides EmailMessage
+      // for the send_email binding). It has no npm package to resolve — leave
+      // it external so the runtime supplies it at execution time.
+      external: [/^cloudflare:/],
+    },
+  },
 });

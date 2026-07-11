@@ -183,9 +183,13 @@ async function main() {
   // Capture the magic-link URL for `email` from the mailer output after
   // `marker`. Two mailer paths appear in `wrangler dev`:
   //   - DevMailer (no binding): logs "[DevMailer] magic link for <email>: <url>"
-  //   - MailChannelsMailer (miniflare stubs send_email): logs the message and
-  //     writes the rendered text/html to temp files ("Text: <path>") — we read
-  //     that file and pull the verify URL out of it.
+  //   - MailChannelsMailer (miniflare stubs the send_email binding): the mailer
+  //     now sends a raw-MIME EmailMessage, and miniflare logs
+  //         send_email binding called with the following message:
+  //           <path>.eml
+  //     where <path>.eml is the full raw MIME (multipart/alternative: a
+  //     text/plain + text/html part). We read that .eml, match its `To:` header
+  //     to THIS recipient, and pull the verify URL out of the MIME body.
   async function captureLink(email, marker) {
     const escEmail = email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const devRe = new RegExp(`\\[DevMailer\\] magic link for ${escEmail}: (\\S+)`);
@@ -194,15 +198,21 @@ async function main() {
       const slice = devLog.slice(marker);
       const dev = slice.match(devRe);
       if (dev) return dev[1];
-      // MailChannels/miniflare path: find the send block for THIS recipient and
-      // read the Text file it references.
-      const block = slice.split("send_email binding called").find((b) => b.includes(`To: ${email}`));
-      const fileMatch = block?.match(/Text:\s*(\S+\.txt)/);
-      if (fileMatch) {
+      // MailChannels/miniflare path: each send logs the block header followed by
+      // the .eml path on a subsequent line. Read every .eml since the marker and
+      // pick the one addressed to THIS recipient.
+      for (const block of slice.split("send_email binding called")) {
+        const fileMatch = block.match(/(\S+\.eml)/);
+        if (!fileMatch) continue;
         try {
           const contents = readFileSync(fileMatch[1], "utf8");
+          // Confirm this .eml is for `email` (To: header, may be "<email>").
+          if (!contents.includes(email)) continue;
           const urlMatch = contents.match(MAGIC_RE);
-          if (urlMatch) return `${BASE}${urlMatch[0]}`;
+          if (urlMatch) {
+            // Absolute URL in the MIME already; make relative ones absolute.
+            return urlMatch[0].startsWith("http") ? urlMatch[0] : `${BASE}${urlMatch[0]}`;
+          }
         } catch {
           /* file not flushed yet — retry */
         }

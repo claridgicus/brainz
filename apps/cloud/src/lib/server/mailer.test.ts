@@ -1,5 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SendEmail } from "@cloudflare/workers-types";
+
+// `cloudflare:email` is a workerd-only module; vitest runs in Node, so stub it
+// with a minimal EmailMessage that records the (from, to, rawMime) it was
+// constructed with. This lets us assert the mailer builds a real raw-MIME
+// EmailMessage and hands it to binding.send().
+vi.mock("cloudflare:email", () => ({
+  EmailMessage: class {
+    constructor(
+      public readonly from: string,
+      public readonly to: string,
+      public readonly raw: string,
+    ) {}
+  },
+}));
+
 import {
   createMailer,
   DevMailer,
@@ -21,21 +36,30 @@ describe("mailer selection", () => {
 });
 
 describe("MailChannelsMailer", () => {
-  it("sends from no-reply@brownmatter.ai with HTML + text and the link", async () => {
+  it("sends a raw-MIME EmailMessage from no-reply@brownmatter.ai with HTML + text and the link", async () => {
     const send = vi.fn().mockResolvedValue({ messageId: "x" });
     const binding = { send } as unknown as SendEmail;
     const url = "https://brainz.brownmatter.ai/api/auth/magic-link/verify?token=abc";
     await new MailChannelsMailer(binding).sendMagicLink({ to: "u@example.com", url });
 
     expect(send).toHaveBeenCalledTimes(1);
-    const msg = send.mock.calls[0][0];
-    expect(msg.from.email).toBe(FROM_ADDRESS);
+    // Must be an EmailMessage (raw MIME) — NOT the old {from,to,subject,...} object.
+    const msg = send.mock.calls[0][0] as { from: string; to: string; raw: string };
+    expect(msg.from).toBe(FROM_ADDRESS);
     expect(msg.to).toBe("u@example.com");
-    expect(typeof msg.html).toBe("string");
-    expect(typeof msg.text).toBe("string");
-    expect(msg.html).toContain(url);
-    expect(msg.text).toContain(url);
-    expect(msg.subject).toMatch(/sign in/i);
+    expect(typeof msg.raw).toBe("string");
+
+    // The raw MIME carries the sender, subject, and BOTH text + html parts, each
+    // containing the magic-link URL.
+    expect(msg.raw).toContain(FROM_ADDRESS);
+    expect(msg.raw.toLowerCase()).toContain("subject:");
+    expect(msg.raw).toMatch(/sign in to brainz/i);
+    expect(msg.raw).toContain("text/plain");
+    expect(msg.raw).toContain("text/html");
+    // MIME may quoted-printable-encode "=" in the URL as "=3D"; check the token
+    // portion which survives encoding, plus the host.
+    expect(msg.raw).toContain("brainz.brownmatter.ai");
+    expect(msg.raw).toContain("token");
   });
 });
 

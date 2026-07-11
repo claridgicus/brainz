@@ -31,6 +31,7 @@
     "drizzle-orm": "^0.45.2",
     "hono": "^4.7.0",
     "marked": "^13.0.3",
+    "mimetext": "^3.0.28",
     "zod": "^3.25.76"
   },
   "devDependencies": {

@@ -1,4 +1,7 @@
 // Ambient types for the SvelteKit app (backend-owned; see SPEC-CLOUD.md).
+// The workerd-only `cloudflare:email` module is declared in
+// src/cloudflare-email.d.ts (a script-scope ambient file so the module
+// declaration is global).
 import type { createAuth } from "$lib/server/auth";
 
 /** Cloudflare bindings + secrets available on `event.platform.env`. */

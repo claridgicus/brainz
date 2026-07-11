@@ -17,7 +17,23 @@
  * Templates are Brownmatter-branded (💩 wordmark, one clear button), HTML +
  * plain-text. Nothing here logs the token in prod.
  */
+import { createMimeMessage } from "mimetext";
 import type { SendEmail } from "@cloudflare/workers-types";
+
+// `cloudflare:email` (provides `EmailMessage` for the send_email binding) is a
+// workerd-only built-in with no Node implementation. A STATIC top-level import
+// breaks the SvelteKit build, because adapter-cloudflare evaluates the SSR
+// bundle in Node to prerender/emit the worker. Import it LAZILY at runtime
+// (inside send()) so the module scheme is only resolved by workerd, never by
+// Node during the build. The unit test stubs this same module via vi.mock.
+async function loadEmailMessageCtor(): Promise<
+  new (from: string, to: string, raw: string) => unknown
+> {
+  const mod = (await import("cloudflare:email")) as {
+    EmailMessage: new (from: string, to: string, raw: string) => unknown;
+  };
+  return mod.EmailMessage;
+}
 
 export interface Mailer {
   /** Deliver a magic sign-in link to `to`. */
@@ -125,28 +141,37 @@ export class MailChannelsMailer implements Mailer {
   constructor(private readonly binding: SendEmail) {}
 
   private async send(to: string, tpl: Template): Promise<void> {
-    // Builder overload of SendEmail.send (modern workerd) — no raw MIME needed.
-    // The builder object shape {from,to,subject,text,html} is Cloudflare's
-    // recommended EmailMessageBuilder format for the native Email Sending path.
+    // Cloudflare's `send_email` binding accepts a raw-MIME `EmailMessage`:
+    //   new EmailMessage(fromAddr, toAddr, rawMimeString)  →  binding.send(msg)
+    // We build the MIME with `mimetext` (pure-JS, Workers-safe): sender,
+    // recipient, subject, then BOTH a text/plain and a text/html part so
+    // clients render the branded HTML with a plain-text fallback. This is the
+    // authoritative, universally-supported API — the older object/builder
+    // overload was NOT delivering (send() effectively no-op/threw), which is
+    // why 200s were returned but no email arrived.
     //
     // GRACEFUL DEGRADATION (intentional): the real `send_email` binding THROWS
-    // when it cannot deliver — most commonly because Cloudflare's Email Sending
-    // only delivers to VERIFIED destination addresses unless the sending domain
-    // is onboarded for Email Sending on the Workers Paid plan (see the deploy
-    // runbook / mailer docblock). Letting that throw propagate would 500 the
-    // sign-in request even though Better Auth already minted a valid token.
-    // Instead we swallow the error and log it loudly so it shows in
-    // `wrangler tail`. The magic-link token still exists; only DELIVERY failed.
-    // Losing the email silently is acceptable FOR NOW (better than a 500) and
-    // must be removed once the Cloudflare Email tier covers arbitrary recipients.
+    // when it cannot deliver — e.g. the sending domain is not onboarded for
+    // Email Sending, the sender identity is unverified, or the recipient is a
+    // non-verified address on an Email-Routing-only setup. Letting that throw
+    // propagate would 500 the sign-in request even though Better Auth already
+    // minted a valid token. Instead we swallow the error and log it LOUDLY
+    // (name + message + stack + cause) so the real Cloudflare error is
+    // unmissable in `wrangler tail`. The magic-link token still exists; only
+    // DELIVERY failed. On success this method is silent (no log line).
     try {
-      await this.binding.send({
-        from: { name: FROM_NAME, email: FROM_ADDRESS },
-        to,
-        subject: tpl.subject,
-        text: tpl.text,
-        html: tpl.html,
-      });
+      const mime = createMimeMessage();
+      mime.setSender({ name: FROM_NAME, addr: FROM_ADDRESS });
+      mime.setRecipient(to);
+      mime.setSubject(tpl.subject);
+      // text/plain first (fallback), then text/html (preferred by clients).
+      mime.addMessage({ contentType: "text/plain", data: tpl.text });
+      mime.addMessage({ contentType: "text/html", data: tpl.html });
+
+      const EmailMessage = await loadEmailMessageCtor();
+      const message = new EmailMessage(FROM_ADDRESS, to, mime.asRaw());
+      // The first SendEmail.send overload takes a raw-MIME EmailMessage.
+      await this.binding.send(message as Parameters<SendEmail["send"]>[0]);
     } catch (err) {
       logSendFailure(to, err);
       // Deliberately not rethrown: a delivery failure must not fail the
@@ -164,14 +189,20 @@ export class MailChannelsMailer implements Mailer {
 }
 
 /**
- * Log an email-send failure loudly (message + any nested cause) so the real
- * Cloudflare error is visible in `wrangler tail`. Never includes the token/URL.
+ * Log an email-send failure loudly (name + message + stack + any nested cause)
+ * so the real Cloudflare error is unmissable in `wrangler tail`. A real send
+ * failure must never be silent. Never includes the token/URL.
  */
 function logSendFailure(to: string, err: unknown): void {
+  const name = err instanceof Error ? err.name : "NonError";
   const message = err instanceof Error ? err.message : String(err);
-  const cause = err instanceof Error && err.cause ? ` cause=${String((err.cause as Error)?.message ?? err.cause)}` : "";
+  const stack = err instanceof Error && err.stack ? ` stack=${err.stack}` : "";
+  const cause =
+    err instanceof Error && err.cause
+      ? ` cause=${String((err.cause as Error)?.message ?? err.cause)}`
+      : "";
   // eslint-disable-next-line no-console
-  console.error(`[mailer] email send FAILED to ${to}: ${message}${cause}`);
+  console.error(`[mailer] email send FAILED to ${to}: ${name}: ${message}${cause}${stack}`);
 }
 
 /**

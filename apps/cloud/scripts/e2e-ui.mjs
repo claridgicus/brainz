@@ -128,7 +128,7 @@ async function main() {
   dev.stderr.on("data", (d) => (devLog += d));
 
   // Sign `email` in the passwordless way: request a magic link, capture it from
-  // the mailer output (DevMailer stderr line or MailChannels/miniflare temp
+  // the mailer output (DevMailer stderr line or MailChannels/miniflare .eml
   // file), follow it, and store the session cookie into `targetJar`. Returns
   // the captured link (or null). This is the only account-creation path now
   // that email+password sign-up is gone — used for the primary user and for
@@ -153,13 +153,21 @@ async function main() {
         magicUrl = dev[1];
         break;
       }
-      const block = slice.split("send_email binding called").find((b) => b.includes(`To: ${email}`));
-      const fileMatch = block?.match(/Text:\s*(\S+\.txt)/);
-      if (fileMatch) {
+      // miniflare stubs send_email: the mailer sends a raw-MIME EmailMessage and
+      // miniflare logs the block header then the .eml path (full MIME) on a
+      // following line. Read every .eml since the marker, match `To:` to this
+      // recipient, and pull the verify URL out of the MIME body.
+      for (const block of slice.split("send_email binding called")) {
+        const fileMatch = block.match(/(\S+\.eml)/);
+        if (!fileMatch) continue;
         try {
           const contents = readFileSync(fileMatch[1], "utf8");
+          if (!contents.includes(email)) continue;
           const um = contents.match(magicRe);
-          if (um) magicUrl = `${BASE}${um[0]}`;
+          if (um) {
+            magicUrl = um[0].startsWith("http") ? um[0] : `${BASE}${um[0]}`;
+            break;
+          }
         } catch {
           /* file not flushed yet */
         }
@@ -207,10 +215,10 @@ async function main() {
 
     // 2. passwordless magic-link sign-in → session cookie. In wrangler dev the
     // send_email binding is stubbed by miniflare, so the app uses
-    // MailChannelsMailer, which logs the message + writes the rendered text to a
-    // temp file ("Text: <path>"); read that file for the verify URL. (If a build
-    // ever runs DevMailer instead, its stderr "[DevMailer] …: <url>" line works
-    // too.)
+    // MailChannelsMailer, which sends a raw-MIME EmailMessage; miniflare writes
+    // it to a temp .eml file and logs that path — read the .eml for the verify
+    // URL. (If a build ever runs DevMailer instead, its stderr
+    // "[DevMailer] …: <url>" line works too.)
     const email = `e2e-ui-${Date.now()}@example.com`;
     const signIn = await signInViaMagicLink(email, jar);
     step("magic-link request returns 200", signIn.status === 200, `status ${signIn.status}`);
