@@ -27,6 +27,7 @@
  */
 import type { CloudEnv } from "../../app.d";
 import { APPROVE_REDIRECT_TTL_SECONDS, createAuth, PRODUCTION_ORIGIN } from "./auth";
+import { normalizeEmail } from "./email";
 import { createMailer, type Mailer } from "./mailer";
 
 /**
@@ -41,7 +42,10 @@ export function magicLinkMinter(
 ): (email: string) => Promise<string> {
   const base = env.BETTER_AUTH_URL || requestOrigin || PRODUCTION_ORIGIN;
   const host = new URL(base).host;
-  return async (email: string) => {
+  return async (rawEmail: string) => {
+    // Canonical before Better Auth ever sees it — our layer normalizes so a
+    // mixed-case address can never mint against a forked identity.
+    const email = normalizeEmail(rawEmail);
     let captured: string | null = null;
     const capturingMailer: Mailer = {
       async sendMagicLink({ url }) {
@@ -89,7 +93,9 @@ export function magicLinkSender(
 ): (email: string) => Promise<void> {
   const base = env.BETTER_AUTH_URL || requestOrigin || PRODUCTION_ORIGIN;
   const host = new URL(base).host;
-  return async (email: string) => {
+  return async (rawEmail: string) => {
+    // Canonical before Better Auth ever sees it (matches its own lowercasing).
+    const email = normalizeEmail(rawEmail);
     // Real, env-selected mailer: the link is EMAILED, never returned.
     const auth = createAuth({ ...env, BETTER_AUTH_URL: base }, createMailer(env));
     const headers = new Headers({ host, origin: base, "content-type": "application/json" });

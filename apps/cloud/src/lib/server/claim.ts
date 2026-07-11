@@ -23,6 +23,7 @@ import { claimInputSchema, type ClaimOutput } from "@brainz/contracts";
 import { and, eq, isNull, ne, asc, sql } from "drizzle-orm";
 import type { Db } from "./db";
 import { schema } from "./db";
+import { normalizeEmail } from "./email";
 import { guardDepsFromDb, guardMagicLinkRequest } from "./magic-link-guard";
 import type { Mailer } from "./mailer";
 import { fail, guarded, ok, type ToolResult } from "./mcp";
@@ -166,13 +167,16 @@ export function claimDbFrom(db: Db): ClaimDb {
       return rows[0] ?? null;
     },
     findUserByEmail: async (email) => {
-      // Case-insensitive match: emails are normalized to lowercase on write in
-      // our flows, but a human account created directly through Better Auth may
-      // carry mixed case, so lower() both sides to be safe.
+      // Normalize the input (canonical form) AND lower() the column: our flows
+      // normalize on write, but a human account created directly through Better
+      // Auth could carry mixed case, so the column-side lower() is
+      // belt-and-suspenders — a stray mixed-case row can never fork or dodge
+      // this lookup.
+      const normalized = normalizeEmail(email);
       const rows = await db
         .select({ id: schema.user.id })
         .from(schema.user)
-        .where(eq(sql`lower(${schema.user.email})`, email.toLowerCase()))
+        .where(eq(sql`lower(${schema.user.email})`, normalized))
         .limit(1);
       return rows[0] ?? null;
     },
@@ -307,7 +311,7 @@ export async function requestClaim(
   deps: ClaimRequestDeps,
   args: { userId: string; email: string },
 ): Promise<RequestClaimResult> {
-  const email = args.email.trim().toLowerCase();
+  const email = normalizeEmail(args.email);
   const now = deps.now();
 
   const owner = await deps.db.getUserById(args.userId);
