@@ -79,6 +79,7 @@ interface FakeState {
     provisionalUserId: string;
     existingUserId: string;
     claimId: string;
+    vaultIds: string[];
     vaultRenames: { vaultId: string; slug: string }[];
     at: Date;
   }[];
@@ -548,6 +549,9 @@ describe("approveClaim", () => {
     // In-place promotion did NOT run.
     expect(state.approvals).toHaveLength(0);
     expect(state.reconciles).toHaveLength(1);
+    // Wave M: every moved vault is named, so the existing user gets an
+    // `owner` vault_member row on each in the same atomic batch.
+    expect(state.reconciles[0].vaultIds).toEqual(["vault-1"]);
     // The reconcile was atomic (one batch call) and stamped the claim.
     expect(state.claims.find((c) => c.userId === "james")).toBeUndefined();
   });

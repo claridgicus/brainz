@@ -76,7 +76,9 @@ export function magicLinkMinter(
 /**
  * Returns a function that triggers Better Auth to EMAIL a magic sign-in link to
  * an address (the same path the /login page uses) — used by the public `sign_in`
- * MCP tool. Unlike `magicLinkMinter`, the URL is NEVER captured or returned: it
+ * MCP tool and the /invite page's "send me a sign-in link" action (which passes
+ * a `callbackURL` back to the invite page so the human lands where they can
+ * accept). Unlike `magicLinkMinter`, the URL is NEVER captured or returned: it
  * travels only in the email the env-selected mailer delivers, so the human must
  * action it from their inbox. Delivery failures are swallowed (the production
  * mailer already logs its own; we defend against any other throw) so a send
@@ -90,10 +92,10 @@ export function magicLinkMinter(
 export function magicLinkSender(
   env: CloudEnv,
   requestOrigin: string,
-): (email: string) => Promise<void> {
+): (email: string, callbackURL?: string) => Promise<void> {
   const base = env.BETTER_AUTH_URL || requestOrigin || PRODUCTION_ORIGIN;
   const host = new URL(base).host;
-  return async (rawEmail: string) => {
+  return async (rawEmail: string, callbackURL = "/dashboard") => {
     // Canonical before Better Auth ever sees it (matches its own lowercasing).
     const email = normalizeEmail(rawEmail);
     // Real, env-selected mailer: the link is EMAILED, never returned.
@@ -101,7 +103,7 @@ export function magicLinkSender(
     const headers = new Headers({ host, origin: base, "content-type": "application/json" });
     try {
       await auth.api.signInMagicLink({
-        body: { email, callbackURL: "/dashboard" },
+        body: { email, callbackURL },
         headers,
       });
     } catch (err) {

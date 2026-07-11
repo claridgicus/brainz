@@ -17,6 +17,7 @@ const vault = {
   slug: "acme-crm",
   name: "Acme CRM",
   createdAt: "2026-07-10T00:00:00.000Z",
+  role: "owner" as const,
 };
 
 describe("createApi", () => {

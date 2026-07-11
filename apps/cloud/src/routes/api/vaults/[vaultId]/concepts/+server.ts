@@ -1,4 +1,8 @@
-/** GET/POST /api/vaults/:vaultId/concepts — list (tool-compact metas) and create. */
+/**
+ * GET/POST /api/vaults/:vaultId/concepts — list (tool-compact metas) and
+ * create. Reads: any member (viewer+) or bearer key; writes: editor+ (Wave M
+ * role gates — viewers are read-only).
+ */
 import { json } from "@sveltejs/kit";
 import { conceptUpsertRequestSchema } from "@brainz/contracts";
 import { guarded, parseBody, parseQuery, requirePlatform } from "$lib/server/api-util";
@@ -14,7 +18,7 @@ export const GET = guarded(async (event) => {
 });
 
 export const POST = guarded(async (event) => {
-  const { vault } = await requireVaultAccess(event, event.params.vaultId!);
+  const { vault } = await requireVaultAccess(event, event.params.vaultId!, { role: "editor" });
   const input = await parseBody(event, conceptUpsertRequestSchema);
   const client = vaultClient(requirePlatform(event).env.VAULT_DO, vault.id);
   const { concept } = await client.upsertConcept(input);

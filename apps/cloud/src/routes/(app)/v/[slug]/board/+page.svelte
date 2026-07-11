@@ -246,8 +246,8 @@
 							<div
 								class="card task-card status-{st}"
 								class:busy={busyId === task.id}
-								draggable={true}
-								ondragstart={() => (dragId = task.id)}
+								draggable={canEdit}
+								ondragstart={() => canEdit && (dragId = task.id)}
 								ondragend={() => (dragId = null)}
 								role="button"
 								tabindex="0"
@@ -271,6 +271,7 @@
 										</span>
 									{/if}
 								</div>
+								{#if canEdit}
 								<div class="card-moves">
 									{#if prevStatus[st]}
 										<button
@@ -299,6 +300,7 @@
 										</button>
 									{/if}
 								</div>
+								{/if}
 							</div>
 						{/each}
 						{#if lane.tasks.length === 0}
@@ -322,6 +324,7 @@
 				error={conceptError}
 				edges={selectedEdges}
 				{titleFor}
+				readonly={!canEdit}
 				focused={false}
 				onfocustoggle={() => {}}
 				onnavigate={gotoGraph}

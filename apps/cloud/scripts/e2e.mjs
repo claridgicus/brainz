@@ -290,13 +290,45 @@ async function main() {
     return null;
   }
 
+  // Capture the EMAILED vault-invite URL for `email` (Wave M). DevMailer logs
+  //   "[DevMailer] invite for <to> to <vaultName> as <role>: <url>"
+  // and the miniflare send_email stub writes the raw MIME to a .eml, from which
+  // we pull the /invite/<64-hex> URL (soft QP line breaks unfolded).
+  const INVITE_RE = /https?:\/\/[^\s"'<>)]*\/invite\/[0-9a-f]{64}|\/invite\/[0-9a-f]{64}/;
+  async function captureInviteLink(email, marker) {
+    const escEmail = email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const devRe = new RegExp(`\\[DevMailer\\] invite for ${escEmail} to .*: (\\S+)`);
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const slice = devLog.slice(marker);
+      const dev = slice.match(devRe);
+      if (dev) return dev[1];
+      for (const block of slice.split("send_email binding called")) {
+        const fileMatch = block.match(/(\S+\.eml)/);
+        if (!fileMatch) continue;
+        try {
+          const contents = readFileSync(fileMatch[1], "utf8").replace(/=\r?\n/g, "");
+          if (!contents.includes(email)) continue;
+          const urlMatch = contents.match(INVITE_RE);
+          if (urlMatch) {
+            return urlMatch[0].startsWith("http") ? urlMatch[0] : `${BASE}${urlMatch[0]}`;
+          }
+        } catch {
+          /* file not flushed yet — retry */
+        }
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return null;
+  }
+
   // Establish a fresh authenticated session for `email` the passwordless way —
   // request a magic link, capture it from the mailer, follow it — and store the
   // resulting session cookie into `targetJar`. This is the only way to create a
   // second user ("user B") now that email+password sign-up is gone; it reuses
   // the exact request → capture → verify mechanism the primary flow above uses.
-  async function signInViaMagicLink(email, targetJar) {
-    const { res, marker } = await requestMagicLink(email);
+  async function signInViaMagicLink(email, targetJar, extraHeaders = {}) {
+    const { res, marker } = await requestMagicLink(email, { extraHeaders });
     if (res.status !== 200) return { ok: false, status: res.status, reason: "request" };
     const url = await captureLink(email, marker);
     if (!url) return { ok: false, status: res.status, reason: "capture" };
@@ -1357,6 +1389,146 @@ async function main() {
 
     const dupVault = await api("POST", "/api/vaults", { body: { name: "E2E Vault" } });
     step("validation: duplicate vault slug → 409", dupVault.status === 409, `status ${dupVault.status}`);
+
+    // ================================================================
+    // 17b. VAULT MEMBERSHIP + EMAIL INVITE (Wave M) — the primary session
+    //      (owner of `vaultId`) invites a colleague as VIEWER, the colleague
+    //      signs in via magic link and accepts, becoming a member; then role
+    //      enforcement is exercised (viewer cannot write; non-member 404).
+    // ================================================================
+
+    // The owner sees exactly themselves as an owner member to start.
+    const membersBefore = await api("GET", `/api/vaults/${vaultId}/members`);
+    step(
+      "owner lists members: one owner (self) via the backfilled/created membership",
+      membersBefore.status === 200 &&
+        membersBefore.json?.members?.length === 1 &&
+        membersBefore.json.members[0].role === "owner",
+      `status ${membersBefore.status}, ${membersBefore.json?.members?.length} member(s)`,
+    );
+
+    // Route this journey's email sends through a DEDICATED client IP so the two
+    // invite/sign-in emails don't draw down the shared "local" IP bucket that
+    // the magic-link rate-limit + normalization sections below depend on.
+    const INVITE_IP = "203.0.113.77";
+    const colleagueEmail = `colleague-${Date.now()}@example.com`;
+    const inviteMarker = devLog.length;
+    const inviteResFetch = await fetch(`${BASE}/api/vaults/${vaultId}/invites`, {
+      method: "POST",
+      headers: {
+        origin: BASE,
+        "content-type": "application/json",
+        cookie: cookieHeader(),
+        "cf-connecting-ip": INVITE_IP,
+      },
+      body: JSON.stringify({ email: colleagueEmail, role: "viewer" }),
+    });
+    const inviteRes = { status: inviteResFetch.status, json: await inviteResFetch.json() };
+    step(
+      "owner creates a viewer invite → 201 {invite, url}",
+      inviteRes.status === 201 &&
+        inviteRes.json?.invite?.email === colleagueEmail &&
+        inviteRes.json?.invite?.role === "viewer" &&
+        typeof inviteRes.json?.url === "string",
+      `status ${inviteRes.status}`,
+    );
+
+    // The invite email was delivered (DevMailer/miniflare) — capture its link.
+    const invitedUrl = await captureInviteLink(colleagueEmail, inviteMarker);
+    step(
+      "invite email delivered with an /invite/<token> link (captured)",
+      Boolean(invitedUrl) && /\/invite\/[0-9a-f]{64}/.test(invitedUrl ?? ""),
+      (invitedUrl ?? "").slice(0, 60),
+    );
+    const invitePath = invitedUrl ? new URL(invitedUrl, BASE).pathname : "";
+
+    // The colleague signs in (passwordless) as the invited address.
+    const colleagueJar = new Map();
+    const colleagueLogin = await signInViaMagicLink(colleagueEmail, colleagueJar, {
+      "cf-connecting-ip": INVITE_IP,
+    });
+    step("colleague signs in via magic link (session cookie)", colleagueLogin.ok, colleagueLogin.reason);
+    const colleagueCookie = cookieHeader(colleagueJar);
+
+    // Before accepting, the colleague is a NON-member of the vault → 404.
+    const preAccept = await fetch(`${BASE}/api/vaults/${vaultId}/stats`, {
+      headers: { origin: BASE, cookie: colleagueCookie },
+    });
+    step(
+      "non-member colleague probing the vault → 404 (no tenancy leak)",
+      preAccept.status === 404,
+      `status ${preAccept.status}`,
+    );
+
+    // Accept via the invite page's form action (plain-browser 303 flow).
+    const acceptRes = await fetch(`${BASE}${invitePath}?/accept`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        origin: BASE,
+        accept: "text/html",
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: colleagueCookie,
+      },
+      body: "",
+    });
+    step(
+      "accepting the invite 303-redirects into the vault",
+      acceptRes.status === 303 && /\/v\//.test(acceptRes.headers.get("location") ?? ""),
+      `status ${acceptRes.status} → ${(acceptRes.headers.get("location") ?? "").slice(0, 40)}`,
+    );
+
+    // Now a MEMBER: reads work (viewer scope) …
+    const colleagueStats = await fetch(`${BASE}/api/vaults/${vaultId}/stats`, {
+      headers: { origin: BASE, cookie: colleagueCookie },
+    });
+    step("accepted colleague can now read the vault (viewer)", colleagueStats.status === 200, `status ${colleagueStats.status}`);
+
+    // … but WRITES are refused (viewer is read-only) → 403.
+    const viewerWrite = await fetch(`${BASE}/api/vaults/${vaultId}/concepts`, {
+      method: "POST",
+      headers: { origin: BASE, "content-type": "application/json", cookie: colleagueCookie },
+      body: JSON.stringify({ id: "viewer-should-not-write", title: "nope", type: "note", body: "x" }),
+    });
+    step("viewer write is refused → 403 (read-only role)", viewerWrite.status === 403, `status ${viewerWrite.status}`);
+
+    // The owner now sees two members; the invite is consumed (no longer pending).
+    const membersAfter = await api("GET", `/api/vaults/${vaultId}/members`);
+    step(
+      "owner lists members: now owner + viewer",
+      membersAfter.status === 200 &&
+        membersAfter.json?.members?.length === 2 &&
+        membersAfter.json.members.some((m) => m.email === colleagueEmail && m.role === "viewer"),
+      `status ${membersAfter.status}, ${membersAfter.json?.members?.length} member(s)`,
+    );
+    const pendingAfter = await api("GET", `/api/vaults/${vaultId}/invites`);
+    step(
+      "the accepted invite is consumed (no longer pending)",
+      pendingAfter.status === 200 && (pendingAfter.json?.invites ?? []).length === 0,
+      `status ${pendingAfter.status}, ${pendingAfter.json?.invites?.length} pending`,
+    );
+
+    // Single-use: replaying the same accept token fails (already used → 410).
+    const replay = await fetch(`${BASE}${invitePath}?/accept`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        origin: BASE,
+        accept: "text/html",
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: colleagueCookie,
+      },
+      body: "",
+    });
+    step("replaying a consumed invite token fails (not another 303)", replay.status !== 303, `status ${replay.status}`);
+
+    // Owner-only surface: the viewer cannot invite or list keys.
+    const viewerInvite = await fetch(`${BASE}/api/vaults/${vaultId}/invites`, {
+      method: "POST",
+      headers: { origin: BASE, "content-type": "application/json", cookie: colleagueCookie },
+      body: JSON.stringify({ email: "someone@example.com", role: "editor" }),
+    });
+    step("viewer cannot create invites → 403 (owner-only)", viewerInvite.status === 403, `status ${viewerInvite.status}`);
 
     // ================================================================
     // 18. VAULT LIFECYCLE — rename, slug clash, concept delete, vault delete.

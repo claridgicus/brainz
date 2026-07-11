@@ -60,6 +60,8 @@ import { fail, guarded, ok, SERVER_NAME, SERVER_VERSION, type ToolResult } from 
 export interface ProvisionedSignup {
   user: typeof schema.user.$inferSelect;
   vault: typeof schema.vault.$inferSelect;
+  /** Wave M: the creator's `owner` vault_member row (membership = access). */
+  member: typeof schema.vaultMember.$inferSelect;
   apiKey: typeof schema.apiKey.$inferSelect;
 }
 
@@ -154,6 +156,13 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
         name: vaultName,
         createdAt: now,
         onboardedAt: null,
+      },
+      member: {
+        id: crypto.randomUUID(),
+        vaultId,
+        userId,
+        role: "owner",
+        createdAt: now,
       },
       apiKey: {
         id: crypto.randomUUID(),
@@ -325,6 +334,7 @@ export function signupDepsFromDb(
       await db.batch([
         db.insert(schema.user).values(p.user),
         db.insert(schema.vault).values(p.vault),
+        db.insert(schema.vaultMember).values(p.member),
         db.insert(schema.apiKey).values(p.apiKey),
       ]);
     },

@@ -5,13 +5,19 @@
  * - `Authorization: Bearer bz_...` (valid) → SHA-256 → D1 api_key lookup →
  *   that key's vault DO, serving the authenticated vault tools PLUS the
  *   cloud-only `claim` tool (CLOUD_MCP_TOOLS in @brainz/contracts).
+ *   Wave M pinned decision (documented in $lib/server/vault-access): keys
+ *   carry EDITOR-equivalent data-plane scope — every vault tool (reads AND
+ *   writes) works over any valid key; the viewer role constrains only
+ *   session surfaces, and key management stays owner-only, so no key can
+ *   ever exist with less-than-editor scope. No per-tool role checks here.
  * - Bearer whose provisional owner expired unclaimed → 401 with the
  *   workspace-expired message (Wave G).
  * - Authorization header present but invalid/revoked → 401, exactly as before.
- * - NO Authorization header → the PUBLIC MCP server: exactly one tool,
- *   `signup` (anonymous provisional workspaces; see PUBLIC_MCP_TOOLS and
- *   $lib/server/public-mcp). No URL of any kind is ever returned — claim
- *   approval travels by EMAIL only ($lib/server/claim).
+ * - NO Authorization header → the PUBLIC MCP server: two tools, `signup`
+ *   (anonymous provisional workspaces) and `sign_in` (emails a magic sign-in
+ *   link to an existing account); see PUBLIC_MCP_TOOLS and
+ *   $lib/server/public-mcp. No URL of any kind is ever returned — both the
+ *   sign-in link and claim approval travel by EMAIL only ($lib/server/claim).
  *
  * Stateless: a fresh McpServer + transport per request (no session ids),
  * served through @hono/mcp's fetch-native StreamableHTTPTransport — chosen

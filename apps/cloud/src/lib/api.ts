@@ -16,10 +16,10 @@ import {
   statsResponseSchema,
   taskListResponseSchema,
   taskMoveResponseSchema,
-  vaultInviteCreateResponseSchema,
-  vaultInviteListResponseSchema,
+  inviteCreateResponseSchema,
+  inviteListResponseSchema,
   vaultListResponseSchema,
-  vaultMemberListResponseSchema,
+  memberListResponseSchema,
   vaultMemberSchema,
   vaultSchema,
   type ApiConcept,
@@ -95,7 +95,7 @@ export interface VaultStats {
 export type Task = TaskMeta;
 
 /** POST create/resend invite response: the ONLY place the invite URL appears. */
-export type InviteWithUrl = z.infer<typeof vaultInviteCreateResponseSchema>;
+export type InviteWithUrl = z.infer<typeof inviteCreateResponseSchema>;
 
 export type SearchHit = z.infer<typeof searchResponseSchema>["hits"][number];
 
@@ -233,7 +233,7 @@ export function createApi(fetchFn: Fetch) {
 
     // ------------------------------------------------------------- members
     async listMembers(vaultId: string): Promise<VaultMember[]> {
-      return (await request(vaultMemberListResponseSchema, `/api/vaults/${enc(vaultId)}/members`))
+      return (await request(memberListResponseSchema, `/api/vaults/${enc(vaultId)}/members`))
         .members;
     },
     updateMemberRole(vaultId: string, userId: string, role: VaultRole): Promise<VaultMember> {
@@ -251,12 +251,12 @@ export function createApi(fetchFn: Fetch) {
 
     // ------------------------------------------------------------- invites
     async listInvites(vaultId: string): Promise<VaultInvite[]> {
-      return (await request(vaultInviteListResponseSchema, `/api/vaults/${enc(vaultId)}/invites`))
+      return (await request(inviteListResponseSchema, `/api/vaults/${enc(vaultId)}/invites`))
         .invites;
     },
     /** The returned `url` is shown exactly once — never listed again. */
     createInvite(vaultId: string, body: { email: string; role: VaultRole }): Promise<InviteWithUrl> {
-      return request(vaultInviteCreateResponseSchema, `/api/vaults/${enc(vaultId)}/invites`, {
+      return request(inviteCreateResponseSchema, `/api/vaults/${enc(vaultId)}/invites`, {
         method: "POST",
         body,
       });
@@ -264,7 +264,7 @@ export function createApi(fetchFn: Fetch) {
     /** Re-send the invite email; returns a fresh one-time URL. */
     resendInvite(vaultId: string, inviteId: string): Promise<InviteWithUrl> {
       return request(
-        vaultInviteCreateResponseSchema,
+        inviteCreateResponseSchema,
         `/api/vaults/${enc(vaultId)}/invites/${enc(inviteId)}/resend`,
         { method: "POST" },
       );

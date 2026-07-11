@@ -1,4 +1,7 @@
-/** GET/PUT/DELETE /api/vaults/:vaultId/concepts/:id. */
+/**
+ * GET/PUT/DELETE /api/vaults/:vaultId/concepts/:id.
+ * GET: any member (viewer+) or bearer key; PUT/DELETE: editor+ (Wave M).
+ */
 import { json } from "@sveltejs/kit";
 import { conceptUpsertRequestSchema } from "@brainz/contracts";
 import { guarded, HttpError, parseBody, requirePlatform } from "$lib/server/api-util";
@@ -16,7 +19,7 @@ export const GET = guarded(async (event) => {
 });
 
 export const PUT = guarded(async (event) => {
-  const { vault } = await requireVaultAccess(event, event.params.vaultId!);
+  const { vault } = await requireVaultAccess(event, event.params.vaultId!, { role: "editor" });
   const input = await parseBody(event, conceptUpsertRequestSchema);
   if (input.id !== undefined && input.id !== event.params.id) {
     throw new HttpError(400, "body id does not match the URL");
@@ -27,7 +30,7 @@ export const PUT = guarded(async (event) => {
 });
 
 export const DELETE = guarded(async (event) => {
-  const { vault } = await requireVaultAccess(event, event.params.vaultId!);
+  const { vault } = await requireVaultAccess(event, event.params.vaultId!, { role: "editor" });
   const client = vaultClient(requirePlatform(event).env.VAULT_DO, vault.id);
   const { deleted } = await client.deleteConcept(event.params.id!);
   if (!deleted) throw new HttpError(404, `no concept with id "${event.params.id}"`);

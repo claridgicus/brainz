@@ -7,7 +7,12 @@
  */
 import { describe, expect, it } from "vitest";
 import { HttpError } from "./api-util";
-import { isOwnerExpired, WORKSPACE_EXPIRED_MESSAGE } from "./vault-access";
+import {
+  insufficientRoleMessage,
+  isOwnerExpired,
+  roleSatisfies,
+  WORKSPACE_EXPIRED_MESSAGE,
+} from "./vault-access";
 
 const NOW = new Date("2026-07-10T00:00:00.000Z");
 
@@ -28,6 +33,29 @@ describe("isOwnerExpired", () => {
 
   it("the exact expiry instant is still valid (strictly past-expiry rejects)", () => {
     expect(isOwnerExpired(new Date(NOW.getTime()), NOW)).toBe(false);
+  });
+});
+
+describe("the role lattice (Wave M: viewer < editor < owner)", () => {
+  it("every role satisfies itself and everything below it", () => {
+    expect(roleSatisfies("viewer", "viewer")).toBe(true);
+    expect(roleSatisfies("editor", "viewer")).toBe(true);
+    expect(roleSatisfies("editor", "editor")).toBe(true);
+    expect(roleSatisfies("owner", "viewer")).toBe(true);
+    expect(roleSatisfies("owner", "editor")).toBe(true);
+    expect(roleSatisfies("owner", "owner")).toBe(true);
+  });
+
+  it("no role satisfies anything above it (viewers can't write, editors can't admin)", () => {
+    expect(roleSatisfies("viewer", "editor")).toBe(false);
+    expect(roleSatisfies("viewer", "owner")).toBe(false);
+    expect(roleSatisfies("editor", "owner")).toBe(false);
+  });
+
+  it("insufficient-role messages are actionable and role-specific", () => {
+    expect(insufficientRoleMessage("owner")).toMatch(/owner role/);
+    expect(insufficientRoleMessage("editor")).toMatch(/editor role/);
+    expect(insufficientRoleMessage("editor")).toMatch(/read-only/);
   });
 });
 

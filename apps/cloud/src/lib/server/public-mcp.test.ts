@@ -114,6 +114,11 @@ describe("public MCP server (unauthenticated surface)", () => {
     expect(p.user.expiresAt?.toISOString()).toBe(payload.expiresAt);
     expect(p.vault.ownerId).toBe(p.user.id);
     expect(p.vault.name).toBe("Acme Brain");
+    // Wave M: membership is the access source of truth — signup provisions
+    // the creator's `owner` vault_member row alongside the vault.
+    expect(p.member.vaultId).toBe(p.vault.id);
+    expect(p.member.userId).toBe(p.user.id);
+    expect(p.member.role).toBe("owner");
     // Only the key hash at rest — never the plaintext.
     expect(p.apiKey.keyHash).toBe(await hashApiKey(payload.apiKey));
     expect(JSON.stringify(p)).not.toContain(payload.apiKey);

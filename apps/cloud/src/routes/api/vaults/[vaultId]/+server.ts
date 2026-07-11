@@ -1,29 +1,44 @@
 /**
  * GET/PATCH/DELETE /api/vaults/:vaultId.
- * GET: session or vault-scoped bearer key. PATCH/DELETE: session only.
- * DELETE destroys the vault's DO storage and cascades api keys.
+ * GET: any member (or the vault's bearer key, which reads as role "editor").
+ * PATCH/DELETE: OWNER role, session only (Wave M role gates).
+ * DELETE destroys the vault's DO storage and cascades api keys + members.
  */
 import { json } from "@sveltejs/kit";
 import { vaultUpdateRequestSchema } from "@brainz/contracts";
 import { slugify } from "@brainz/engine";
-import { and, eq, ne } from "drizzle-orm";
+import { and, count, eq, ne } from "drizzle-orm";
 import { guarded, HttpError, parseBody, requirePlatform } from "$lib/server/api-util";
 import { createDb, schema } from "$lib/server/db";
 import { requireVaultAccess } from "$lib/server/vault-access";
 import { vaultClient } from "$lib/server/vault-client";
 
+async function memberCountOf(db: ReturnType<typeof createDb>, vaultId: string): Promise<number> {
+  const rows = await db
+    .select({ n: count() })
+    .from(schema.vaultMember)
+    .where(eq(schema.vaultMember.vaultId, vaultId));
+  return rows[0]?.n ?? 1;
+}
+
 export const GET = guarded(async (event) => {
-  const { vault } = await requireVaultAccess(event, event.params.vaultId!);
+  const { vault, role } = await requireVaultAccess(event, event.params.vaultId!);
+  const db = createDb(requirePlatform(event).env.DB);
   return json({
     id: vault.id,
     slug: vault.slug,
     name: vault.name,
     createdAt: vault.createdAt.toISOString(),
+    role,
+    memberCount: await memberCountOf(db, vault.id),
   });
 });
 
 export const PATCH = guarded(async (event) => {
-  const { vault } = await requireVaultAccess(event, event.params.vaultId!, { sessionOnly: true });
+  const { vault, role } = await requireVaultAccess(event, event.params.vaultId!, {
+    sessionOnly: true,
+    role: "owner",
+  });
   const body = await parseBody(event, vaultUpdateRequestSchema);
   const db = createDb(requirePlatform(event).env.DB);
 
@@ -47,14 +62,25 @@ export const PATCH = guarded(async (event) => {
   }
 
   await db.update(schema.vault).set({ name, slug }).where(eq(schema.vault.id, vault.id));
-  return json({ id: vault.id, slug, name, createdAt: vault.createdAt.toISOString() });
+  return json({
+    id: vault.id,
+    slug,
+    name,
+    createdAt: vault.createdAt.toISOString(),
+    role,
+    memberCount: await memberCountOf(db, vault.id),
+  });
 });
 
 export const DELETE = guarded(async (event) => {
-  const { vault } = await requireVaultAccess(event, event.params.vaultId!, { sessionOnly: true });
+  const { vault } = await requireVaultAccess(event, event.params.vaultId!, {
+    sessionOnly: true,
+    role: "owner",
+  });
   const platform = requirePlatform(event);
   const db = createDb(platform.env.DB);
-  // Destroy DO storage first, then the control-plane rows (keys cascade).
+  // Destroy DO storage first, then the control-plane rows (keys, members, and
+  // invites cascade with the vault row).
   await vaultClient(platform.env.VAULT_DO, vault.id).destroy();
   await db.delete(schema.vault).where(eq(schema.vault.id, vault.id));
   return new Response(null, { status: 204 });

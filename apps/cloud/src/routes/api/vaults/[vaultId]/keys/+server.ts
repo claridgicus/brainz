@@ -1,6 +1,7 @@
 /**
- * GET/POST /api/vaults/:vaultId/keys — session only (keys can't mint keys).
- * POST is the ONLY place the plaintext `bz_` key ever appears.
+ * GET/POST /api/vaults/:vaultId/keys — session only (keys can't mint keys),
+ * OWNER role only (Wave M: key management is owner-only; editors/viewers get
+ * 403). POST is the ONLY place the plaintext `bz_` key ever appears.
  */
 import { json } from "@sveltejs/kit";
 import { apiKeyCreateRequestSchema } from "@brainz/contracts";
@@ -22,7 +23,10 @@ function toWire(k: typeof schema.apiKey.$inferSelect) {
 }
 
 export const GET = guarded(async (event) => {
-  const { vault } = await requireVaultAccess(event, event.params.vaultId!, { sessionOnly: true });
+  const { vault } = await requireVaultAccess(event, event.params.vaultId!, {
+    sessionOnly: true,
+    role: "owner",
+  });
   const db = createDb(requirePlatform(event).env.DB);
   const keys = await db
     .select()
@@ -33,7 +37,10 @@ export const GET = guarded(async (event) => {
 });
 
 export const POST = guarded(async (event) => {
-  const { vault } = await requireVaultAccess(event, event.params.vaultId!, { sessionOnly: true });
+  const { vault } = await requireVaultAccess(event, event.params.vaultId!, {
+    sessionOnly: true,
+    role: "owner",
+  });
   const body = await parseBody(event, apiKeyCreateRequestSchema);
   const db = createDb(requirePlatform(event).env.DB);
 

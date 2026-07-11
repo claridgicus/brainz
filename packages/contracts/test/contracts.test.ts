@@ -31,8 +31,10 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "7"', () => {
-    expect(CONTRACTS_VERSION).toBe("7");
+  it('is "8"', () => {
+    // 8: Wave M — vault membership & email invites (role on vault shapes,
+    // member/invite schemas + endpoints).
+    expect(CONTRACTS_VERSION).toBe("8");
   });
 });
 

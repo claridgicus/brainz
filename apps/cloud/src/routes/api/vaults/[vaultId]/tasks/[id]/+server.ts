@@ -10,7 +10,11 @@ import { requireVaultAccess } from "$lib/server/vault-access";
 import { vaultClient } from "$lib/server/vault-client";
 
 export const PATCH = guarded(async (event) => {
-  const { vault } = await requireVaultAccess(event, event.params.vaultId!, { sessionOnly: true });
+  // Wave M: card moves are writes — editor+ (viewers are read-only).
+  const { vault } = await requireVaultAccess(event, event.params.vaultId!, {
+    sessionOnly: true,
+    role: "editor",
+  });
   const move = await parseBody(event, taskMoveRequestSchema);
   const id = event.params.id!;
   const client = vaultClient(requirePlatform(event).env.VAULT_DO, vault.id);

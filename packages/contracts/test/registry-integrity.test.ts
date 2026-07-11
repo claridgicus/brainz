@@ -26,8 +26,15 @@ import {
   PUBLIC_MCP_TOOL_NAMES,
   relatedQuerySchema,
   searchQuerySchema,
+  inviteAcceptResponseSchema,
+  inviteCreateRequestSchema,
+  inviteCreateResponseSchema,
+  inviteListResponseSchema,
+  memberListResponseSchema,
+  memberUpdateRequestSchema,
   vaultCreateRequestSchema,
   vaultListResponseSchema,
+  vaultRoleSchema,
   vaultSchema,
   vaultUpdateRequestSchema,
   type CloudMcpToolName,
@@ -193,10 +200,54 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOL
 // -------------------------------------------------------- REST wire shapes
 
 describe("REST schemas round-trip the shipped shapes", () => {
-  it("vault + vault list", () => {
-    const vault = { id: "v1", slug: "my-vault", name: "My vault", createdAt: "2026-07-10T00:00:00.000Z" };
+  it("vault + vault list (Wave M: caller's role required, memberCount optional)", () => {
+    const vault = {
+      id: "v1",
+      slug: "my-vault",
+      name: "My vault",
+      createdAt: "2026-07-10T00:00:00.000Z",
+      role: "owner",
+      memberCount: 2,
+    };
     expect(vaultSchema.parse(vault)).toEqual(vault);
     expect(vaultListResponseSchema.parse({ vaults: [vault] })).toEqual({ vaults: [vault] });
+    // memberCount may be omitted; role may not.
+    const { memberCount: _mc, ...noCount } = vault;
+    expect(vaultSchema.safeParse(noCount).success).toBe(true);
+    const { role: _r, ...noRole } = vault;
+    expect(vaultSchema.safeParse(noRole).success).toBe(false);
+  });
+
+  it("members + invites (Wave M wire shapes)", () => {
+    expect(vaultRoleSchema.options).toEqual(["owner", "editor", "viewer"]);
+    const member = {
+      userId: "u1",
+      email: "a@example.com",
+      name: "A",
+      role: "editor",
+      createdAt: "2026-07-10T00:00:00.000Z",
+    };
+    expect(memberListResponseSchema.parse({ members: [member] })).toEqual({ members: [member] });
+    expect(memberUpdateRequestSchema.safeParse({ role: "viewer" }).success).toBe(true);
+    expect(memberUpdateRequestSchema.safeParse({ role: "boss" }).success).toBe(false);
+
+    const invite = {
+      id: "i1",
+      email: "b@example.com",
+      role: "viewer",
+      createdAt: "2026-07-10T00:00:00.000Z",
+      expiresAt: "2026-07-24T00:00:00.000Z",
+      invitedBy: "James",
+    };
+    expect(inviteListResponseSchema.parse({ invites: [invite] })).toEqual({ invites: [invite] });
+    // Create/resend responses carry the ONE-TIME url next to the invite.
+    expect(
+      inviteCreateResponseSchema.parse({ invite, url: "https://x/invite/abc" }),
+    ).toEqual({ invite, url: "https://x/invite/abc" });
+    expect(inviteCreateRequestSchema.safeParse({ email: "not-an-email", role: "editor" }).success).toBe(false);
+    expect(
+      inviteAcceptResponseSchema.parse({ vaultId: "v1", slug: "s", role: "viewer", alreadyMember: false }),
+    ).toEqual({ vaultId: "v1", slug: "s", role: "viewer", alreadyMember: false });
   });
 
   it("vault create/update requests validate name and optional slug", () => {

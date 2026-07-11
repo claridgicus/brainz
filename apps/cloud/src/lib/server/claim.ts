@@ -139,14 +139,19 @@ export interface ClaimDb {
   /**
    * Atomic reconcile: reassign each provisional vault to `existingUserId`
    * (applying any slug renames to dodge collisions on the target account),
-   * stamp the claim approved, then DELETE the provisional user (which cascades
-   * away its now-empty rows). api_key rows are vault_id-scoped, so they follow
-   * the vault automatically — no key move needed. All in one D1 batch.
+   * grant the existing user an `owner` vault_member row on every moved vault
+   * (Wave M: membership is the access source of truth — the provisional
+   * user's own member rows cascade away with their deletion), stamp the claim
+   * approved, then DELETE the provisional user (which cascades away its
+   * now-empty rows). api_key rows are vault_id-scoped, so they follow the
+   * vault automatically — no key move needed. All in one D1 batch.
    */
   reconcile(args: {
     provisionalUserId: string;
     existingUserId: string;
     claimId: string;
+    /** ALL vaults being moved (renamed or not) — each needs a member row. */
+    vaultIds: string[];
     vaultRenames: { vaultId: string; slug: string }[];
     at: Date;
   }): Promise<void>;
@@ -243,19 +248,25 @@ export function claimDbFrom(db: Db): ClaimDb {
           ),
       ]);
     },
-    reconcile: async ({ provisionalUserId, existingUserId, claimId, vaultRenames, at }) => {
+    reconcile: async ({ provisionalUserId, existingUserId, claimId, vaultIds, vaultRenames, at }) => {
       // One D1 batch = one implicit transaction. Order matters:
       //  1. rename any colliding vault slugs FIRST (still owned by the
       //     provisional user, so the (owner_id, slug) unique index can't clash
       //     with the target account's existing slugs yet),
       //  2. reassign ALL of the provisional user's vaults to the existing user,
+      //  2b. grant the existing user an `owner` membership on every moved
+      //     vault (Wave M: vault_member is the session-access source of
+      //     truth). Upsert: if they were somehow already a member (e.g. via a
+      //     prior invite), promote that row to owner instead of failing the
+      //     (vault_id, user_id) unique index,
       //  3. stamp the claim approved (audit trail; survives the user delete
       //     because account_claims.user_id points at the provisional row —
       //     which we delete last, cascading the claim away),
       //  4. DELETE the provisional user. Vaults were already moved off it, so
       //     the cascade only removes its leftover rows (sessions, its own
-      //     pending claims). api_key rows are vault_id-scoped and moved with
-      //     the vault, so they follow automatically.
+      //     member rows, its own pending claims). api_key rows are
+      //     vault_id-scoped and moved with the vault, so they follow
+      //     automatically.
       const statements = [
         ...vaultRenames.map((r) =>
           db.update(schema.vault).set({ slug: r.slug }).where(eq(schema.vault.id, r.vaultId)),
@@ -264,6 +275,21 @@ export function claimDbFrom(db: Db): ClaimDb {
           .update(schema.vault)
           .set({ ownerId: existingUserId })
           .where(eq(schema.vault.ownerId, provisionalUserId)),
+        ...vaultIds.map((vaultId) =>
+          db
+            .insert(schema.vaultMember)
+            .values({
+              id: crypto.randomUUID(),
+              vaultId,
+              userId: existingUserId,
+              role: "owner",
+              createdAt: at,
+            })
+            .onConflictDoUpdate({
+              target: [schema.vaultMember.vaultId, schema.vaultMember.userId],
+              set: { role: "owner" },
+            }),
+        ),
         db.update(schema.accountClaim).set({ approvedAt: at }).where(eq(schema.accountClaim.id, claimId)),
         db.delete(schema.user).where(eq(schema.user.id, provisionalUserId)),
       ];
@@ -524,6 +550,7 @@ export async function approveClaim(
       provisionalUserId: owner.id,
       existingUserId: existing.id,
       claimId: claim.id,
+      vaultIds: vaults.map((v) => v.id),
       vaultRenames,
       at: now,
     });

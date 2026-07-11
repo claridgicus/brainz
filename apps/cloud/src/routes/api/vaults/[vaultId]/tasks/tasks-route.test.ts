@@ -26,7 +26,17 @@ vi.mock("$lib/server/db", () => {
   }
   (chain as { then: unknown }).then = (resolve: (rows: unknown[]) => unknown) =>
     resolve(vaultRows);
-  return { createDb: () => chain, schema: { vault: {}, apiKey: {} } };
+  // schema.vaultMember/.vaultInvite must exist — requireVaultAccess's session
+  // query reads schema.vaultMember.role at call time (Wave M membership join).
+  return {
+    createDb: () => chain,
+    schema: {
+      vault: {},
+      apiKey: {},
+      vaultMember: { role: {}, vaultId: {}, userId: {} },
+      vaultInvite: {},
+    },
+  };
 });
 
 interface FakeTask {
@@ -124,8 +134,11 @@ const BEARER = "bz_" + "a".repeat(32); // valid bz_ format
 
 describe("PATCH /api/vaults/:vaultId/tasks/:id", () => {
   beforeEach(() => {
-    // A session user who owns "vault-1"; the db stub returns that vault row.
-    vaultRows = [{ id: "vault-1", ownerId: "user-1" }];
+    // A session user who is an OWNER member of "vault-1" (Wave M: access is
+    // membership-based). requireVaultAccess's session query selects
+    // { vault, role } off the vault_member ⋈ vault join, so each row carries a
+    // nested `vault` and the member's `role`.
+    vaultRows = [{ vault: { id: "vault-1", ownerId: "user-1" }, role: "owner" }];
     fakeTasks = {
       "task-a": { id: "task-a", taskStatus: "open" },
       "task-b": { id: "task-b", taskStatus: "open" },
@@ -150,6 +163,36 @@ describe("PATCH /api/vaults/:vaultId/tasks/:id", () => {
     );
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "vault not found" });
+  });
+
+  it("member of vault-1 probing a DIFFERENT vault gets 404 (no cross-tenant leak)", async () => {
+    // The member query filters on (vaultId, userId); a foreign vault the user
+    // isn't a member of matches nothing → 404, indistinguishable from missing.
+    vaultRows = [];
+    const res = await PATCH(
+      patchEvent({ vaultId: "vault-2", id: "task-a", body: { action: "take" }, user: { id: "user-1" } }),
+    );
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "vault not found" });
+  });
+
+  it("an EDITOR member may move a card (writes are editor+)", async () => {
+    vaultRows = [{ vault: { id: "vault-1", ownerId: "someone-else" }, role: "editor" }];
+    const res = await PATCH(
+      patchEvent({ vaultId: "vault-1", id: "task-a", body: { action: "take", takenBy: "ed" }, user: { id: "user-2" } }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ id: "task-a", taskStatus: "taken", takenBy: "ed" });
+  });
+
+  it("a VIEWER member is refused a card move with 403 (read-only)", async () => {
+    vaultRows = [{ vault: { id: "vault-1", ownerId: "someone-else" }, role: "viewer" }];
+    const res = await PATCH(
+      patchEvent({ vaultId: "vault-1", id: "task-a", body: { action: "take" }, user: { id: "user-3" } }),
+    );
+    expect(res.status).toBe(403);
+    // The write never ran.
+    expect(fakeTasks["task-a"].taskStatus).toBe("open");
   });
 
   it("take: claims the task and returns the updated task meta", async () => {

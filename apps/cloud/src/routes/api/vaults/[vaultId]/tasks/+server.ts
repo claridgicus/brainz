@@ -13,8 +13,12 @@ export const GET = guarded(async (event) => {
 });
 
 export const POST = guarded(async (event) => {
-  // Board mutations are session-auth (creating work is a human/UI action).
-  const { vault } = await requireVaultAccess(event, event.params.vaultId!, { sessionOnly: true });
+  // Board mutations are session-auth (creating work is a human/UI action);
+  // Wave M: task creation is a write — editor+ (viewers are read-only).
+  const { vault } = await requireVaultAccess(event, event.params.vaultId!, {
+    sessionOnly: true,
+    role: "editor",
+  });
   const input = await parseBody(event, taskCreateRequestSchema);
   const client = vaultClient(requirePlatform(event).env.VAULT_DO, vault.id);
   const relations: Record<string, string[]> = {};

@@ -22,17 +22,20 @@
  * unit-testable without a Workers/D1 runtime; `inviteDbFrom` wires it to
  * drizzle/D1 (ports-and-fakes, same style as $lib/server/claim).
  */
+import type { RequestEvent } from "@sveltejs/kit";
 import type { VaultInvite, VaultRole } from "@brainz/contracts";
-import { and, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
+import { HttpError, requirePlatform } from "./api-util";
+import { isProductionEnv } from "./auth";
 // One token implementation system-wide: 32 random bytes hex + SHA-256 at rest
 // (identical requirements to Wave G's claim tokens — reuse, don't fork).
 import { hashClaimToken as hashInviteToken, mintClaimToken as mintInviteToken } from "./claim";
 import type { Db } from "./db";
-import { schema } from "./db";
+import { createDb, schema } from "./db";
 import { normalizeEmail } from "./email";
 import { guardDepsFromDb, guardMagicLinkRequest, type GuardDeps } from "./magic-link-guard";
-import type { Mailer } from "./mailer";
-import { MAGIC_LINK_EMAIL_LIMIT, MAGIC_LINK_IP_LIMIT } from "./rate-limit";
+import { createMailer, type Mailer } from "./mailer";
+import { MAGIC_LINK_EMAIL_LIMIT, MAGIC_LINK_IP_LIMIT, resolveRateLimitIp } from "./rate-limit";
 
 export { hashInviteToken, mintInviteToken };
 
@@ -251,6 +254,30 @@ export interface InviteDeps {
 export type InviteCreateResult =
   | { ok: true; invite: VaultInvite; url: string }
   | { ok: false; status: number; message: string };
+
+/**
+ * Wire InviteDeps from a request event (routes + the /invite page action).
+ * Invites email arbitrary addresses, so the client IP is a rate-limit key —
+ * fail closed on a missing cf-connecting-ip in production, exactly like the
+ * magic-link request path.
+ */
+export function inviteDepsFrom(event: RequestEvent): InviteDeps {
+  const platform = requirePlatform(event);
+  const resolvedIp = resolveRateLimitIp(
+    event.request.headers.get("cf-connecting-ip"),
+    isProductionEnv(platform.env),
+  );
+  if (!resolvedIp.ok) {
+    throw new HttpError(429, "rate limited: missing client IP; retry through the edge");
+  }
+  return {
+    db: inviteDbFrom(createDb(platform.env.DB)),
+    mailer: createMailer(platform.env),
+    origin: platform.env.BETTER_AUTH_URL || event.url.origin,
+    ip: resolvedIp.ip,
+    now: () => new Date(),
+  };
+}
 
 const THROTTLE_MESSAGE =
   `rate limit exceeded: at most ${MAGIC_LINK_EMAIL_LIMIT} invite/sign-in emails per hour per ` +
