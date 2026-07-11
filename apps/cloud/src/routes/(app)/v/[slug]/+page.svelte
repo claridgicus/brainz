@@ -4,6 +4,7 @@
 	import type { ApiConcept, GraphNode, GraphPayload } from "@brainz/contracts";
 	import { ApiError, createApi, type UpsertConceptBody, type VaultStats } from "$lib/api";
 	import { ALL_TYPES, TYPE_COLORS } from "$lib/graph-data";
+	import { defaultVisibleTypes } from "$lib/graph-view";
 	import ConceptEditor from "$lib/components/ConceptEditor.svelte";
 	import ConceptPanel from "$lib/components/ConceptPanel.svelte";
 	import Graph from "$lib/components/Graph.svelte";
@@ -39,11 +40,53 @@
 	const titleFor = (id: string): string => nodeById(id)?.title ?? id;
 
 	// -------------------------------------------------------------- filters
-	let enabledTypes = $state<string[]>([...ALL_TYPES]);
+	// First load shows only the high-signal structural types (domain/feature/
+	// spec/story/task) so the initial graph is small and paints fast; the rest
+	// are toggled on demand. Off types are NOT rendered into the DOM at all
+	// (the Graph sim only includes enabled-type nodes) — this is a perf win, not
+	// a CSS hide. State is persisted per-vault in localStorage.
+	const storageKey = $derived(`brainz:graph-types:${vault.id}`);
+	function loadEnabledTypes(key: string): string[] {
+		if (typeof localStorage === "undefined") return defaultVisibleTypes();
+		try {
+			const raw = localStorage.getItem(key);
+			if (!raw) return defaultVisibleTypes();
+			const parsed = JSON.parse(raw);
+			if (Array.isArray(parsed)) return parsed.filter((t) => ALL_TYPES.includes(t));
+		} catch {
+			/* fall through to defaults */
+		}
+		return defaultVisibleTypes();
+	}
+	// svelte-ignore state_referenced_locally
+	let enabledTypes = $state<string[]>(loadEnabledTypes(storageKey));
+	let hydrated = false;
+	$effect(() => {
+		// Re-load when switching vaults; skip the persist on the very first run.
+		enabledTypes = loadEnabledTypes(storageKey);
+		hydrated = true;
+	});
+	$effect(() => {
+		void enabledTypes;
+		if (!hydrated || typeof localStorage === "undefined") return;
+		try {
+			localStorage.setItem(storageKey, JSON.stringify(enabledTypes));
+		} catch {
+			/* storage full / disabled — in-memory state is still authoritative */
+		}
+	});
+
+	const allEnabled = $derived(enabledTypes.length === ALL_TYPES.length);
 	function toggleType(t: string) {
 		enabledTypes = enabledTypes.includes(t)
 			? enabledTypes.filter((x) => x !== t)
 			: [...enabledTypes, t];
+	}
+	function showAllTypes() {
+		enabledTypes = [...ALL_TYPES];
+	}
+	function resetTypes() {
+		enabledTypes = defaultVisibleTypes();
 	}
 
 	// ------------------------------------------------------------ selection
@@ -149,6 +192,16 @@
 					<span class="dot" style="background:{TYPE_COLORS[t]}; color:{TYPE_COLORS[t]}"></span>{t}
 				</button>
 			{/each}
+			<button
+				type="button"
+				class="chip chip-action"
+				onclick={allEnabled ? resetTypes : showAllTypes}
+				title={allEnabled
+					? "Show only the default high-signal types"
+					: "Render every concept type"}
+			>
+				{allEnabled ? "Reset" : "Show all"}
+			</button>
 		</div>
 
 		<div class="right">
@@ -317,6 +370,10 @@
 	}
 	.chip:hover {
 		border-color: var(--accent);
+	}
+	.chip-action {
+		color: var(--text-dim);
+		font-weight: 600;
 	}
 
 	.stage {
