@@ -92,6 +92,26 @@ describe("public MCP server (unauthenticated surface)", () => {
     expect(p.event.ip).toBe("203.0.113.7");
   });
 
+  it("returns a second guidance block documenting the loginUrl handoff-exposure model", async () => {
+    const { deps } = fakeDeps();
+    const client = await connect(deps);
+    const result = await client.callTool({
+      name: "signup",
+      arguments: { email: "human@example.com" },
+    });
+    expect(result.isError ?? false).toBe(false);
+    const blocks = result.content as { type: string; text: string }[];
+    // First block stays the strict SignupOutput JSON (wire shape unchanged).
+    expect(signupOutputSchema.safeParse(JSON.parse(blocks[0].text)).success).toBe(true);
+    // A second, additive text block carries the security guidance.
+    expect(blocks).toHaveLength(2);
+    const guidance = blocks[1].text;
+    expect(guidance).toMatch(/single-use/i);
+    expect(guidance).toMatch(/do NOT log|not.*log/i);
+    // States the shorter (~10 min) TTL for the handed-off link.
+    expect(guidance).toMatch(/10 ?min/i);
+  });
+
   it('defaults the vault to "My vault" / my-vault', async () => {
     const { deps, persisted } = fakeDeps();
     const client = await connect(deps);

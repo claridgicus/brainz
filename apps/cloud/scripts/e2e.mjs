@@ -266,6 +266,21 @@ async function main() {
     storeCookies(verified);
     step("following the magic link sets a session cookie", jar.size > 0, [...jar.keys()].join(", "));
 
+    // verify-email-on-signin: clicking the magic link proves email ownership,
+    // so the session-create databaseHook must have flipped emailVerified true
+    // (accounts are provisioned emailVerified:false). Read it back from the
+    // authenticated session.
+    const sess = await fetch(`${BASE}/api/auth/get-session`, {
+      method: "GET",
+      headers: { origin: BASE, cookie: cookieHeader() },
+    });
+    const sessJson = await sess.json().catch(() => null);
+    step(
+      "magic-link sign-in flips emailVerified true (proven-ownership signal)",
+      sessJson?.user?.emailVerified === true,
+      `emailVerified=${JSON.stringify(sessJson?.user?.emailVerified)}`,
+    );
+
     // No password endpoints exist any more.
     const pwSignIn = await fetch(`${BASE}/api/auth/sign-in/email`, {
       method: "POST",

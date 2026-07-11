@@ -137,7 +137,30 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
       vaultSlug,
       email,
     };
-    return ok(output);
+    // First content block is the strict SignupOutput JSON (the wire shape).
+    // Append a SECOND, human-oriented guidance block documenting the handoff-
+    // exposure model for the loginUrl (task-agent-loginurl-hardening): the URL
+    // is session-granting and is NOT emailed, so it must not be persisted in
+    // orchestrator logs. It is single-use (consumed on first open) and expires
+    // sooner than an emailed link (~10 min). This is additive — it does not
+    // change the SignupOutput shape parsed from the first block.
+    const base = ok(output);
+    return {
+      ...base,
+      content: [
+        ...base.content,
+        {
+          type: "text" as const,
+          text:
+            "SECURITY — handling loginUrl: this is a one-time, session-granting magic link for your " +
+            "human, NOT an emailed link. Hand it to the human directly and do NOT log, echo, or persist " +
+            "it (a logged loginUrl is a logged session). It is single-use (expires the moment it is first " +
+            "opened) and expires in ~10 minutes — shorter than an emailed link — so deliver it promptly; " +
+            "if it lapses, the human can request a fresh magic link at /login. The apiKey keeps working " +
+            "regardless.",
+        },
+      ],
+    };
   });
 }
 
