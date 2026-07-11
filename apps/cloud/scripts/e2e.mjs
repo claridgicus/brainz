@@ -1061,6 +1061,98 @@ async function main() {
     });
     step("approving a declined claim → 400", declinedApprove.status === 400, `status ${declinedApprove.status}`);
 
+    // 13d. RECONCILE-TO-EXISTING (identity-fork fix): when the approved email
+    // ALREADY has a real account, approval must MOVE the provisioned vault to
+    // that account and DELETE the provisional user — not fork a second identity
+    // or orphan the vault. This is the exact production incident.
+    const reconcileEmail = `existing-${Date.now()}@example.com`;
+    // (a) the human already has a real, verified account (magic-link sign-in).
+    const existingJar = new Map();
+    const existingSignIn = await signInViaMagicLink(reconcileEmail, existingJar);
+    step(
+      "reconcile: existing human account established via magic-link",
+      existingSignIn.ok === true && existingJar.size > 0,
+      JSON.stringify(existingSignIn).slice(0, 80),
+    );
+    const existingCookie = cookieHeader(existingJar);
+    const existingVaultsBefore = await fetch(`${BASE}/api/vaults`, {
+      headers: { cookie: existingCookie },
+    });
+    const existingVaultsBeforeJson = await existingVaultsBefore.json().catch(() => null);
+    const slugsBefore = (existingVaultsBeforeJson?.vaults ?? []).map((v) => v.slug);
+
+    // (b) an agent provisions a FRESH provisional workspace (no email).
+    const reconcileSignup = await pub.callTool({
+      name: "signup",
+      arguments: { vaultName: "Reconcile Vault" },
+    });
+    const reconcileSignupPayload = JSON.parse(
+      reconcileSignup.content.find((c) => c.type === "text").text,
+    );
+    const reconcileVaultSlug = reconcileSignupPayload.vaultSlug;
+    step(
+      "reconcile: fresh provisional signup succeeds",
+      reconcileSignup.isError !== true && /^bz_/.test(reconcileSignupPayload.apiKey ?? ""),
+    );
+
+    // (c) the agent claims to the EXISTING human's email.
+    const reconcileTransport = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${reconcileSignupPayload.apiKey}` } },
+    });
+    const reconcileMcp = new Client({ name: "brainz-e2e-reconcile", version: "0.0.0" });
+    await reconcileMcp.connect(reconcileTransport);
+    const reconcileMarker = devLog.length;
+    const reconcileClaim = await reconcileMcp.callTool({
+      name: "claim",
+      arguments: { email: reconcileEmail },
+    });
+    step(
+      "reconcile: claim to an already-registered email still returns {status: sent} (no oracle)",
+      reconcileClaim.isError !== true &&
+        JSON.parse(reconcileClaim.content.find((c) => c.type === "text").text).status === "sent",
+    );
+
+    // (d) the human approves the EMAILED link — this reconciles.
+    const reconcileUrl = await captureClaimLink(reconcileEmail, reconcileMarker);
+    step(
+      "reconcile: an approval link WAS emailed to the existing address",
+      Boolean(reconcileUrl),
+      (reconcileUrl ?? "").slice(0, 70),
+    );
+    const reconcilePath = new URL(reconcileUrl).pathname;
+    const reconcileApprove = await fetch(`${BASE}${reconcilePath}?/approve`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: BASE, accept: "text/html", "content-type": "application/x-www-form-urlencoded" },
+      body: "",
+    });
+    step(
+      "reconcile: approve 303-redirects (signs the EXISTING human in)",
+      reconcileApprove.status === 303,
+      `status ${reconcileApprove.status}`,
+    );
+
+    // (e) the provisioned vault now appears in the EXISTING account's list.
+    const existingVaultsAfter = await fetch(`${BASE}/api/vaults`, {
+      headers: { cookie: existingCookie },
+    });
+    const existingVaultsAfterJson = await existingVaultsAfter.json().catch(() => null);
+    const slugsAfter = (existingVaultsAfterJson?.vaults ?? []).map((v) => v.slug);
+    step(
+      "reconcile: the provisioned vault is now owned by the EXISTING account",
+      existingVaultsAfter.status === 200 &&
+        slugsAfter.length === slugsBefore.length + 1 &&
+        slugsAfter.includes(reconcileVaultSlug),
+      `before=${JSON.stringify(slugsBefore)} after=${JSON.stringify(slugsAfter)}`,
+    );
+    // The agent key still works — it's vault-scoped and followed the vault.
+    const reconcileStatsAfter = await reconcileMcp.callTool({ name: "vault_stats", arguments: {} });
+    step(
+      "reconcile: the agent key keeps working (vault_id-scoped, followed the vault)",
+      reconcileStatsAfter.isError !== true,
+    );
+    await reconcileMcp.close();
+
     // 13c. a third anonymous signup stays UNCLAIMED for the expiry journey (§20).
     const expiryRes = await pub.callTool({ name: "signup", arguments: { vaultName: "Expiring Vault" } });
     const expiryPayload = JSON.parse(expiryRes.content.find((c) => c.type === "text").text);
@@ -1070,13 +1162,15 @@ async function main() {
     );
     const expiringKey = expiryPayload.apiKey;
 
-    // 14. per-IP rate limit (5/hour): three signups so far, two more pass, the 6th trips
+    // 14. per-IP rate limit (5/hour): FOUR signups so far from this IP —
+    // §12 anonymous, §13b decline, §13d reconcile, §13c expiry — so exactly one
+    // more passes (the 5th) and the 6th trips.
     let more = true;
-    for (let i = 4; i <= 5; i++) {
+    for (let i = 5; i <= 5; i++) {
       const r = await pub.callTool({ name: "signup", arguments: { vaultName: `Filler ${i}` } });
       if (r.isError) more = false;
     }
-    step("signups 4-5 from the same IP within the hour still succeed", more);
+    step("the 5th signup from the same IP within the hour still succeeds", more);
     const sixth = await pub.callTool({ name: "signup", arguments: {} });
     const sixthText = sixth.content.find((c) => c.type === "text")?.text ?? "";
     step(

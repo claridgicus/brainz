@@ -20,7 +20,7 @@
  * (unsolicited email to arbitrary addresses).
  */
 import { claimInputSchema, type ClaimOutput } from "@brainz/contracts";
-import { and, eq, isNull, ne, asc } from "drizzle-orm";
+import { and, eq, isNull, ne, asc, sql } from "drizzle-orm";
 import type { Db } from "./db";
 import { schema } from "./db";
 import { guardDepsFromDb, guardMagicLinkRequest } from "./magic-link-guard";
@@ -89,6 +89,12 @@ export interface ClaimRow {
   approvedAt: Date | null;
 }
 
+/** A vault owned by the provisional workspace — moved wholesale on reconcile. */
+export interface ProvisionalVault {
+  id: string;
+  slug: string;
+}
+
 /** What the approval email + page show about the workspace being claimed. */
 export interface WorkspaceSummary {
   vaultName: string;
@@ -102,10 +108,19 @@ export interface WorkspaceSummary {
  */
 export interface ClaimDb {
   getUserById(id: string): Promise<ClaimOwner | null>;
-  /** Is a (non-placeholder) account already registered for this email? */
-  emailRegistered(email: string): Promise<boolean>;
+  /**
+   * The existing (real) user for this email, case-insensitively, or null. Used
+   * on approval to decide promote-in-place vs reconcile-to-existing. Matches how
+   * sign-in normalizes email (compared lowercased), so `James@x.com` and
+   * `james@x.com` resolve to the same account.
+   */
+  findUserByEmail(email: string): Promise<{ id: string } | null>;
   /** The owner's first vault + its first API key (what the claim attaches). */
   workspaceSummary(userId: string): Promise<WorkspaceSummary | null>;
+  /** Every vault owned by the provisional workspace (usually one). */
+  vaultsOwnedBy(userId: string): Promise<ProvisionalVault[]>;
+  /** Slugs already taken on the target account — to dedupe on reconcile. */
+  vaultSlugsOwnedBy(userId: string): Promise<Set<string>>;
   deletePendingClaims(userId: string): Promise<void>;
   insertClaim(row: ClaimRow): Promise<void>;
   getClaimByHash(tokenHash: string): Promise<ClaimRow | null>;
@@ -118,6 +133,20 @@ export interface ClaimDb {
     claimId: string;
     email: string;
     name: string;
+    at: Date;
+  }): Promise<void>;
+  /**
+   * Atomic reconcile: reassign each provisional vault to `existingUserId`
+   * (applying any slug renames to dodge collisions on the target account),
+   * stamp the claim approved, then DELETE the provisional user (which cascades
+   * away its now-empty rows). api_key rows are vault_id-scoped, so they follow
+   * the vault automatically — no key move needed. All in one D1 batch.
+   */
+  reconcile(args: {
+    provisionalUserId: string;
+    existingUserId: string;
+    claimId: string;
+    vaultRenames: { vaultId: string; slug: string }[];
     at: Date;
   }): Promise<void>;
   /** Delete a pending (unapproved) claim by token hash. */
@@ -136,13 +165,30 @@ export function claimDbFrom(db: Db): ClaimDb {
       const rows = await db.select().from(schema.user).where(eq(schema.user.id, id)).limit(1);
       return rows[0] ?? null;
     },
-    emailRegistered: async (email) => {
+    findUserByEmail: async (email) => {
+      // Case-insensitive match: emails are normalized to lowercase on write in
+      // our flows, but a human account created directly through Better Auth may
+      // carry mixed case, so lower() both sides to be safe.
       const rows = await db
         .select({ id: schema.user.id })
         .from(schema.user)
-        .where(eq(schema.user.email, email))
+        .where(eq(sql`lower(${schema.user.email})`, email.toLowerCase()))
         .limit(1);
-      return rows.length > 0;
+      return rows[0] ?? null;
+    },
+    vaultsOwnedBy: async (userId) => {
+      const rows = await db
+        .select({ id: schema.vault.id, slug: schema.vault.slug })
+        .from(schema.vault)
+        .where(eq(schema.vault.ownerId, userId));
+      return rows;
+    },
+    vaultSlugsOwnedBy: async (userId) => {
+      const rows = await db
+        .select({ slug: schema.vault.slug })
+        .from(schema.vault)
+        .where(eq(schema.vault.ownerId, userId));
+      return new Set(rows.map((r) => r.slug));
     },
     workspaceSummary: async (userId) => {
       const rows = await db
@@ -192,6 +238,33 @@ export function claimDbFrom(db: Db): ClaimDb {
             ),
           ),
       ]);
+    },
+    reconcile: async ({ provisionalUserId, existingUserId, claimId, vaultRenames, at }) => {
+      // One D1 batch = one implicit transaction. Order matters:
+      //  1. rename any colliding vault slugs FIRST (still owned by the
+      //     provisional user, so the (owner_id, slug) unique index can't clash
+      //     with the target account's existing slugs yet),
+      //  2. reassign ALL of the provisional user's vaults to the existing user,
+      //  3. stamp the claim approved (audit trail; survives the user delete
+      //     because account_claims.user_id points at the provisional row —
+      //     which we delete last, cascading the claim away),
+      //  4. DELETE the provisional user. Vaults were already moved off it, so
+      //     the cascade only removes its leftover rows (sessions, its own
+      //     pending claims). api_key rows are vault_id-scoped and moved with
+      //     the vault, so they follow automatically.
+      const statements = [
+        ...vaultRenames.map((r) =>
+          db.update(schema.vault).set({ slug: r.slug }).where(eq(schema.vault.id, r.vaultId)),
+        ),
+        db
+          .update(schema.vault)
+          .set({ ownerId: existingUserId })
+          .where(eq(schema.vault.ownerId, provisionalUserId)),
+        db.update(schema.accountClaim).set({ approvedAt: at }).where(eq(schema.accountClaim.id, claimId)),
+        db.delete(schema.user).where(eq(schema.user.id, provisionalUserId)),
+      ];
+      // db.batch requires a non-empty tuple; the last two statements always run.
+      await db.batch(statements as [(typeof statements)[number], ...typeof statements]);
     },
     deletePendingClaimByHash: async (tokenHash) => {
       await db
@@ -275,14 +348,14 @@ export async function requestClaim(
 
   const expiresAt = new Date(now.getTime() + CLAIM_TTL_MS);
 
-  if (await deps.db.emailRegistered(email)) {
-    // Already-registered address: notice email only, NO token — the real
-    // owner signs in to review; nothing is attachable to their account from
-    // here. Output stays identical to the eligible path.
-    await sendQuietly(() => deps.mailer.sendClaimNotice?.({ to: email }));
-    return { ok: true, expiresAt };
-  }
-
+  // NB: we always mint an approval token, EVEN when the email already has an
+  // account. The token travels only in the emailed link — reaching the real
+  // inbox owner, whose click is the consent to RECONCILE (approveClaim moves the
+  // provisional vault to their existing account and deletes the provisional
+  // user; see the reconcile branch there). The tool result is `{status:"sent"}`
+  // either way, so this is not an account-existence oracle. This replaces the
+  // old notice-only dead-end that left the provisioned vault orphaned under the
+  // provisional user (the incident that motivated this fix).
   const token = mintClaimToken();
   await deps.db.insertClaim({
     id: crypto.randomUUID(),
@@ -370,15 +443,42 @@ export async function validateClaimToken(
 // ----------------------------------------------------------------- approve
 
 export type ApproveClaimResult =
-  | { ok: true; userId: string; email: string }
-  | { ok: false; reason: "invalid" | "email-taken"; message: string };
+  | { ok: true; userId: string; email: string; reconciled: boolean }
+  | { ok: false; reason: "invalid"; message: string };
 
 /**
- * Approve a claim (the ONLY path that flips a provisional account permanent):
- * atomically set user.email = claim.email, emailVerified = true, clear
- * expires_at, fix the placeholder name, stamp approved_at, and delete the
- * user's other pending claims. Single-use: a consumed/expired/unknown token
- * never approves; an email registered in the meantime refuses.
+ * Deduplicate a slug against a set of already-taken slugs by appending `-2`,
+ * `-3`, … until free. Pure + exported for testing.
+ */
+export function dedupeSlug(slug: string, taken: Set<string>): string {
+  if (!taken.has(slug)) return slug;
+  for (let n = 2; ; n++) {
+    const candidate = `${slug}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/**
+ * Approve a claim — the ONLY path that persists a provisional workspace. The
+ * INVARIANT: two users must never share an email, and a provisional identity
+ * must never survive for an email that already has a real account.
+ *
+ * When the claim email becomes known here we branch on whether that email
+ * already has a user (case-insensitively, matching sign-in normalization):
+ *
+ *  - EXISTING user → RECONCILE: reassign the provisional workspace's vault(s)
+ *    to that user (deduping any slug that collides with a vault they already
+ *    own), stamp the claim approved, and DELETE the provisional user. The
+ *    workspace now appears in the existing account's dashboard (which filters
+ *    vault by owner_id). api_key rows are vault_id-scoped, so they follow the
+ *    vault automatically. This is the fix for the identity-fork incident.
+ *
+ *  - NO existing user → PROMOTE the provisional user in place: bind
+ *    user.email = claim.email, emailVerified = true, clear expires_at, fix the
+ *    placeholder name, stamp approved_at, delete the user's other pending
+ *    claims.
+ *
+ * Single-use: a consumed/expired/unknown token never approves.
  */
 export async function approveClaim(
   db: ClaimDb,
@@ -398,19 +498,40 @@ export async function approveClaim(
   if (!owner) {
     return { ok: false, reason: "invalid", message: "the workspace this claim belongs to is gone" };
   }
-  if (await db.emailRegistered(claim.email)) {
-    return {
-      ok: false,
-      reason: "email-taken",
-      message:
-        "an account for this email already exists — nothing was attached; sign in to review your account",
-    };
+
+  const existing = await db.findUserByEmail(claim.email);
+
+  // Guard: if the provisional owner IS already the account for this email
+  // (shouldn't normally happen — a provisional owner carries a placeholder
+  // email — but keeps the branch total), fall through to promote-in-place.
+  if (existing && existing.id !== owner.id) {
+    // RECONCILE to the existing account. Move every vault the provisional user
+    // owns, renaming any slug that would collide with the target's existing
+    // vaults so the (owner_id, slug) unique index holds after the move.
+    const vaults = await db.vaultsOwnedBy(owner.id);
+    const taken = await db.vaultSlugsOwnedBy(existing.id);
+    const vaultRenames: { vaultId: string; slug: string }[] = [];
+    for (const v of vaults) {
+      const deduped = dedupeSlug(v.slug, taken);
+      taken.add(deduped); // reserve so sibling vaults don't collide with each other
+      if (deduped !== v.slug) vaultRenames.push({ vaultId: v.id, slug: deduped });
+    }
+    await db.reconcile({
+      provisionalUserId: owner.id,
+      existingUserId: existing.id,
+      claimId: claim.id,
+      vaultRenames,
+      at: now,
+    });
+    return { ok: true, userId: existing.id, email: claim.email, reconciled: true };
   }
+
+  // PROMOTE the provisional user in place.
   const name = owner.name === UNCLAIMED_WORKSPACE_NAME
     ? claim.email.split("@")[0] || claim.email
     : owner.name;
   await db.approve({ userId: owner.id, claimId: claim.id, email: claim.email, name, at: now });
-  return { ok: true, userId: owner.id, email: claim.email };
+  return { ok: true, userId: owner.id, email: claim.email, reconciled: false };
 }
 
 /** Decline a claim: delete the pending row; the workspace expires on schedule. */
