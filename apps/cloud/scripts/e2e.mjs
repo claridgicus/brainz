@@ -539,10 +539,32 @@ async function main() {
         completePayload.summaryConceptId === ONBOARDING_SUMMARY_ID,
       JSON.stringify(completePayload),
     );
+    step(
+      "onboard complete surfaces quality signals on the sealed graph",
+      completePayload.conceptCount >= 1 &&
+        typeof completePayload.conceptsLackingCodeAreas === "number" &&
+        typeof completePayload.hasDomainConcepts === "boolean" &&
+        completePayload.byType !== null &&
+        typeof completePayload.byType === "object",
+      JSON.stringify(completePayload),
+    );
 
     const statusAfter = await mcp.callTool({ name: "onboard", arguments: { action: "status" } });
     const statusAfterPayload = JSON.parse(statusAfter.content.find((c) => c.type === "text").text);
     step("onboard status flips to onboarded: true", statusAfterPayload.onboarded === true);
+
+    const startAgain = await mcp.callTool({
+      name: "onboard",
+      arguments: { action: "start", productName: "E2E CRM" },
+    });
+    const startAgainText = startAgain.content.filter((c) => c.type === "text").map((c) => c.text)[0] ?? "";
+    step(
+      "onboard start on an already-onboarded vault returns the idempotency guard, not the playbook",
+      startAgain.isError === true &&
+        startAgainText.includes("already onboarded on") &&
+        !startAgainText.includes("Onboarding playbook"),
+      startAgainText,
+    );
 
     const statsTool = await mcp.callTool({ name: "vault_stats", arguments: {} });
     const statsToolPayload = JSON.parse(statsTool.content.find((c) => c.type === "text").text);

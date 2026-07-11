@@ -25,8 +25,8 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "5"', () => {
-    expect(CONTRACTS_VERSION).toBe("5");
+  it('is "6"', () => {
+    expect(CONTRACTS_VERSION).toBe("6");
   });
 });
 
@@ -272,8 +272,20 @@ describe("onboard tool contract", () => {
         ok: true,
         onboarded: true,
         summaryConceptId: "product-onboarding-summary",
+        conceptCount: 3,
+        conceptsLackingCodeAreas: 1,
+        hasDomainConcepts: true,
+        byType: { domain: 1, feature: 2 },
       }).success,
     ).toBe(true);
+    // Quality signals are required; the pre-signals shape no longer validates.
+    expect(
+      onboardCompleteOutputSchema.safeParse({
+        ok: true,
+        onboarded: true,
+        summaryConceptId: "product-onboarding-summary",
+      }).success,
+    ).toBe(false);
     expect(
       onboardCompleteOutputSchema.safeParse({ ok: true, onboarded: false }).success,
     ).toBe(false);

@@ -375,6 +375,14 @@ describe("onboarding (onboard tool + nudge)", () => {
       summary: "Indexed the acme-crm demo product.",
     });
     expect(done).toMatchObject({ ok: true, onboarded: true, summaryConceptId: "product-onboarding-summary" });
+    // Quality signals surfaced on success. The demo vault has ≥13 concepts and
+    // no `domain`-type concepts, so hasDomainConcepts is false; the lacking-
+    // codeAreas count is a valid subset of the total.
+    expect(done.conceptCount).toBeGreaterThanOrEqual(13);
+    expect(done.conceptsLackingCodeAreas).toBeGreaterThanOrEqual(0);
+    expect(done.conceptsLackingCodeAreas).toBeLessThanOrEqual(done.conceptCount);
+    expect(done.hasDomainConcepts).toBe(false);
+    expect(done.byType).toMatchObject({ feature: expect.any(Number) });
 
     const summary = await callJson("get_concept", { id: "product-onboarding-summary" });
     expect(summary.type).toBe("spec");
@@ -395,6 +403,16 @@ describe("onboarding (onboard tool + nudge)", () => {
 
     const status = await callJson("onboard", { action: "status" });
     expect(status.onboarded).toBe(true);
+  });
+
+  it("start on an already-onboarded vault returns the idempotency guard, not the playbook", async () => {
+    // Runs after the complete test above, so the vault is already onboarded.
+    const result = await callTool("onboard", { action: "start", productName: "Acme CRM" });
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain("already onboarded on");
+    expect(text).toContain("duplicate concepts");
+    expect(text).not.toContain("Onboarding playbook");
   });
 });
 

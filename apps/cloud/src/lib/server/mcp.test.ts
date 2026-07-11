@@ -421,6 +421,20 @@ describe("onboard tool + nudge", () => {
     expect(blocks[0]).toContain('{"action": "complete"');
   });
 
+  it("start on an already-onboarded vault returns the idempotency guard, not the playbook", async () => {
+    vault.state.onboardedAt = "2026-03-14T09:00:00.000Z";
+    const result = await client.callTool({
+      name: "onboard",
+      arguments: { action: "start", productName: "Acme CRM" },
+    });
+    expect(result.isError).toBe(true);
+    const text = textBlocks(result)[0];
+    // Guard, with the onboarded date, pointing at the update paths — never the playbook.
+    expect(text).toContain("already onboarded on 2026-03-14");
+    expect(text).toContain("duplicate concepts");
+    expect(text).not.toContain("Onboarding playbook");
+  });
+
   it("status reports onboarded state + counts (contract shape)", async () => {
     const result = await client.callTool({ name: "onboard", arguments: { action: "status" } });
     const payload = JSON.parse(textBlocks(result)[0]);
@@ -434,6 +448,30 @@ describe("onboard tool + nudge", () => {
     expect(textBlocks(result)[0]).toContain("summary");
   });
 
+  it("complete over an empty vault is rejected (no 'onboarded but empty' dead state)", async () => {
+    // Empty graph: stats reports 0 concepts and list is empty.
+    vault.stats = async () => ({
+      concepts: 0,
+      edges: 0,
+      products: [],
+      tags: [],
+      byType: {},
+      onboarded: false,
+      openTasks: 0,
+      embeddings: "unavailable",
+      keywordIndex: "like",
+    });
+    vault.list = async () => ({ count: 0, concepts: [] });
+    const result = await client.callTool({
+      name: "onboard",
+      arguments: { action: "complete", summary: "Nothing indexed yet." },
+    });
+    expect(result.isError).toBe(true);
+    expect(textBlocks(result)[0]).toContain("no concepts");
+    // Guard fired before any state change: still not onboarded.
+    expect(vault.state.onboardedAt).toBeNull();
+  });
+
   it("complete stores the summary concept, sets DO state, mirrors to D1, and stops the nudge", async () => {
     const result = await client.callTool({
       name: "onboard",
@@ -442,6 +480,11 @@ describe("onboard tool + nudge", () => {
     const payload = JSON.parse(textBlocks(result)[0]);
     expect(onboardCompleteOutputSchema.safeParse(payload).success).toBe(true);
     expect(payload.summaryConceptId).toBe(ONBOARDING_SUMMARY_ID);
+    // Quality signals surfaced on success (fake vault: 1 feature concept, no codeAreas).
+    expect(payload.conceptCount).toBe(1);
+    expect(payload.conceptsLackingCodeAreas).toBe(1);
+    expect(payload.hasDomainConcepts).toBe(false);
+    expect(payload.byType).toEqual({ feature: 1 });
     expect(vault.state.onboardedAt).not.toBeNull();
     expect(mirrored).toBeInstanceOf(Date);
     expect(vault.state.upserts).toContainEqual(

@@ -556,9 +556,28 @@ export function buildProgram(ctx: Ctx): Command {
             if (!opts.summary?.trim()) {
               throw new CliError("--complete requires --summary \"<what was indexed>\"");
             }
+            // Guard against the "onboarded but empty" dead state; surface
+            // quality signals on success (mirrors the onboard MCP tool).
+            const stats = vault.stats();
+            if (stats.concepts === 0) {
+              throw new CliError(
+                "cannot complete onboarding: the vault has no concepts — index the product first",
+              );
+            }
+            const conceptsLackingCodeAreas = vault
+              .listConcepts()
+              .filter((c) => !c.codeAreas || c.codeAreas.length === 0).length;
             const saved = await vault.completeOnboarding(opts.summary);
             if (g.json) {
-              printJson(ctx, { ok: true, onboarded: true, summaryConceptId: saved.id });
+              printJson(ctx, {
+                ok: true,
+                onboarded: true,
+                summaryConceptId: saved.id,
+                conceptCount: stats.concepts,
+                conceptsLackingCodeAreas,
+                hasDomainConcepts: (stats.byType.domain ?? 0) > 0,
+                byType: stats.byType,
+              });
               return;
             }
             ctx.out(
@@ -591,13 +610,25 @@ export function buildProgram(ctx: Ctx): Command {
             }
             return;
           }
+          // Idempotent start: an already-onboarded vault must NOT get a fresh
+          // playbook — re-running it risks blindly duplicating concepts.
+          if (vault.onboardedAt != null) {
+            const parsed = new Date(vault.onboardedAt);
+            const date = Number.isNaN(parsed.getTime())
+              ? vault.onboardedAt
+              : parsed.toISOString().slice(0, 10);
+            throw new CliError(
+              `already onboarded on ${date} — re-running onboard risks duplicate concepts; ` +
+                "use `brainz onboard --status`, or edit concepts directly, to update",
+            );
+          }
           const playbook = onboardingPlaybook({
             productName: opts.productName,
             repoHint: opts.repoHint,
-            onboarded: vault.onboardedAt !== null,
+            onboarded: false,
           });
           if (g.json) {
-            printJson(ctx, { onboarded: vault.onboardedAt !== null, playbook });
+            printJson(ctx, { onboarded: false, playbook });
             return;
           }
           ctx.out(playbook.endsWith("\n") ? playbook : `${playbook}\n`);

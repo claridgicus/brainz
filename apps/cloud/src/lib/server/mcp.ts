@@ -206,12 +206,27 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
     onboard: async ({ action, productName, repoHint, summary }) =>
       guarded(async () => {
         if (action === "start") {
+          const { onboardedAt } = await vault.onboarding();
+          // Idempotent start: an already-onboarded vault must NOT get a fresh
+          // playbook — re-running the indexing playbook risks blindly
+          // duplicating concepts. Return a guard notice pointing at the update
+          // paths instead (SPEC-CLOUD.md: "onboarding once per project").
+          if (onboardedAt !== null) {
+            const parsed = new Date(onboardedAt);
+            const date = Number.isNaN(parsed.getTime())
+              ? onboardedAt
+              : parsed.toISOString().slice(0, 10);
+            return fail(
+              `already onboarded on ${date} — re-running start risks duplicate concepts; ` +
+                "use list_concepts/upsert_concept to update, or the task tools",
+            );
+          }
           // Onboard-start convention (ONBOARD_START_CONTENT in @brainz/contracts):
           // one markdown text block — the playbook itself.
           const playbook = onboardingPlaybook({
             productName,
             repoHint,
-            onboarded: await isOnboarded(),
+            onboarded: false,
           });
           return { content: [{ type: "text", text: playbook }] };
         }
@@ -219,6 +234,23 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
           if (!summary?.trim()) {
             return fail('onboard {action: "complete"} requires a non-empty `summary`');
           }
+          // Guard against the "onboarded but empty" dead state: completing over
+          // an empty graph would permanently silence the nudge with nothing
+          // indexed. Refuse, and surface quality signals on success so callers
+          // can judge whether the graph is actually worth sealing.
+          const [{ concepts: conceptCount, byType }, { concepts }] = await Promise.all([
+            vault.stats(),
+            vault.list(),
+          ]);
+          if (conceptCount === 0) {
+            return fail(
+              "cannot complete onboarding: the vault has no concepts — index the product first",
+            );
+          }
+          const conceptsLackingCodeAreas = concepts.filter(
+            (c) => !c.codeAreas || c.codeAreas.length === 0,
+          ).length;
+          const hasDomainConcepts = (byType.domain ?? 0) > 0;
           const { concept } = await vault.upsertConcept({
             id: ONBOARDING_SUMMARY_ID,
             title: "Product onboarding summary",
@@ -229,7 +261,15 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
           await vault.setOnboardedAt(onboardedAt.toISOString());
           // Mirror into the D1 control plane; never fail the tool call on it.
           await hooks.onOnboarded?.(onboardedAt).catch(() => {});
-          return ok({ ok: true, onboarded: true, summaryConceptId: concept.id });
+          return ok({
+            ok: true,
+            onboarded: true,
+            summaryConceptId: concept.id,
+            conceptCount,
+            conceptsLackingCodeAreas,
+            hasDomainConcepts,
+            byType,
+          });
         }
         const { concepts, byType, onboarded } = await vault.stats();
         return ok({ onboarded, conceptCount: concepts, byType });

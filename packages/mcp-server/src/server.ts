@@ -243,12 +243,26 @@ export function createServer(vault: Vault): McpServer {
     onboard: async ({ action, productName, repoHint, summary }) =>
       guarded(async () => {
         if (action === "start") {
+          // Idempotent start: an already-onboarded vault must NOT get a fresh
+          // playbook — re-running the indexing playbook risks blindly
+          // duplicating concepts. Return a guard notice pointing at the update
+          // paths instead (SPEC-CLOUD.md: "onboarding once per project").
+          if (vault.onboardedAt != null) {
+            const parsed = new Date(vault.onboardedAt);
+            const date = Number.isNaN(parsed.getTime())
+              ? vault.onboardedAt
+              : parsed.toISOString().slice(0, 10);
+            return fail(
+              `already onboarded on ${date} — re-running start risks duplicate concepts; ` +
+                "use list_concepts/upsert_concept to update, or the task tools",
+            );
+          }
           // Onboard-start convention (ONBOARD_START_CONTENT in @brainz/contracts):
           // one markdown text block — the playbook itself.
           const playbook = onboardingPlaybook({
             productName,
             repoHint,
-            onboarded: vault.onboardedAt !== null,
+            onboarded: false,
           });
           return { content: [{ type: "text", text: playbook }] };
         }
@@ -256,8 +270,28 @@ export function createServer(vault: Vault): McpServer {
           if (!summary?.trim()) {
             return fail('onboard {action: "complete"} requires a non-empty `summary`');
           }
+          // Guard against the "onboarded but empty" dead state, and surface
+          // quality signals on success (mirrors apps/cloud's onboard tool).
+          const stats = vault.stats();
+          if (stats.concepts === 0) {
+            return fail(
+              "cannot complete onboarding: the vault has no concepts — index the product first",
+            );
+          }
+          const concepts = vault.listConcepts();
+          const conceptsLackingCodeAreas = concepts.filter(
+            (c) => !c.codeAreas || c.codeAreas.length === 0,
+          ).length;
           const saved = await vault.completeOnboarding(summary);
-          return ok({ ok: true, onboarded: true, summaryConceptId: saved.id });
+          return ok({
+            ok: true,
+            onboarded: true,
+            summaryConceptId: saved.id,
+            conceptCount: stats.concepts,
+            conceptsLackingCodeAreas,
+            hasDomainConcepts: (stats.byType.domain ?? 0) > 0,
+            byType: stats.byType,
+          });
         }
         const stats = vault.stats();
         return ok({

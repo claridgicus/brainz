@@ -315,6 +315,13 @@ export const onboardCompleteOutputSchema = z
     ok: z.literal(true),
     onboarded: z.literal(true),
     summaryConceptId: z.string(),
+    // Quality signals on the sealed graph — additive; the caller can judge
+    // coverage without a second stats round-trip. `complete` refuses when
+    // conceptCount would be 0, so these describe a non-empty graph.
+    conceptCount: z.number().int(),
+    conceptsLackingCodeAreas: z.number().int(),
+    hasDomainConcepts: z.boolean(),
+    byType: z.record(z.string(), z.number()),
   })
   .strict();
 
