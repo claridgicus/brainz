@@ -8,6 +8,15 @@
 	import { TYPE_COLORS } from "$lib/graph-data";
 	import ConceptPanel from "$lib/components/ConceptPanel.svelte";
 	import { onMount } from "svelte";
+	import {
+		type GroupBy,
+		type Lane,
+		type Status,
+		computeLanes,
+		hasLaneMiss,
+		statusOf as laneStatusOf,
+		titleForIn,
+	} from "./board-lanes";
 
 	let { data } = $props();
 	const api = createApi(fetch);
@@ -22,60 +31,41 @@
 		graph = data.graph;
 	});
 
-	const STATUSES = ["open", "taken", "done"] as const;
-	type Status = (typeof STATUSES)[number];
-	const statusOf = (t: TaskMeta): Status => (t.taskStatus ?? "open") as Status;
-
-	const titleFor = (id: string): string => graph.nodes.find((n) => n.id === id)?.title ?? id;
-	const edgesFrom = (id: string, rel: string): string[] =>
-		graph.edges.filter((e) => e.from === id && e.relation === rel).map((e) => e.to);
+	const statusOf = laneStatusOf;
+	const titleFor = (id: string): string => titleForIn(graph, id);
 
 	// ------------------------------------------------------------- grouping
-	type GroupBy = "status" | "concept" | "priority" | "takenBy";
+	// Grouping/lane derivation is pure (./board-lanes) so it can be unit-tested.
 	let groupBy = $state<GroupBy>("status");
-
-	const PRIORITY_TAGS = ["critical", "high", "medium", "low"];
-	const priorityOf = (t: TaskMeta): string =>
-		t.tags.find((tag) => PRIORITY_TAGS.includes(tag.toLowerCase())) ?? "unprioritized";
-
-	// Group tasks into lanes. Each lane has an id, a label, and — when grouped
-	// by status — its status drives which move-targets a card offers.
-	interface Lane {
-		id: string;
-		label: string;
-		status?: Status;
-		tasks: TaskMeta[];
-	}
-
-	const lanes = $derived.by((): Lane[] => {
-		if (groupBy === "status") {
-			return STATUSES.map((s) => ({
-				id: s,
-				label: s,
-				status: s,
-				tasks: tasks.filter((t) => statusOf(t) === s),
-			}));
-		}
-		const key = (t: TaskMeta): { id: string; label: string } => {
-			if (groupBy === "priority") return { id: priorityOf(t), label: priorityOf(t) };
-			if (groupBy === "takenBy")
-				return { id: t.takenBy ?? "unassigned", label: t.takenBy ?? "unassigned" };
-			// by related concept: the domain it's part_of, else what it realizes.
-			const domain = edgesFrom(t.id, "part_of")[0] ?? edgesFrom(t.id, "realizes")[0];
-			return domain ? { id: domain, label: titleFor(domain) } : { id: "_none", label: "unlinked" };
-		};
-		const map = new Map<string, Lane>();
-		for (const t of tasks) {
-			const { id, label } = key(t);
-			let lane = map.get(id);
-			if (!lane) map.set(id, (lane = { id, label, tasks: [] }));
-			lane.tasks.push(t);
-		}
-		return [...map.values()].sort((a, b) => a.label.localeCompare(b.label));
-	});
+	const lanes = $derived.by((): Lane[] => computeLanes(tasks, graph, groupBy));
 
 	// ------------------------------------------------------------ real-time
+	// Tasks poll fast (4s) for a live pile; the concept graph — the source of
+	// lane labels and card-detail titles — is refreshed on a much lower cadence
+	// (every GRAPH_EVERY task ticks ≈ 24s) so a renamed concept surfaces without
+	// a full reload, without thrashing. A "lane miss" (a task references a
+	// concept id absent from the current graph) forces an immediate refresh.
+	const POLL_MS = 4000;
+	const GRAPH_EVERY = 6; // 6 × 4s = 24s graph cadence
 	let polling = $state(true);
+	let tick = 0;
+	let graphInFlight = false;
+
+	async function refreshGraph() {
+		if (graphInFlight) return;
+		graphInFlight = true;
+		try {
+			const next = await api.graph(vault.id);
+			// Only reassign on an actual change so the lanes/cards don't re-render
+			// needlessly (labels/titles read straight off this reactive state).
+			if (JSON.stringify(next) !== JSON.stringify(graph)) graph = next;
+		} catch {
+			/* keep the last good graph */
+		} finally {
+			graphInFlight = false;
+		}
+	}
+
 	async function poll() {
 		if (!polling) return;
 		try {
@@ -85,9 +75,15 @@
 		} catch {
 			/* keep the last good pile */
 		}
+		// Low-cadence graph refresh, or immediately if the pile now references a
+		// concept the current graph doesn't know about (stale lane labels). SSR
+		// already loaded the graph, so count first — the first periodic refresh
+		// lands at GRAPH_EVERY ticks, not on the very next poll.
+		tick++;
+		if (tick % GRAPH_EVERY === 0 || hasLaneMiss(tasks, graph)) void refreshGraph();
 	}
 	onMount(() => {
-		const timer = setInterval(poll, 4000);
+		const timer = setInterval(poll, POLL_MS);
 		return () => clearInterval(timer);
 	});
 
