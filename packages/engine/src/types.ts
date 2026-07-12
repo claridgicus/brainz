@@ -1,5 +1,12 @@
 // ---- types (exact contract per SPEC.md) ----
 
+/**
+ * The DEFAULT set of concept types (the ontology onboarding teaches). This
+ * stays the canonical TS union, but a concept's `type` is validated at the
+ * boundary against the vault's per-vault type registry (Wave TR), so a vault
+ * may carry CUSTOM types too — see `AnyConceptType`. An unknown/removed type
+ * falls back to `concept`.
+ */
 export type ConceptType =
   | "concept"
   | "domain"
@@ -12,6 +19,14 @@ export type ConceptType =
   | "constraint"
   | "pattern"
   | "glossary";
+
+/**
+ * A concept type as it may appear at runtime: any of the built-in
+ * {@link ConceptType}s OR a custom registry key. Kept as a distinct alias
+ * (rather than widening ConceptType to `string`) so the built-in union still
+ * autocompletes and documents the default ontology.
+ */
+export type AnyConceptType = ConceptType | (string & {});
 
 export type ConceptStatus = "active" | "draft" | "deprecated";
 
@@ -59,7 +74,7 @@ export interface SearchOptions {
   mode?: "hybrid" | "keyword" | "semantic"; // default "hybrid"
   product?: string;
   tags?: string[];
-  type?: ConceptType;
+  type?: AnyConceptType;
   limit?: number; // default 10
 }
 
@@ -100,7 +115,7 @@ export interface UpsertInput {
   id?: string;
   title: string;
   body: string;
-  type?: ConceptType;
+  type?: AnyConceptType;
   status?: ConceptStatus;
   product?: string;
   tags?: string[];

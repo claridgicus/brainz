@@ -527,6 +527,84 @@ async function main() {
     const pending = graph.json?.nodes?.find((n) => n.id === "missing-concept");
     step("graph flags missing-concept as pending", pending?.pending === true && pending?.type === "pending");
 
+    // 7b. concept-type registry (Wave TR) — seed, CRUD, unknown-type fallback
+    const typesList = await api("GET", `/api/vaults/${vaultId}/types`);
+    step("GET /types → 200", typesList.status === 200, `status ${typesList.status}`);
+    const seeded = typesList.json?.types ?? [];
+    step("fresh vault seeds exactly 11 built-in types", seeded.length === 11, `got ${seeded.length}`);
+    const domainType = seeded.find((t) => t.key === "domain");
+    const glossaryType = seeded.find((t) => t.key === "glossary");
+    step(
+      "seed reproduces today's colors + weights (domain #60a5fa/100 > glossary #f472b6/40)",
+      domainType?.color === "#60a5fa" &&
+        domainType?.weight === 100 &&
+        glossaryType?.color === "#f472b6" &&
+        glossaryType?.weight === 40 &&
+        domainType?.weight > glossaryType?.weight &&
+        seeded.every((t) => t.builtin === true),
+    );
+    // graph payload carries the registry
+    step(
+      "graph payload carries the 11-type registry",
+      Array.isArray(graph.json?.types) && graph.json.types.length === 11,
+      `types ${graph.json?.types?.length}`,
+    );
+
+    // create a custom type
+    const createType = await api("POST", `/api/vaults/${vaultId}/types`, {
+      body: { key: "Risk Item!", label: "Risk", color: "#ff0000", weight: 90 },
+    });
+    step("POST /types custom → 201 (key slugified)", createType.status === 201, `status ${createType.status}`);
+    step(
+      "custom type key slugified to 'risk-item', not built-in",
+      createType.json?.key === "risk-item" && createType.json?.builtin === false,
+      createType.json?.key,
+    );
+
+    // upsert a concept with the custom type → it survives (registry-valid)
+    const customConcept = await api("POST", `/api/vaults/${vaultId}/concepts`, {
+      body: { id: "risky-thing", title: "Risky thing", body: "A risk.\n", type: "risk-item" },
+    });
+    step(
+      "concept with custom type keeps type 'risk-item'",
+      customConcept.status === 201 && customConcept.json?.type === "risk-item",
+      customConcept.json?.type,
+    );
+    // unknown type → falls back to concept
+    const unknownConcept = await api("POST", `/api/vaults/${vaultId}/concepts`, {
+      body: { id: "mystery-thing", title: "Mystery", body: "Unknown.\n", type: "totally-made-up" },
+    });
+    step(
+      "unknown type falls back to 'concept'",
+      unknownConcept.status === 201 && unknownConcept.json?.type === "concept",
+      unknownConcept.json?.type,
+    );
+    // custom type flows through graph payload → node renders with that type
+    const graph2 = await api("GET", `/api/vaults/${vaultId}/graph`);
+    const riskyNode = graph2.json?.nodes?.find((n) => n.id === "risky-thing");
+    step("custom-typed concept appears in graph with its type", riskyNode?.type === "risk-item");
+
+    // re-weight a built-in via PATCH
+    const patchType = await api("PATCH", `/api/vaults/${vaultId}/types/glossary`, {
+      body: { weight: 95 },
+    });
+    step(
+      "PATCH built-in weight → 200, re-weighted (still built-in)",
+      patchType.status === 200 && patchType.json?.weight === 95 && patchType.json?.builtin === true,
+      `status ${patchType.status}`,
+    );
+
+    // built-in cannot be hard-deleted
+    const delBuiltin = await api("DELETE", `/api/vaults/${vaultId}/types/domain`);
+    step("DELETE built-in type → blocked (400)", delBuiltin.status === 400, `status ${delBuiltin.status}`);
+    // custom type in use cannot be deleted until reassigned
+    const delInUse = await api("DELETE", `/api/vaults/${vaultId}/types/risk-item`);
+    step("DELETE custom type in use → blocked (400)", delInUse.status === 400, `status ${delInUse.status}`);
+    // remove the concept, then the custom type deletes
+    await api("DELETE", `/api/vaults/${vaultId}/concepts/risky-thing`);
+    const delFree = await api("DELETE", `/api/vaults/${vaultId}/types/risk-item`);
+    step("DELETE unused custom type → 204", delFree.status === 204, `status ${delFree.status}`);
+
     // 8. API key — plaintext exactly once
     const keyRes = await api("POST", `/api/vaults/${vaultId}/keys`, { body: { name: "e2e-key" } });
     step("create key → 201", keyRes.status === 201, `status ${keyRes.status}`);
@@ -1325,6 +1403,10 @@ async function main() {
       ["DELETE", `/api/vaults/${vaultId}/concepts/auth-system`, undefined],
       ["GET", `/api/vaults/${vaultId}/keys`, undefined],
       ["POST", `/api/vaults/${vaultId}/keys`, { name: "stolen-key" }],
+      ["GET", `/api/vaults/${vaultId}/types`, undefined],
+      ["POST", `/api/vaults/${vaultId}/types`, { key: "x", label: "X", color: "#fff" }],
+      ["PATCH", `/api/vaults/${vaultId}/types/domain`, { weight: 5 }],
+      ["DELETE", `/api/vaults/${vaultId}/types/domain`, undefined],
     ];
     for (const [method, probePath, body] of tenancyProbes) {
       const res = await api(method, probePath, { body, jar: jarB });
@@ -1574,7 +1656,9 @@ async function main() {
       ["POST", "/api/vaults", {}, "vault create without name"],
       ["POST", "/api/vaults", { name: "" }, "vault create with empty name"],
       ["POST", `/api/vaults/${vaultId}/concepts`, { title: "No body here" }, "concept without body"],
-      ["POST", `/api/vaults/${vaultId}/concepts`, { title: "x", body: "y", type: "banana" }, "concept with unknown type"],
+      // NOTE (Wave TR): an unknown `type` is NO LONGER a 400 — it's registry-
+      // validated and falls back to "concept" (asserted in §7b above), so it's
+      // deliberately absent from this parse-failure list.
       ["PUT", `/api/vaults/${vaultId}/concepts/auth-system`, { id: "different-id", title: "x", body: "y" }, "concept PUT with mismatched body id"],
       ["POST", `/api/vaults/${vaultId}/context`, {}, "context without query or ids"],
       ["POST", `/api/vaults/${vaultId}/keys`, {}, "key create without name"],
@@ -1715,6 +1799,25 @@ async function main() {
       body: JSON.stringify({ id: "viewer-should-not-write", title: "nope", type: "note", body: "x" }),
     });
     step("viewer write is refused → 403 (read-only role)", viewerWrite.status === 403, `status ${viewerWrite.status}`);
+
+    // Concept-type registry role gating: a viewer may READ the types …
+    const viewerTypes = await fetch(`${BASE}/api/vaults/${vaultId}/types`, {
+      headers: { origin: BASE, cookie: colleagueCookie },
+    });
+    step("viewer can read concept types (200)", viewerTypes.status === 200, `status ${viewerTypes.status}`);
+    // … but not CREATE or PATCH one (editor+).
+    const viewerCreateType = await fetch(`${BASE}/api/vaults/${vaultId}/types`, {
+      method: "POST",
+      headers: { origin: BASE, "content-type": "application/json", cookie: colleagueCookie },
+      body: JSON.stringify({ key: "sneaky", label: "Sneaky", color: "#fff" }),
+    });
+    step("viewer cannot create a type → 403", viewerCreateType.status === 403, `status ${viewerCreateType.status}`);
+    const viewerPatchType = await fetch(`${BASE}/api/vaults/${vaultId}/types/domain`, {
+      method: "PATCH",
+      headers: { origin: BASE, "content-type": "application/json", cookie: colleagueCookie },
+      body: JSON.stringify({ weight: 1 }),
+    });
+    step("viewer cannot patch a type → 403", viewerPatchType.status === 403, `status ${viewerPatchType.status}`);
 
     // The owner now sees two members; the invite is consumed (no longer pending).
     const membersAfter = await api("GET", `/api/vaults/${vaultId}/members`);

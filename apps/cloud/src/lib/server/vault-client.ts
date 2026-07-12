@@ -14,7 +14,13 @@ import type {
   WireNeighbor,
   WireRelated,
 } from "./vault-do";
-import type { GraphPayload, ToolConceptMeta } from "@brainz/contracts";
+import type {
+  ConceptTypeCreateRequest,
+  ConceptTypeEntry,
+  ConceptTypeUpdateRequest,
+  GraphPayload,
+  ToolConceptMeta,
+} from "@brainz/contracts";
 
 export class VaultDoError extends Error {
   status: number;
@@ -72,6 +78,10 @@ export interface VaultClient {
   search(args: SearchArgs): Promise<{ hits: WireHit[] }>;
   related(args: RelatedArgs): Promise<{ id: string; related: WireRelated[] }>;
   graph(): Promise<GraphPayload>;
+  listTypes(): Promise<{ types: ConceptTypeEntry[] }>;
+  createType(input: ConceptTypeCreateRequest): Promise<{ type: ConceptTypeEntry }>;
+  updateType(key: string, patch: ConceptTypeUpdateRequest): Promise<{ type: ConceptTypeEntry }>;
+  deleteType(key: string): Promise<{ ok: true; deleted: boolean }>;
   context(args: ContextArgs): Promise<{
     markdown: string;
     included: ToolConceptMeta[];
@@ -117,6 +127,10 @@ export function vaultClient(ns: DurableObjectNamespace, vaultId: string): VaultC
     search: (args) => call("search", args),
     related: (args) => call("related", args),
     graph: () => call("graph"),
+    listTypes: () => call("listTypes"),
+    createType: (input) => call("createType", input),
+    updateType: (key, patch) => call("updateType", { ...patch, key }),
+    deleteType: (key) => call("deleteType", { key }),
     context: (args) => call("context", args),
     stats: () => call("stats"),
     onboarding: () => call("onboarding"),

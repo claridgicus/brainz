@@ -1,28 +1,39 @@
 <script lang="ts">
 	// Concept editor (create + edit): title, type, tags, product, markdown
 	// body with a live preview toggle. The parent performs the actual save.
-	import type { ApiConcept } from "@brainz/contracts";
+	import type { ApiConcept, ConceptTypeEntry } from "@brainz/contracts";
 	import { CONCEPT_TYPES } from "@brainz/contracts";
 	import type { UpsertConceptBody } from "$lib/api";
 	import { renderMarkdown } from "$lib/markdown";
 
 	let {
 		initial = null,
+		types = [],
 		onsubmit,
 		oncancel,
 	}: {
 		/** Existing concept to edit, or null to create a new one. */
 		initial?: ApiConcept | null;
+		/** The vault's concept-type registry — populates the type dropdown so
+		 * custom types are selectable. Falls back to the 11 built-ins when empty. */
+		types?: readonly ConceptTypeEntry[];
 		onsubmit: (body: UpsertConceptBody) => Promise<void>;
 		oncancel: () => void;
 	} = $props();
+
+	// The dropdown options: registry types (label + key), else the built-ins.
+	const typeOptions = $derived<{ key: string; label: string }[]>(
+		types.length > 0
+			? types.filter((t) => !t.hidden).map((t) => ({ key: t.key, label: t.label }))
+			: CONCEPT_TYPES.map((k) => ({ key: k, label: k })),
+	);
 
 	// The form intentionally seeds from `initial` once — the editor is
 	// remounted per open, and edits must not be clobbered by prop changes.
 	// svelte-ignore state_referenced_locally
 	let title = $state(initial?.title ?? "");
 	// svelte-ignore state_referenced_locally
-	let type = $state<(typeof CONCEPT_TYPES)[number]>(initial?.type ?? "concept");
+	let type = $state<string>(initial?.type ?? "concept");
 	// svelte-ignore state_referenced_locally
 	let tags = $state((initial?.tags ?? []).join(", "));
 	// svelte-ignore state_referenced_locally
@@ -73,8 +84,8 @@
 		<div class="field">
 			<label for="ce-type">Type</label>
 			<select id="ce-type" class="select" bind:value={type}>
-				{#each CONCEPT_TYPES as t (t)}
-					<option value={t}>{t}</option>
+				{#each typeOptions as t (t.key)}
+					<option value={t.key}>{t.label}</option>
 				{/each}
 			</select>
 		</div>

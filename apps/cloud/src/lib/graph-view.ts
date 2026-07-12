@@ -3,8 +3,92 @@
 // board-lanes.ts pattern). These functions decide *which elements belong in the
 // DOM* for the current viewport; the force simulation stays elsewhere.
 
-import type { Edge } from "@brainz/contracts";
+import type { ConceptTypeEntry, Edge } from "@brainz/contracts";
+import { PENDING_TYPE_WEIGHT } from "@brainz/contracts";
 import { ALL_TYPES } from "./graph-data.js";
+
+// -------------------------------------------------- per-vault type registry
+// Wave TR: concept types are DATA (a per-vault registry of {key,label,color,
+// weight,order,hidden}). The graph's palette, chips, semantic-zoom LOD, default-
+// visible set and node sizing all derive from the registry — WEIGHT is the
+// single knob (higher weight = higher signal = revealed earlier + larger).
+//
+// A `TypeRegistryView` pre-derives everything the pure helpers below need from
+// a registry so they don't re-scan it per call. Passing no registry keeps the
+// hardcoded built-in behavior (backward-compatible for existing tests + the
+// static viewer): the seed registry reproduces it EXACTLY because its distinct
+// weights (100/80/60/40, plus pending 20) map 1:1 onto the old signal ranks.
+
+/** Pre-derived, registry-driven view used by the LOD/order/color helpers. */
+export interface TypeRegistryView {
+	/** Weight-derived signal rank per key (0 = highest signal, revealed first). */
+	rank: Map<string, number>;
+	/** The lowest (largest-number) rank — the tier unknown types fall into. */
+	maxRank: number;
+	/** Explicit chip/settings order (ascending `order`, then key). */
+	order: string[];
+	/** Keys that render (not hidden), in `order`. */
+	visible: string[];
+	/** Weight per key (drives node sizing via the derived `size` map). */
+	weight: Map<string, number>;
+	/** Size multiplier per key, derived from weight (higher weight = larger). */
+	size: Map<string, number>;
+}
+
+/** Smallest / largest size multiplier a weight-driven node radius spans. */
+export const MIN_TYPE_SIZE_SCALE = 0.8;
+export const MAX_TYPE_SIZE_SCALE = 1.9;
+
+/**
+ * Map a weight onto a node-size multiplier within [lo, hi], linearly against the
+ * weight range [wLo, wHi]. Higher weight → larger node, so re-weighting a type
+ * up in settings both reveals it earlier (LOD) and grows it. A degenerate range
+ * (all equal weights) maps to the midpoint.
+ */
+export function sizeScaleForWeight(
+	weight: number,
+	wLo: number,
+	wHi: number,
+	lo = MIN_TYPE_SIZE_SCALE,
+	hi = MAX_TYPE_SIZE_SCALE,
+): number {
+	if (wHi <= wLo) return (lo + hi) / 2;
+	const t = Math.max(0, Math.min(1, (weight - wLo) / (wHi - wLo)));
+	return lo + t * (hi - lo);
+}
+
+/**
+ * Derive a {@link TypeRegistryView} from a vault's registry entries. Signal rank
+ * comes from the DISTINCT weights sorted descending (highest weight → rank 0),
+ * so re-weighting a type moves it between LOD tiers. The synthetic `pending`
+ * pseudo-type is folded in at its fixed low weight so its rank stays below every
+ * real type (matching today's behavior).
+ */
+export function registryView(registry: readonly ConceptTypeEntry[]): TypeRegistryView {
+	const weight = new Map<string, number>();
+	for (const t of registry) weight.set(t.key, t.weight);
+	// Fold in the pending pseudo-type so it always occupies the lowest tier.
+	const weights = new Set<number>([PENDING_TYPE_WEIGHT]);
+	for (const t of registry) weights.add(t.weight);
+	const distinctDesc = [...weights].sort((a, b) => b - a);
+	const rankByWeight = new Map<number, number>();
+	distinctDesc.forEach((w, i) => rankByWeight.set(w, i));
+	const rank = new Map<string, number>();
+	rank.set("pending", rankByWeight.get(PENDING_TYPE_WEIGHT) ?? distinctDesc.length - 1);
+	for (const t of registry) rank.set(t.key, rankByWeight.get(t.weight) ?? distinctDesc.length - 1);
+	const maxRank = Math.max(0, distinctDesc.length - 1);
+	const sorted = [...registry].sort((a, b) => a.order - b.order || a.key.localeCompare(b.key));
+	const order = sorted.map((t) => t.key);
+	const visible = sorted.filter((t) => !t.hidden).map((t) => t.key);
+	// Node sizing derives from weight (higher = larger), spanning the registry's
+	// own weight range including the pending pseudo-type at its fixed low weight.
+	const wHi = distinctDesc[0] ?? PENDING_TYPE_WEIGHT;
+	const wLo = distinctDesc[distinctDesc.length - 1] ?? PENDING_TYPE_WEIGHT;
+	const size = new Map<string, number>();
+	size.set("pending", sizeScaleForWeight(PENDING_TYPE_WEIGHT, wLo, wHi));
+	for (const t of registry) size.set(t.key, sizeScaleForWeight(t.weight, wLo, wHi));
+	return { rank, maxRank, order, visible, weight, size };
+}
 
 /**
  * Default-on concept types on first load, ranked by usefulness / signal.
@@ -19,9 +103,15 @@ import { ALL_TYPES } from "./graph-data.js";
  */
 export const DEFAULT_VISIBLE_TYPES = ["domain", "feature", "spec", "story", "task"] as const;
 
-/** Fresh array of the default-on types that actually exist in the palette. */
-export function defaultVisibleTypes(): string[] {
-	const all = new Set(ALL_TYPES);
+/**
+ * Fresh array of the default-on types that actually exist in the (registry or
+ * built-in) palette. With a registry, hidden/absent keys are filtered out so a
+ * hidden built-in never defaults on; the seed registry yields today's exact set.
+ */
+export function defaultVisibleTypes(registry?: readonly ConceptTypeEntry[] | null): string[] {
+	const all = registry && registry.length > 0
+		? new Set(registry.filter((t) => !t.hidden).map((t) => t.key))
+		: new Set(ALL_TYPES);
 	return DEFAULT_VISIBLE_TYPES.filter((t) => all.has(t));
 }
 
@@ -77,8 +167,14 @@ export const TYPE_SIGNAL_RANK: Record<string, number> = {
 /** The lowest-signal rank (unknown types fall back to this — shown only fully in). */
 export const MAX_SIGNAL_RANK = 4;
 
-/** Signal rank for a type (unknown → MAX_SIGNAL_RANK so it reveals last, never never). */
-export function signalRank(type: string): number {
+/**
+ * Signal rank for a type (lower = higher signal, revealed earlier). With a
+ * registry `view` the rank comes from the vault's weights (so re-weighting moves
+ * a type's LOD tier); without one it falls back to the built-in TYPE_SIGNAL_RANK.
+ * Unknown types → the lowest rank so they reveal last, never "never".
+ */
+export function signalRank(type: string, view?: TypeRegistryView | null): number {
+	if (view) return view.rank.get(type) ?? view.maxRank;
 	return TYPE_SIGNAL_RANK[type] ?? MAX_SIGNAL_RANK;
 }
 
@@ -105,6 +201,12 @@ export interface TypesVisibleAtZoomOpts {
 	 * (or pass empty) for a fresh, hysteresis-free evaluation.
 	 */
 	prev?: Set<string> | null;
+	/**
+	 * The vault's registry view. When present, ranks come from registry WEIGHTS
+	 * (re-weighting a type moves its LOD tier) and the tier curve spans the
+	 * registry's rank count; absent → the hardcoded built-in ranking.
+	 */
+	view?: TypeRegistryView | null;
 }
 
 /**
@@ -115,18 +217,20 @@ export interface TypesVisibleAtZoomOpts {
  * scale wiggle around a threshold doesn't toggle a type on/off.
  */
 export function typesVisibleAtZoom(scale: number, opts: TypesVisibleAtZoomOpts = {}): Set<string> {
-	const types = opts.types ?? ALL_TYPES;
+	const view = opts.view ?? null;
+	const types = opts.types ?? (view ? [...view.order, "pending"] : ALL_TYPES);
 	const prev = opts.prev ?? null;
+	const maxRank = view ? view.maxRank : MAX_SIGNAL_RANK;
 	const out = new Set<string>();
 	for (const type of types) {
-		const rank = signalRank(type);
+		const rank = signalRank(type, view);
 		// Rank 0 (domains) is the always-on baseline — the graph is never emptier
 		// than "domains only", so no threshold/hysteresis applies to it.
 		if (rank <= 0) {
 			out.add(type);
 			continue;
 		}
-		const threshold = lodThresholdForRank(rank);
+		const threshold = lodThresholdForRank(rank, maxRank);
 		const wasOn = prev?.has(type) ?? false;
 		// ON above the upper band; OFF below the lower band; inside the band keep
 		// the previous state (hysteresis).
@@ -186,18 +290,28 @@ export const TYPE_SIZE_SCALE: Record<string, number> = {
 	pending: 0.8,
 };
 
-/** Size multiplier for a concept type (1.0 for anything unranked). */
-export function typeSizeScale(type: string): number {
+/**
+ * Size multiplier for a concept type. With a registry `view` the multiplier is
+ * weight-derived (higher weight = larger, so re-weighting a type resizes it);
+ * without one it falls back to the built-in TYPE_SIZE_SCALE (1.0 for unranked).
+ */
+export function typeSizeScale(type: string, view?: TypeRegistryView | null): number {
+	if (view) return view.size.get(type) ?? (view.size.get("pending") ?? 1);
 	return TYPE_SIZE_SCALE[type] ?? 1;
 }
 
 /**
  * Node radius from BOTH its type (base scope) and its degree (connectedness).
  * Keeps the existing degree curve (`6 + sqrt(degree)*2.4`) but scales it by the
- * type rank, so a highly-connected `concept` dwarfs a lone `glossary` entry.
+ * type rank, so a highly-connected `domain` dwarfs a lone `glossary` entry.
+ * With a registry `view`, the type scale is weight-derived.
  */
-export function radiusForTypeDegree(type: string, degree: number): number {
-	return (6 + Math.sqrt(Math.max(0, degree)) * 2.4) * typeSizeScale(type);
+export function radiusForTypeDegree(
+	type: string,
+	degree: number,
+	view?: TypeRegistryView | null,
+): number {
+	return (6 + Math.sqrt(Math.max(0, degree)) * 2.4) * typeSizeScale(type, view);
 }
 
 /**

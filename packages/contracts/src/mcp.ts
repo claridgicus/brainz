@@ -17,19 +17,20 @@ import {
   CONCEPT_TYPES,
   TASK_STATUSES,
   conceptStatusSchema,
-  conceptTypeSchema,
   edgeSchema,
   embeddingStatusSchema,
   taskStatusSchema,
   vaultStatsSchema,
 } from "./domain.js";
 
-/** Compact concept metadata as MCP tools emit it: no absolute filePath noise. */
+/** Compact concept metadata as MCP tools emit it: no absolute filePath noise.
+ * `type` is a registry-resolved string (a key in the vault's concept-type
+ * registry), not the strict enum — a concept may carry a custom type. */
 export const toolConceptMetaSchema = z
   .object({
     id: z.string(),
     title: z.string(),
-    type: conceptTypeSchema,
+    type: z.string(),
     status: conceptStatusSchema,
     product: z.string().optional(),
     tags: z.array(z.string()),
@@ -88,7 +89,12 @@ export const upsertConceptInputSchema = z.object({
   id: z.string().optional().describe("Concept id (slug). Omit to derive from title; pass an existing id to update."),
   title: z.string().describe("Human-readable title (required, non-empty)."),
   body: z.string().describe("Markdown body. [[other-id]] wiki-links become graph edges."),
-  type: z.enum(CONCEPT_TYPES).optional().describe("Concept type (default \"concept\")."),
+  type: z
+    .string()
+    .optional()
+    .describe(
+      "Concept type (default \"concept\"). The 11 built-in types are concept, domain, feature, story, spec, workflow, task, decision, constraint, pattern, glossary; a vault may also define custom types. An unknown type falls back to \"concept\".",
+    ),
   status: z.enum(CONCEPT_STATUSES).optional().describe("Lifecycle status (default \"active\")."),
   product: z.string().optional().describe("Product grouping key."),
   tags: z.array(z.string()).optional().describe("Tags for filtering."),
@@ -225,7 +231,7 @@ export const searchConceptsOutputSchema = z
         .object({
           id: z.string(),
           title: z.string(),
-          type: conceptTypeSchema,
+          type: z.string(),
           score: z.number(),
           snippet: z.string(),
         })

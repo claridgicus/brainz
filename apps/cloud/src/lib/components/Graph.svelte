@@ -14,8 +14,14 @@
 		type SimulationLinkDatum,
 		type SimulationNodeDatum,
 	} from "d3-force";
-	import type { Edge, GraphNode, GraphPayload } from "@brainz/contracts";
-	import { ALL_TYPES, filterGraph, neighborhood, TYPE_COLORS } from "$lib/graph-data";
+	import type { ConceptTypeEntry, Edge, GraphNode, GraphPayload } from "@brainz/contracts";
+	import {
+		ALL_TYPES,
+		colorForType,
+		filterGraph,
+		neighborhood,
+		typeColorsFromRegistry,
+	} from "$lib/graph-data";
 	import {
 		anchorStorageKey,
 		applyAnchors,
@@ -28,6 +34,7 @@
 		nodesInViewport,
 		planEdges,
 		radiusForTypeDegree,
+		registryView,
 		serializeAnchors,
 		setAnchor,
 		typeClusterCenter,
@@ -36,6 +43,7 @@
 		type EdgeRenderPlan,
 		type FilterMode,
 		type PositionedNode,
+		type TypeRegistryView,
 	} from "$lib/graph-view";
 
 	interface SimNode extends SimulationNodeDatum {
@@ -49,6 +57,7 @@
 		graph,
 		enabledTypes,
 		vaultId,
+		registry = [],
 		filterMode = "manual",
 		focusId = null,
 		selectedId = null,
@@ -58,6 +67,9 @@
 		graph: GraphPayload;
 		enabledTypes: string[];
 		vaultId: string;
+		/** The vault's concept-type registry — drives palette colors, semantic-zoom
+		 * LOD tiers, and node sizing from per-type WEIGHTS. Empty → built-in defaults. */
+		registry?: readonly ConceptTypeEntry[];
 		/** "auto" = LOD drives visible types from the zoom scale; "manual" = the
 		 * `enabledTypes` chips do. Defaults to manual so nothing regresses if unset. */
 		filterMode?: FilterMode;
@@ -68,6 +80,16 @@
 		 * the parent can reflect which types the LOD is currently showing. */
 		onlodchange?: (types: string[]) => void;
 	} = $props();
+
+	// Registry-derived views: `regView` feeds weight-based LOD ranks + node sizing;
+	// `colors` maps type key → hex (custom types included). Recomputed only when the
+	// registry prop changes. Empty registry → built-in defaults (backward compatible).
+	const regView = $derived<TypeRegistryView | null>(
+		registry.length > 0 ? registryView(registry as ConceptTypeEntry[]) : null,
+	);
+	const colors = $derived(typeColorsFromRegistry(registry as ConceptTypeEntry[]));
+	/** Type keys the LOD/order logic should iterate (registry order, else palette). */
+	const orderedTypes = $derived<readonly string[]>(regView ? [...regView.order, "pending"] : ALL_TYPES);
 
 	const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -119,7 +141,11 @@
 	 */
 	function recomputeLod(): boolean {
 		if (filterMode !== "auto") return false;
-		const next = typesVisibleAtZoom(view.k, { prev: lodTypes });
+		const next = typesVisibleAtZoom(view.k, {
+			prev: lodTypes,
+			view: regView,
+			types: orderedTypes,
+		});
 		const changed = next.size !== lodTypes.size || [...next].some((t) => !lodTypes.has(t));
 		if (!changed) return false;
 		lodTypes = next;
@@ -212,6 +238,10 @@
 		const { nodes, edges } = visibleGraph();
 		empty = nodes.length === 0;
 
+		// Cluster ordering (index → angle around the canvas): registry order when
+		// present, else the built-in palette. Mutable copy for typeClusterCenter.
+		const clusterOrder: string[] = [...orderedTypes];
+
 		const width = svg.clientWidth || 900;
 		const height = svg.clientHeight || 600;
 
@@ -219,7 +249,7 @@
 		// (with a tiny jitter) so they ease in from the middle rather than flying
 		// in from (0,0). Kept nodes already carry their settled positions.
 		const nodeList: SimNode[] = nodes.map((n) => {
-			const r = radiusForTypeDegree(n.type, n.degree);
+			const r = radiusForTypeDegree(n.type, n.degree, regView);
 			let sn = simNodes.get(n.id);
 			if (!sn) {
 				sn = { id: n.id, data: n, r };
@@ -268,8 +298,8 @@
 			// clouds. Cross-type edges (the link force) pull two clouds to overlap
 			// Venn-style — the more connections, the more they merge. A slightly
 			// stronger pull than the old single-center gravity to keep clouds distinct.
-			.force("x", forceX<SimNode>((d) => typeClusterCenter(d.data.type, ALL_TYPES, width, height).x).strength(0.09))
-			.force("y", forceY<SimNode>((d) => typeClusterCenter(d.data.type, ALL_TYPES, width, height).y).strength(0.09))
+			.force("x", forceX<SimNode>((d) => typeClusterCenter(d.data.type, clusterOrder, width, height).x).strength(0.09))
+			.force("y", forceY<SimNode>((d) => typeClusterCenter(d.data.type, clusterOrder, width, height).y).strength(0.09))
 			.force(
 				"collide",
 				forceCollide<SimNode>()
@@ -313,7 +343,7 @@
 
 		const circle = document.createElementNS(SVG_NS, "circle");
 		circle.setAttribute("r", String(sn.r));
-		circle.setAttribute("fill", TYPE_COLORS[sn.data.type] ?? TYPE_COLORS["pending"]!);
+		circle.setAttribute("fill", colorForType(sn.data.type, colors));
 
 		const label = document.createElementNS(SVG_NS, "text");
 		label.textContent = sn.data.title;
@@ -742,6 +772,7 @@
 		void enabledTypes;
 		void focusId;
 		void filterMode;
+		void registry;
 		if (filterMode === "auto") {
 			// Force a recompute from a cleared cache so switching into auto (or a data
 			// change) always re-derives the tier for the current scale.

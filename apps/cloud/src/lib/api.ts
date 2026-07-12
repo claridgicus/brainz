@@ -11,6 +11,8 @@ import {
   apiKeyCreateResponseSchema,
   apiKeyListResponseSchema,
   conceptListResponseSchema,
+  conceptTypeEntrySchema,
+  conceptTypeListSchema,
   graphResponseSchema,
   searchResponseSchema,
   statsResponseSchema,
@@ -26,6 +28,9 @@ import {
   vaultSchema,
   type ApiConcept,
   type ApiKey,
+  type ConceptTypeCreateRequest,
+  type ConceptTypeEntry,
+  type ConceptTypeUpdateRequest,
   type GraphPayload,
   type PublicEnableResponse,
   type PublicStatus,
@@ -53,18 +58,9 @@ export interface UpsertConceptBody {
   id?: string;
   title: string;
   body: string;
-  type?:
-    | "concept"
-    | "domain"
-    | "feature"
-    | "story"
-    | "spec"
-    | "workflow"
-    | "task"
-    | "decision"
-    | "constraint"
-    | "pattern"
-    | "glossary";
+  /** A concept-type registry key (built-in or custom). An unknown/removed type
+   * falls back to "concept" server-side (registry-based validation, Wave TR). */
+  type?: string;
   status?: "active" | "draft" | "deprecated";
   product?: string;
   tags?: string[];
@@ -208,6 +204,32 @@ export function createApi(fetchFn: Fetch) {
       const stats = await parse(res, statsResponseSchema, path);
       const keywordIndex = res.headers.get("x-brainz-keyword-index") === "like" ? "like" : "fts5";
       return { ...stats, keywordIndex };
+    },
+
+    // ------------------------------------------------ concept-type registry
+    async listTypes(vaultId: string): Promise<ConceptTypeEntry[]> {
+      return (await request(conceptTypeListSchema, `/api/vaults/${enc(vaultId)}/types`)).types;
+    },
+    createType(vaultId: string, body: ConceptTypeCreateRequest): Promise<ConceptTypeEntry> {
+      return request(conceptTypeEntrySchema, `/api/vaults/${enc(vaultId)}/types`, {
+        method: "POST",
+        body,
+      });
+    },
+    updateType(
+      vaultId: string,
+      key: string,
+      body: ConceptTypeUpdateRequest,
+    ): Promise<ConceptTypeEntry> {
+      return request(conceptTypeEntrySchema, `/api/vaults/${enc(vaultId)}/types/${enc(key)}`, {
+        method: "PATCH",
+        body,
+      });
+    },
+    async deleteType(vaultId: string, key: string): Promise<void> {
+      await expectNoContent(
+        await fetchFn(`/api/vaults/${enc(vaultId)}/types/${enc(key)}`, { method: "DELETE" }),
+      );
     },
 
     // --------------------------------------------------------------- tasks

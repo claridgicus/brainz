@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
+  BUILTIN_CONCEPT_TYPES,
   CANONICAL_RELATIONS,
   claimInputSchema,
   claimOutputSchema,
   CLOUD_MCP_TOOLS,
   CLOUD_MCP_TOOL_NAMES,
   CONCEPT_TYPES,
+  conceptTypeCreateRequestSchema,
+  conceptTypeEntrySchema,
   CONTRACTS_VERSION,
+  slugifyTypeKey,
   MCP_TOOLS,
   MCP_TOOL_NAMES,
   cliValidateJsonSchema,
@@ -31,16 +35,20 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "11"', () => {
-    // 11: public vaults — anonymous read-only via an unguessable, revocable
+  it('is "12"', () => {
+    // 12: public vaults — anonymous read-only via an unguessable, revocable
     //     token (publicStatusSchema, publicEnableResponseSchema) +
-    //     PUBLIC_VAULT_READ_TOOL_NAMES (the viewer-scoped MCP read subset).
+    //     PUBLIC_VAULT_READ_TOOL_NAMES (the viewer-scoped MCP read subset);
+    //     AND Wave TR — per-vault user-definable concept-type registry: concept
+    //     `type` is no longer a strict enum on the wire (validated string,
+    //     registry-resolved, unknown → concept); graph payload gains an optional
+    //     `types` registry; new type-registry schemas + CRUD.
     // 10: onboarding at scale (onboard input gains optional areaList;
     //     status/complete output gain optional coverage report) + delete_concept
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("11");
+    expect(CONTRACTS_VERSION).toBe("12");
   });
 });
 
@@ -310,7 +318,7 @@ describe("product ontology (v3)", () => {
     expect(toolConceptMetaSchema.safeParse({ ...tool, codeAreas: undefined }).success).toBe(true);
   });
 
-  it("upsert_concept input accepts the new types and codeAreas", () => {
+  it("upsert_concept input accepts the built-in types and codeAreas", () => {
     const parsed = upsertConceptInputSchema.safeParse({
       title: "Billing domain",
       body: "…",
@@ -319,8 +327,18 @@ describe("product ontology (v3)", () => {
       relations: { governs: ["invoicing"] },
     });
     expect(parsed.success).toBe(true);
+  });
+
+  it("upsert_concept `type` is a registry-validated string, not a strict enum (Wave TR)", () => {
+    // Wire safety moved from the schema to the vault type registry: any string
+    // is accepted at the boundary; the VaultDO resolves an unknown/removed type
+    // to "concept". A custom registry type must be accepted here.
     expect(
-      upsertConceptInputSchema.safeParse({ title: "x", body: "", type: "banana" }).success,
+      upsertConceptInputSchema.safeParse({ title: "x", body: "", type: "risk-item" }).success,
+    ).toBe(true);
+    // Still enforces that `type` is a STRING when present.
+    expect(
+      upsertConceptInputSchema.safeParse({ title: "x", body: "", type: 42 }).success,
     ).toBe(false);
   });
 });
@@ -466,5 +484,76 @@ describe("cli --json schemas", () => {
       edges: 54,
     });
     expect(parsed.success).toBe(true);
+  });
+});
+
+describe("concept-type registry (Wave TR)", () => {
+  it("seeds exactly the 11 built-ins in canonical order with today's colors", () => {
+    expect(BUILTIN_CONCEPT_TYPES.map((t) => t.key)).toEqual([...CONCEPT_TYPES]);
+    const byKey = Object.fromEntries(BUILTIN_CONCEPT_TYPES.map((t) => [t.key, t]));
+    // Colors mirror graph-data TYPE_COLORS / app.css --node-* tokens.
+    expect(byKey.domain.color).toBe("#60a5fa");
+    expect(byKey.concept.color).toBe("#a78bfa");
+    expect(byKey.glossary.color).toBe("#f472b6");
+  });
+
+  it("weights mirror the signal ranking: domain highest, glossary/concept/task lowest", () => {
+    const w = Object.fromEntries(BUILTIN_CONCEPT_TYPES.map((t) => [t.key, t.weight]));
+    expect(w.domain).toBe(100);
+    expect(w.feature).toBe(80);
+    expect(w.spec).toBe(80);
+    expect(w.constraint).toBe(80);
+    expect(w.story).toBe(60);
+    expect(w.glossary).toBe(40);
+    expect(w.concept).toBe(40);
+    expect(w.task).toBe(40);
+    // Strict tiering: domain > feature-tier > story-tier > leaf-tier.
+    expect(w.domain).toBeGreaterThan(w.feature);
+    expect(w.feature).toBeGreaterThan(w.story);
+    expect(w.story).toBeGreaterThan(w.glossary);
+  });
+
+  it("slugifyTypeKey lowercases + dashes non-alnum + trims edges", () => {
+    expect(slugifyTypeKey("Risk Item!")).toBe("risk-item");
+    expect(slugifyTypeKey("  Spike/POC  ")).toBe("spike-poc");
+    expect(slugifyTypeKey("feature")).toBe("feature");
+  });
+
+  it("entry + create schemas are strict and shaped as documented", () => {
+    const entry = {
+      key: "risk",
+      label: "Risk",
+      color: "#ff0000",
+      weight: 90,
+      order: 11,
+      hidden: false,
+      builtin: false,
+    };
+    expect(conceptTypeEntrySchema.safeParse(entry).success).toBe(true);
+    expect(conceptTypeEntrySchema.safeParse({ ...entry, extra: 1 }).success).toBe(false);
+    expect(
+      conceptTypeCreateRequestSchema.safeParse({ key: "risk", label: "Risk", color: "#f00" }).success,
+    ).toBe(true);
+    expect(conceptTypeCreateRequestSchema.safeParse({ label: "Risk", color: "#f00" }).success).toBe(
+      false,
+    );
+  });
+
+  it("graph payload accepts an optional types registry", () => {
+    const ok = graphResponseSchema.safeParse({
+      nodes: [{ id: "a", title: "A", type: "risk", tags: [], degree: 0 }],
+      edges: [],
+      types: [
+        { key: "risk", label: "Risk", color: "#f00", weight: 90, order: 0, hidden: false, builtin: false },
+      ],
+    });
+    expect(ok.success).toBe(true);
+    // A custom `type` string on a node is allowed (no longer a strict enum).
+    expect(
+      graphResponseSchema.safeParse({
+        nodes: [{ id: "a", title: "A", type: "totally-custom", tags: [], degree: 0 }],
+        edges: [],
+      }).success,
+    ).toBe(true);
   });
 });
