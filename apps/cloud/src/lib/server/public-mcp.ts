@@ -156,6 +156,10 @@ export async function handleSignup(input: SignupInput, deps: SignupDeps): Promis
         name: vaultName,
         createdAt: now,
         onboardedAt: null,
+        // Provisioned vaults start private; public access is opt-in later.
+        publicEnabled: false,
+        publicTokenHash: null,
+        publicCreatedAt: null,
       },
       member: {
         id: crypto.randomUUID(),

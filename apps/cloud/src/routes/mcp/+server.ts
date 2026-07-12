@@ -12,6 +12,10 @@
  *   ever exist with less-than-editor scope. No per-tool role checks here.
  * - Bearer whose provisional owner expired unclaimed → 401 with the
  *   workspace-expired message (Wave G).
+ * - Bearer matching an enabled vault's public_token_hash (public vaults) → an
+ *   ANONYMOUS VIEWER on that vault: the READ tools only (search/get/related/
+ *   context/list/stats — buildPublicVaultMcpServer), NO write/onboard/task/claim
+ *   tools, per-IP rate-limited. Rotated/revoked/disabled token → generic 401.
  * - Authorization header present but invalid/revoked → 401, exactly as before.
  * - NO Authorization header → the PUBLIC MCP server: two tools, `signup`
  *   (anonymous provisional workspaces) and `sign_in` (emails a magic sign-in
@@ -42,9 +46,11 @@ import { createDb, schema } from "$lib/server/db";
 import { createMailer } from "$lib/server/mailer";
 import { guardDepsFromDb, guardMagicLinkRequest } from "$lib/server/magic-link-guard";
 import { magicLinkSender } from "$lib/server/magic-link";
+import { parseBearer } from "$lib/server/api-keys";
 import { resolveApiKey } from "$lib/server/vault-access";
-import { buildMcpServer } from "$lib/server/mcp";
+import { buildMcpServer, buildPublicVaultMcpServer } from "$lib/server/mcp";
 import { buildPublicMcpServer, signupDepsFromDb } from "$lib/server/public-mcp";
+import { recordAndCheckPublicRead, resolvePublicVault } from "$lib/server/public-vault";
 import { resolveRateLimitIp } from "$lib/server/rate-limit";
 import { vaultClient } from "$lib/server/vault-client";
 
@@ -130,6 +136,45 @@ const handleMcp: RequestHandler = async (event) => {
       resolved = null;
     }
     if (!resolved) {
+      // Not a valid `bz_` key. Before 401ing, try the bearer as a PUBLIC-VAULT
+      // token (public vaults): a token that hashes to an enabled vault's
+      // public_token_hash grants an ANONYMOUS VIEWER — the read tools only,
+      // per-IP rate-limited (a public token is not a secret credential).
+      const bearer = parseBearer(event.request.headers.get("authorization"));
+      const publicVault = bearer ? await resolvePublicVault(db, bearer) : null;
+      if (publicVault) {
+        const resolvedIp = resolveRateLimitIp(
+          event.request.headers.get("cf-connecting-ip"),
+          isProductionEnv(platform.env),
+        );
+        if (!resolvedIp.ok) {
+          return new Response(
+            JSON.stringify({ error: "rate limited: missing client IP; retry through the edge" }),
+            { status: 429, headers: { "content-type": "application/json" } },
+          );
+        }
+        const { limited } = await recordAndCheckPublicRead(db, resolvedIp.ip, new Date());
+        if (limited) {
+          return new Response(
+            JSON.stringify({ error: "rate limited: too many public reads from this IP; slow down" }),
+            { status: 429, headers: { "content-type": "application/json" } },
+          );
+        }
+        const publicServer = buildPublicVaultMcpServer(
+          vaultClient(platform.env.VAULT_DO, publicVault.id),
+        );
+        const publicTransport = new StreamableHTTPTransport();
+        await publicServer.connect(publicTransport);
+        const publicApp = new Hono();
+        publicApp.all("*", (c) => publicTransport.handleRequest(c));
+        try {
+          return await publicApp.fetch(event.request);
+        } catch (err) {
+          return apiError(500, err instanceof Error ? err.message : "mcp transport error");
+        }
+      }
+      // Unknown/rotated/revoked token → the same generic 401 as any bad bearer
+      // (no existence leak — a dead public token reads like any invalid key).
       return unauthorized("provide a Bearer bz_ API key");
     }
     const vaultId = resolved.vault.id;

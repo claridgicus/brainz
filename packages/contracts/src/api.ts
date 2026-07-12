@@ -128,6 +128,41 @@ export const inviteAcceptResponseSchema = z.object({
   alreadyMember: z.boolean(),
 });
 
+// ------------------------------------------------------- public access (vaults)
+
+/**
+ * Public read-only access to a vault via an unguessable, revocable token.
+ * An owner enables it (`POST /api/vaults/:id/public`) → a 32-byte token is
+ * minted, SHA-256-hashed at rest, and returned exactly ONCE (plaintext + the
+ * shareable `/public/<token>` URL); it never reappears — only the hash is
+ * stored. The token resolves an ANONYMOUS VIEWER on that vault (read-only web
+ * view + MCP read tools). Rotate mints a new token (old link dies); disable
+ * revokes. NO enumeration — public vaults are unguessable-token only.
+ */
+
+/** GET /api/vaults/:id/public — the current public-access status (owner-only). */
+export const publicStatusSchema = z.object({
+  /** Whether anonymous read is currently enabled for this vault. */
+  enabled: z.boolean(),
+  /** ISO timestamp the current token was created (null when disabled). */
+  createdAt: z.string().nullable(),
+});
+export type PublicStatus = z.infer<typeof publicStatusSchema>;
+
+/**
+ * POST /api/vaults/:id/public (enable) and POST .../public/rotate response.
+ * `token` + `url` are the one-time secret (the `/public/<token>` link) — shown
+ * exactly here and never listed again (only the hash is stored). Mirrors the
+ * invite/api-key "shown once" treatment.
+ */
+export const publicEnableResponseSchema = z.object({
+  enabled: z.literal(true),
+  token: z.string(),
+  url: z.string(),
+  createdAt: z.string(),
+});
+export type PublicEnableResponse = z.infer<typeof publicEnableResponseSchema>;
+
 // ----------------------------------------------------------------- concepts
 
 /** Cloud concept metadata: the MCP compact shape (no filePath — no files in the cloud). */

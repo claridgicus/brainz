@@ -90,8 +90,23 @@ export const vault = sqliteTable(
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     /** Set when the onboard flow completes; mirrored in the vault's DO meta. */
     onboardedAt: integer("onboarded_at", { mode: "timestamp_ms" }),
+    /**
+     * Public read-only access (anonymous VIEWER via an unguessable token).
+     * `publicEnabled` gates it; `publicTokenHash` is the SHA-256 of the 32-byte
+     * token (only the hash is stored — plaintext shown once at enable/rotate);
+     * `publicCreatedAt` stamps when the current token was minted. Disable clears
+     * the hash; rotate swaps it (old link dies). See $lib/server/public-vault.
+     */
+    publicEnabled: integer("public_enabled", { mode: "boolean" }).notNull().default(false),
+    publicTokenHash: text("public_token_hash"),
+    publicCreatedAt: integer("public_created_at", { mode: "timestamp_ms" }),
   },
-  (t) => [uniqueIndex("vault_owner_slug_unique").on(t.ownerId, t.slug)],
+  (t) => [
+    uniqueIndex("vault_owner_slug_unique").on(t.ownerId, t.slug),
+    // Public tokens resolve a vault by hash on the anonymous read path; the
+    // unique index keeps that lookup fast and prevents hash collisions.
+    uniqueIndex("vault_public_token_hash_unique").on(t.publicTokenHash),
+  ],
 );
 
 // -------------------------------------------------- vault membership (Wave M)
@@ -220,6 +235,25 @@ export const signupEvent = sqliteTable(
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   },
   (t) => [index("signup_events_ip_created_at").on(t.ip, t.createdAt)],
+);
+
+// ------------------------------------------------------- public-read events
+
+/**
+ * One row per ANONYMOUS public-vault MCP READ (public vaults), keyed by client
+ * IP — the basis of the per-IP rate limit on the unauthenticated read surface
+ * (a public token is not a secret credential, so its /mcp reads are throttled
+ * like signups). The (ip, created_at) index keeps the window count fast. Same
+ * insert-then-count TOCTOU-safe pattern as signup_events.
+ */
+export const publicReadEvent = sqliteTable(
+  "public_read_events",
+  {
+    id: text("id").primaryKey(),
+    ip: text("ip").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => [index("public_read_events_ip_created_at").on(t.ip, t.createdAt)],
 );
 
 // ---------------------------------------------------------------- api keys

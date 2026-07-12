@@ -10,6 +10,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   MCP_TOOLS,
+  PUBLIC_VAULT_READ_TOOL_NAMES,
   type CloudMcpToolDef,
   type McpToolDef,
   type McpToolInput,
@@ -78,11 +79,23 @@ export interface McpServerHooks {
    * these. Handlers must follow the isError convention (use `guarded`).
    */
   extraTools?: readonly ExtraTool[];
+  /**
+   * Restrict the registered vault tools to this allow-list (public vaults):
+   * a VIEWER-scoped public-token connection gets ONLY the read tools
+   * (PUBLIC_VAULT_READ_TOOL_NAMES). When set, WRITE tools are never registered,
+   * so they cannot be invoked at all — the viewer role is enforced by absence,
+   * not a runtime check. `extraTools` are also skipped (no claim on the public
+   * surface). Omit for the full authenticated (editor-equivalent) surface.
+   */
+  only?: readonly McpToolName[];
 }
 
 /** Build the MCP server for one vault (stateless: one per request). */
 export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+  const server = new McpServer({
+    name: hooks.only ? `${SERVER_NAME}-public-read` : SERVER_NAME,
+    version: SERVER_VERSION,
+  });
 
   const isOnboarded = async (): Promise<boolean> =>
     (await vault.onboarding()).onboardedAt !== null;
@@ -412,7 +425,11 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
       }),
   };
 
+  // Public (viewer) connections register ONLY the read allow-list; the write
+  // tools never enter the server, so viewer scope is enforced by absence.
+  const allow = hooks.only ? new Set<McpToolName>(hooks.only) : null;
   for (const tool of MCP_TOOLS as readonly McpToolDef[]) {
+    if (allow && !allow.has(tool.name)) continue;
     const handler = handlers[tool.name] as (args: Record<string, unknown>) => Promise<ToolResult>;
     server.registerTool(
       tool.name,
@@ -425,8 +442,9 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
     );
   }
 
-  // Cloud-only extras (e.g. the `claim` tool) — never part of MCP_TOOLS.
-  for (const extra of hooks.extraTools ?? []) {
+  // Cloud-only extras (e.g. the `claim` tool) — never part of MCP_TOOLS, and
+  // never exposed to a viewer-scoped public connection.
+  for (const extra of allow ? [] : (hooks.extraTools ?? [])) {
     server.registerTool(
       extra.def.name,
       {
@@ -439,4 +457,15 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
   }
 
   return server;
+}
+
+/**
+ * Build the VIEWER-scoped MCP server for a public-vault token (public vaults):
+ * the READ tools only (PUBLIC_VAULT_READ_TOOL_NAMES) over the vault's DO. No
+ * write tools, no onboard, no task mutations, no claim — they are never
+ * registered, so a public token literally cannot invoke them. Stateless: one
+ * per request, exactly like buildMcpServer.
+ */
+export function buildPublicVaultMcpServer(vault: VaultClient): McpServer {
+  return buildMcpServer(vault, { only: PUBLIC_VAULT_READ_TOOL_NAMES });
 }

@@ -11,6 +11,7 @@ import {
   CLOUD_MCP_TOOLS,
   getMcpTool,
   MCP_TOOL_NAMES,
+  PUBLIC_VAULT_READ_TOOL_NAMES,
   onboardCompleteOutputSchema,
   onboardStatusOutputSchema,
   upsertConceptOutputSchema,
@@ -701,5 +702,68 @@ describe("extraTools hook (cloud-only registrations, e.g. claim)", () => {
     const client = await connect();
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name)).not.toContain("claim");
+  });
+});
+
+describe("public-vault viewer surface (only: PUBLIC_VAULT_READ_TOOL_NAMES)", () => {
+  const WRITE_TOOLS = [
+    "upsert_concept",
+    "delete_concept",
+    "link_concepts",
+    "onboard",
+    "create_task",
+    "take_task",
+    "complete_task",
+    "list_tasks",
+  ];
+
+  it("exposes EXACTLY the read tools — no write/onboard/task/claim tools", async () => {
+    const client = await connect(fakeVault(), {
+      only: PUBLIC_VAULT_READ_TOOL_NAMES,
+      // Even if a claim hook is (mistakenly) supplied, a viewer surface drops it.
+      extraTools: CLOUD_MCP_TOOLS.map((def) => ({
+        def,
+        handler: async () => ok({ status: "sent", expiresAt: "2026-07-11T00:00:00.000Z" }),
+      })),
+    });
+    const { tools } = await client.listTools();
+    const names = tools.map((t) => t.name).sort();
+    expect(names).toEqual([...PUBLIC_VAULT_READ_TOOL_NAMES].sort());
+    for (const w of WRITE_TOOLS) expect(names).not.toContain(w);
+    expect(names).not.toContain("claim");
+  });
+
+  it("read tools still work (search + get_context) over the viewer surface", async () => {
+    const client = await connect(fakeVault(), { only: PUBLIC_VAULT_READ_TOOL_NAMES });
+    const search = await client.callTool({ name: "search_concepts", arguments: { query: "lead" } });
+    expect(search.isError ?? false).toBe(false);
+    const payload = JSON.parse(textBlocks(search)[0]);
+    expect(getMcpTool("search_concepts").outputSchema.safeParse(payload).success).toBe(true);
+
+    const ctx = await client.callTool({ name: "get_context", arguments: { query: "lead" } });
+    expect(ctx.isError ?? false).toBe(false);
+    expect(textBlocks(ctx).length).toBe(2);
+  });
+
+  it("a write tool is not invokable — upsert_concept is not found, and no write lands", async () => {
+    const fake = fakeVault();
+    const client = await connect(fake, { only: PUBLIC_VAULT_READ_TOOL_NAMES });
+    // The tool isn't registered, so the call comes back as an error result
+    // ("Tool upsert_concept not found"); crucially the fake vault records NO
+    // upsert — the write never reached a handler.
+    const res = await client.callTool({
+      name: "upsert_concept",
+      arguments: { title: "x", body: "y" },
+    });
+    expect(res.isError).toBe(true);
+    expect(textBlocks(res).join(" ")).toMatch(/not found/i);
+    expect(fake.state.upserts).toEqual([]);
+  });
+
+  it("PUBLIC_VAULT_READ_TOOL_NAMES is a strict subset of MCP_TOOLS with no write tools", () => {
+    for (const n of PUBLIC_VAULT_READ_TOOL_NAMES) {
+      expect(MCP_TOOL_NAMES).toContain(n);
+      expect(WRITE_TOOLS).not.toContain(n);
+    }
   });
 });

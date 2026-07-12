@@ -19,6 +19,13 @@ export const RATE_WINDOW_MS = 60 * 60 * 1000;
 /** Public-MCP signups: max per IP per rolling hour. */
 export const SIGNUP_RATE_LIMIT = 5;
 
+/**
+ * Anonymous public-vault MCP reads: max per IP per rolling hour. A public token
+ * grants unauthenticated read access, so its /mcp reads are throttled per-IP
+ * (generous — reads are cheap and legitimate share-link traffic is bursty).
+ */
+export const PUBLIC_READ_RATE_LIMIT = 120;
+
 /** Magic-link requests: max per email address per rolling hour. */
 export const MAGIC_LINK_EMAIL_LIMIT = 5;
 
@@ -96,6 +103,15 @@ export function exceedsRateLimitInclusive(countInclusive: number, limit: number)
  */
 export function exceedsSignupRateLimitInclusive(countInclusive: number): boolean {
   return exceedsRateLimitInclusive(countInclusive, SIGNUP_RATE_LIMIT);
+}
+
+/**
+ * Inclusive-count public-read limiter (TOCTOU-safe path, mirrors signup). The
+ * public MCP read path records the attempt BEFORE counting, so `countInclusive`
+ * includes this attempt; trips once it has passed PUBLIC_READ_RATE_LIMIT.
+ */
+export function exceedsPublicReadRateLimitInclusive(countInclusive: number): boolean {
+  return exceedsRateLimitInclusive(countInclusive, PUBLIC_READ_RATE_LIMIT);
 }
 
 /** Slug with a numeric suffix when the base is already taken: my-vault, my-vault-2, … */

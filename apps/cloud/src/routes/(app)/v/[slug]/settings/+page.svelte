@@ -194,6 +194,63 @@
 	const fmtDate = (iso: string) =>
 		new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 
+	// --------------------------------------------------------- public access
+	// Owner-only. `publicEnabled` mirrors the vault's stored flag; the token +
+	// /public/<token> URL are shown EXACTLY once (enable/rotate) — only the hash
+	// is stored, so a live link cannot be re-displayed. Rotate mints a new token
+	// (old link dies); disable revokes.
+	// svelte-ignore state_referenced_locally
+	let publicEnabled = $state<boolean>(data.publicStatus?.enabled ?? false);
+	let publicBusy = $state<null | "enable" | "rotate" | "disable">(null);
+	let publicError = $state<string | null>(null);
+	/** One-time public token + URL, straight from the enable/rotate response. */
+	let freshPublic = $state<{ token: string; url: string } | null>(null);
+
+	async function enablePublic() {
+		publicBusy = "enable";
+		publicError = null;
+		try {
+			const res = await api.enablePublic(vault.id);
+			publicEnabled = true;
+			freshPublic = { token: res.token, url: res.url };
+		} catch (err) {
+			publicError = errMsg(err, "Failed to enable public access.");
+		} finally {
+			publicBusy = null;
+		}
+	}
+
+	async function rotatePublic() {
+		publicBusy = "rotate";
+		publicError = null;
+		try {
+			const res = await api.rotatePublic(vault.id);
+			publicEnabled = true;
+			freshPublic = { token: res.token, url: res.url };
+		} catch (err) {
+			publicError = errMsg(err, "Failed to rotate the public link.");
+		} finally {
+			publicBusy = null;
+		}
+	}
+
+	async function disablePublic() {
+		publicBusy = "disable";
+		publicError = null;
+		try {
+			await api.disablePublic(vault.id);
+			publicEnabled = false;
+			freshPublic = null;
+		} catch (err) {
+			publicError = errMsg(err, "Failed to disable public access.");
+		} finally {
+			publicBusy = null;
+		}
+	}
+
+	const publicMcpCli = (token: string) =>
+		`claude mcp add --transport http brainz-public ${MCP_URL} --header "Authorization: Bearer ${token}"`;
+
 	// --------------------------------------------------------------- mcp docs
 	const MCP_URL = "https://brainz.brownmatter.ai/mcp";
 	const mcpJson = (key: string) => `{
@@ -456,6 +513,58 @@
 	</section>
 	{/if}
 
+	{#if isOwner}
+	<!-- ------------------------------------------------------ public access -->
+	<section class="card">
+		<h2>Public access</h2>
+		<p class="muted">
+			Make this vault readable by anyone with the link — no sign-in, read-only. They get the
+			graph, concept panel, search, and context; never members, keys, invites, or any way to
+			write. Access is an unguessable, revocable token: rotate to replace the link, disable to
+			revoke it. Public vaults are never listed or enumerated.
+		</p>
+
+		{#if publicError}<p class="error-text" role="alert">{publicError}</p>{/if}
+
+		{#if !publicEnabled}
+			<button
+				type="button"
+				class="btn btn-primary"
+				onclick={enablePublic}
+				disabled={publicBusy !== null}
+			>
+				{#if publicBusy === "enable"}<span class="spinner"></span>{/if}
+				Enable public access
+			</button>
+		{:else}
+			<p class="ok-text" role="status">
+				Public read-only access is <strong>on</strong>.
+				{#if data.publicStatus?.createdAt}Link created {fmtDate(data.publicStatus.createdAt)}.{/if}
+			</p>
+			<p class="muted note">
+				The shareable <code>/public/&lt;token&gt;</code> link and its MCP snippet are shown only
+				once, when you enable or rotate — only the token's hash is stored, so a live link can't be
+				re-displayed. Lost it? Rotate to mint a new one.
+			</p>
+			<div class="row">
+				<button type="button" class="btn" onclick={rotatePublic} disabled={publicBusy !== null}>
+					{#if publicBusy === "rotate"}<span class="spinner"></span>{/if}
+					Rotate link
+				</button>
+				<button
+					type="button"
+					class="btn btn-danger"
+					onclick={disablePublic}
+					disabled={publicBusy !== null}
+				>
+					{#if publicBusy === "disable"}<span class="spinner"></span>{/if}
+					Disable
+				</button>
+			</div>
+		{/if}
+	</section>
+	{/if}
+
 	<!-- --------------------------------------------------------- mcp setup -->
 	<section class="card">
 		<h2>Connect your orchestrator (MCP)</h2>
@@ -524,6 +633,29 @@
 			<CopyButton text={freshKey.key} />
 		</div>
 		<button type="button" class="btn" onclick={() => (freshKey = null)}>Done — I copied it</button>
+	</Modal>
+{/if}
+
+<!-- Public link + anonymous MCP snippet: the ONE time they're visible. -->
+{#if freshPublic}
+	<Modal title="Public link ready" onclose={() => (freshPublic = null)}>
+		<p>
+			Anyone with this link can read the vault — no sign-in. Copy it now.
+			<strong>You won't see it again.</strong>
+		</p>
+		<div class="key-row">
+			<code class="key">{freshPublic.url}</code>
+			<CopyButton text={freshPublic.url} />
+		</div>
+		<p class="muted note">Anonymous MCP read access (read-only tools only):</p>
+		<div class="snippet">
+			<div class="snippet-head">
+				<span>Claude Code</span>
+				<CopyButton text={publicMcpCli(freshPublic.token)} />
+			</div>
+			<pre>{publicMcpCli(freshPublic.token)}</pre>
+		</div>
+		<button type="button" class="btn" onclick={() => (freshPublic = null)}>Done — I copied it</button>
 	</Modal>
 {/if}
 

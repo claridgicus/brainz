@@ -52,6 +52,9 @@ import {
   memberListResponseSchema,
   onboardCompleteOutputSchema,
   onboardStatusOutputSchema,
+  publicEnableResponseSchema,
+  publicStatusSchema,
+  PUBLIC_VAULT_READ_TOOL_NAMES,
   relatedResponseSchema,
   searchResponseSchema,
   signInOutputSchema,
@@ -1385,6 +1388,183 @@ async function main() {
       const res = await api(method, probePath, { cookie: false, body });
       step(`anon ${method} ${probePath.replace(vaultId, ":vaultA")} → 401`, res.status === 401, `status ${res.status}`);
     }
+
+    // ================================================================
+    // 16b. PUBLIC VAULTS — anonymous read-only via an unguessable token.
+    //   owner enables → gets a /public/<token> link → anonymous browser sees
+    //   the read-only graph; anonymous MCP with the token can search/get_context
+    //   but NOT write; members/keys/invites are NEVER exposed publicly (probe);
+    //   rotate invalidates the old token; disable 404s it; a random/non-public
+    //   token → 404 (web) / 401 (MCP); per-IP rate limit on anon MCP reads.
+    // vaultId is onboarded with concepts (incl. lead-scoring) by this point.
+    // ================================================================
+
+    // Before enabling, an owner-only status read reports disabled; and a random
+    // token 404s at the web route (non-enumerable) and 401s at MCP.
+    const preStatus = await api("GET", `/api/vaults/${vaultId}/public`);
+    step(
+      "public status pre-enable → { enabled:false }",
+      preStatus.status === 200 &&
+        publicStatusSchema.safeParse(preStatus.json).success &&
+        preStatus.json.enabled === false,
+      JSON.stringify(preStatus.json),
+    );
+    const randomToken = "f".repeat(64);
+    const randomPage = await fetch(`${BASE}/public/${randomToken}`, { headers: { origin: BASE } });
+    step("a random /public/<token> page → 404 (non-enumerable)", randomPage.status === 404, `status ${randomPage.status}`);
+    const randomGraph = await api("GET", `/api/public/${randomToken}/graph`, { cookie: false });
+    step("a random public REST token → 404", randomGraph.status === 404, `status ${randomGraph.status}`);
+
+    // Enable public access (owner-only) → the one-time token + /public/<token> URL.
+    const enablePub = await api("POST", `/api/vaults/${vaultId}/public`);
+    step("owner enables public access → 201 { token, url }", enablePub.status === 201, `status ${enablePub.status}`);
+    assertParse(publicEnableResponseSchema, enablePub.json, "public enable response parses ({enabled,token,url,createdAt})");
+    const pubToken = enablePub.json?.token;
+    step("public token is a 64-hex unguessable string", /^[0-9a-f]{64}$/.test(pubToken ?? ""), (pubToken ?? "").slice(0, 12));
+    step(
+      "public url is /public/<token>",
+      typeof enablePub.json?.url === "string" && enablePub.json.url.endsWith(`/public/${pubToken}`),
+      enablePub.json?.url,
+    );
+
+    // A NON-owner (user B) cannot enable/read/manage public access → 404.
+    const bEnable = await api("POST", `/api/vaults/${vaultId}/public`, { jar: jarB });
+    step("non-member cannot enable public access → 404", bEnable.status === 404, `status ${bEnable.status}`);
+    const bStatus = await api("GET", `/api/vaults/${vaultId}/public`, { jar: jarB });
+    step("non-member cannot read public status → 404", bStatus.status === 404, `status ${bStatus.status}`);
+    // A bearer key is session-only here (like keys/members/invites).
+    const keyEnable = await api("POST", `/api/vaults/${vaultId}/public`, { cookie: false, bearer: bearerA2 });
+    step("bearer key cannot manage public access → 401 (session-only)", keyEnable.status === 401, `status ${keyEnable.status}`);
+
+    // Anonymous web page renders the vault name + a concept (read-only), and
+    // carries the "public read-only" banner + sign-up affordance.
+    const pubPage = await fetch(`${BASE}/public/${pubToken}`, { headers: { origin: BASE } });
+    const pubPageHtml = await pubPage.text();
+    step(
+      "anonymous /public/<token> renders the read-only workspace (vault name + concept + banner)",
+      pubPage.status === 200 &&
+        pubPageHtml.includes("Auth system") &&
+        /public read-only/i.test(pubPageHtml) &&
+        pubPageHtml.includes("read-only"),
+      `status ${pubPage.status}`,
+    );
+
+    // Anonymous public REST reads (no session, no bearer) work.
+    const pubGraph = await api("GET", `/api/public/${pubToken}/graph`, { cookie: false });
+    step("anonymous public graph → 200 and parses", pubGraph.status === 200 && graphResponseSchema.safeParse(pubGraph.json).success, `status ${pubGraph.status}`);
+    const pubStats = await api("GET", `/api/public/${pubToken}/stats`, { cookie: false });
+    step("anonymous public stats → 200 and parses", pubStats.status === 200 && statsResponseSchema.safeParse(pubStats.json).success, `status ${pubStats.status}`);
+    const pubSearch = await api("GET", `/api/public/${pubToken}/search?q=auth`, { cookie: false });
+    step("anonymous public search → 200 and parses", pubSearch.status === 200 && searchResponseSchema.safeParse(pubSearch.json).success, `status ${pubSearch.status}`);
+    const pubConcept = await api("GET", `/api/public/${pubToken}/concepts/auth-system`, { cookie: false });
+    step("anonymous public concept read → 200", pubConcept.status === 200 && pubConcept.json?.title === "Auth system", `status ${pubConcept.status}`);
+    const pubCtx = await api("POST", `/api/public/${pubToken}/context`, { cookie: false, body: { query: "auth" } });
+    step("anonymous public context → 200 and parses", pubCtx.status === 200 && contextResponseSchema.safeParse(pubCtx.json).success, `status ${pubCtx.status}`);
+
+    // TENANCY: the public surface NEVER exposes members/keys/invites or any
+    // write route — those public paths simply do not exist (→ 404). And a public
+    // read must not mutate: there is no public write route at all.
+    for (const p of [
+      `/api/public/${pubToken}/members`,
+      `/api/public/${pubToken}/keys`,
+      `/api/public/${pubToken}/invites`,
+    ]) {
+      const res = await api("GET", p, { cookie: false });
+      step(`public surface has NO ${p.replace(pubToken, "<token>")} → 404`, res.status === 404, `status ${res.status}`);
+    }
+    // A public write attempt on the public concept path is not routed → 404/405.
+    const pubWrite = await api("PUT", `/api/public/${pubToken}/concepts/auth-system`, { cookie: false, body: { title: "hijacked", body: "x" } });
+    step("public concept path has no write verb → not 2xx", pubWrite.status >= 400, `status ${pubWrite.status}`);
+    // The public token must NOT unlock the authenticated /api/vaults/:id surface
+    // (it is not a bz_ key): members/keys as a bearer → 401.
+    const tokenAsBearerMembers = await api("GET", `/api/vaults/${vaultId}/members`, { cookie: false, bearer: pubToken });
+    step("public token as a bearer on /api/vaults/:id/members → 401 (never exposes members)", tokenAsBearerMembers.status === 401, `status ${tokenAsBearerMembers.status}`);
+    const tokenAsBearerKeys = await api("GET", `/api/vaults/${vaultId}/keys`, { cookie: false, bearer: pubToken });
+    step("public token as a bearer on /api/vaults/:id/keys → 401 (never exposes keys)", tokenAsBearerKeys.status === 401, `status ${tokenAsBearerKeys.status}`);
+
+    // Anonymous MCP with the public token: read tools ONLY, no writes.
+    const pubMcpTransport = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${pubToken}` } },
+    });
+    const pubMcp = new Client({ name: "brainz-e2e-public-read", version: "0.0.0" });
+    await pubMcp.connect(pubMcpTransport);
+    step("MCP connect with a public token succeeds (anonymous viewer)", true);
+    const pubMcpTools = (await pubMcp.listTools()).tools.map((t) => t.name).sort();
+    step(
+      "public MCP tools/list is EXACTLY the read tools — no write/onboard/task/claim/signup",
+      JSON.stringify(pubMcpTools) === JSON.stringify([...PUBLIC_VAULT_READ_TOOL_NAMES].sort()) &&
+        !pubMcpTools.some((n) => ["upsert_concept", "delete_concept", "link_concepts", "onboard", "create_task", "take_task", "complete_task", "list_tasks", "claim", "signup", "sign_in"].includes(n)),
+      pubMcpTools.join(", "),
+    );
+    const pubMcpSearch = await pubMcp.callTool({ name: "search_concepts", arguments: { query: "auth" } });
+    step("public MCP search_concepts works", pubMcpSearch.isError !== true);
+    const pubMcpCtx = await pubMcp.callTool({ name: "get_context", arguments: { query: "auth" } });
+    step("public MCP get_context works (two-block bundle)", pubMcpCtx.isError !== true && pubMcpCtx.content.filter((c) => c.type === "text").length === 2);
+    // Write tools are not registered → calling one is an error, and nothing writes.
+    const pubMcpWrite = await pubMcp.callTool({ name: "upsert_concept", arguments: { title: "hijack", body: "x" } });
+    step("public MCP upsert_concept is blocked (tool not found / error)", pubMcpWrite.isError === true, (pubMcpWrite.content?.find?.((c) => c.type === "text")?.text ?? "").slice(0, 60));
+    const pubMcpTake = await pubMcp.callTool({ name: "take_task", arguments: {} });
+    step("public MCP take_task is blocked (tool not found / error)", pubMcpTake.isError === true);
+    await pubMcp.close();
+    // The write attempt landed nothing: the concept count is unchanged for the owner.
+    const afterProbeStats = await api("GET", `/api/vaults/${vaultId}/stats`);
+    step("public write probes changed nothing (owner still reads the vault)", afterProbeStats.status === 200, `status ${afterProbeStats.status}`);
+    const hijackGone = await api("GET", `/api/vaults/${vaultId}/concepts/hijack`);
+    step("no concept was planted by the public write probes → 404", hijackGone.status === 404, `status ${hijackGone.status}`);
+
+    // ROTATE invalidates the old token; the new one works.
+    const rotatePub = await api("POST", `/api/vaults/${vaultId}/public/rotate`);
+    step("owner rotates the public token → 200 { token, url }", rotatePub.status === 200 && publicEnableResponseSchema.safeParse(rotatePub.json).success, `status ${rotatePub.status}`);
+    const rotatedToken = rotatePub.json?.token;
+    step("the rotated token DIFFERS from the original", Boolean(rotatedToken) && rotatedToken !== pubToken);
+    const oldTokenPage = await fetch(`${BASE}/public/${pubToken}`, { headers: { origin: BASE } });
+    step("the OLD public link is dead after rotate → 404", oldTokenPage.status === 404, `status ${oldTokenPage.status}`);
+    const oldTokenGraph = await api("GET", `/api/public/${pubToken}/graph`, { cookie: false });
+    step("the OLD public REST token is dead after rotate → 404", oldTokenGraph.status === 404, `status ${oldTokenGraph.status}`);
+    const oldTokenMcp = await fetch(`${BASE}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${pubToken}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "x", version: "0" } } }),
+    });
+    step("the OLD public token on /mcp is dead after rotate → 401", oldTokenMcp.status === 401, `status ${oldTokenMcp.status}`);
+    const newTokenGraph = await api("GET", `/api/public/${rotatedToken}/graph`, { cookie: false });
+    step("the ROTATED public REST token works → 200", newTokenGraph.status === 200, `status ${newTokenGraph.status}`);
+
+    // DISABLE revokes: the current link 404s everywhere.
+    const disablePub = await api("DELETE", `/api/vaults/${vaultId}/public`);
+    step("owner disables public access → 204", disablePub.status === 204, `status ${disablePub.status}`);
+    const disabledPage = await fetch(`${BASE}/public/${rotatedToken}`, { headers: { origin: BASE } });
+    step("after disable, the public page → 404", disabledPage.status === 404, `status ${disabledPage.status}`);
+    const disabledGraph = await api("GET", `/api/public/${rotatedToken}/graph`, { cookie: false });
+    step("after disable, the public REST token → 404", disabledGraph.status === 404, `status ${disabledGraph.status}`);
+    const disabledMcp = await fetch(`${BASE}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${rotatedToken}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "x", version: "0" } } }),
+    });
+    step("after disable, the public token on /mcp → 401", disabledMcp.status === 401, `status ${disabledMcp.status}`);
+    const disabledStatus = await api("GET", `/api/vaults/${vaultId}/public`);
+    step("status after disable → { enabled:false }", disabledStatus.status === 200 && disabledStatus.json?.enabled === false, JSON.stringify(disabledStatus.json));
+
+    // Per-IP rate limit on anonymous MCP reads: re-enable, then hammer initialize
+    // from ONE IP past the cap and assert a 429 eventually trips. (The cap is
+    // generous — 120/hr — so we send just over it with a dedicated IP.)
+    const reEnable = await api("POST", `/api/vaults/${vaultId}/public`);
+    const rlToken = reEnable.json?.token;
+    const RL_IP = "203.0.113.99";
+    const initBodyPub = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "x", version: "0" } } });
+    let pubRateLimited = false;
+    for (let i = 0; i < 130; i++) {
+      const r = await fetch(`${BASE}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${rlToken}`, "cf-connecting-ip": RL_IP },
+        body: initBodyPub,
+      });
+      if (r.status === 429) { pubRateLimited = true; break; }
+    }
+    step("anonymous public MCP reads are per-IP rate-limited (429 past the cap)", pubRateLimited);
+    // Clean up so §18/§20 see the vault in a plain state.
+    await api("DELETE", `/api/vaults/${vaultId}/public`);
 
     // ================================================================
     // 17. VALIDATION FAILURES — every parse boundary answers 400 with {error}.

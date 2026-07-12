@@ -18,6 +18,8 @@ import {
   taskMoveResponseSchema,
   inviteCreateResponseSchema,
   inviteListResponseSchema,
+  publicEnableResponseSchema,
+  publicStatusSchema,
   vaultListResponseSchema,
   memberListResponseSchema,
   vaultMemberSchema,
@@ -25,6 +27,8 @@ import {
   type ApiConcept,
   type ApiKey,
   type GraphPayload,
+  type PublicEnableResponse,
+  type PublicStatus,
   type TaskMeta,
   type TaskMoveRequest,
   type Vault,
@@ -290,10 +294,67 @@ export function createApi(fetchFn: Fetch) {
     async revokeKey(keyId: string): Promise<void> {
       await expectNoContent(await fetchFn(`/api/keys/${enc(keyId)}`, { method: "DELETE" }));
     },
+
+    // ------------------------------------------------------ public access
+    /** Owner-only: current public-access status for this vault. */
+    getPublicStatus(vaultId: string): Promise<PublicStatus> {
+      return request(publicStatusSchema, `/api/vaults/${enc(vaultId)}/public`);
+    },
+    /** Enable public access — returns the one-time token + /public/<token> URL. */
+    enablePublic(vaultId: string): Promise<PublicEnableResponse> {
+      return request(publicEnableResponseSchema, `/api/vaults/${enc(vaultId)}/public`, {
+        method: "POST",
+      });
+    },
+    /** Rotate the token — old link dies; returns a fresh one-time token + URL. */
+    rotatePublic(vaultId: string): Promise<PublicEnableResponse> {
+      return request(publicEnableResponseSchema, `/api/vaults/${enc(vaultId)}/public/rotate`, {
+        method: "POST",
+      });
+    },
+    /** Disable public access (revoke the token). */
+    async disablePublic(vaultId: string): Promise<void> {
+      await expectNoContent(
+        await fetchFn(`/api/vaults/${enc(vaultId)}/public`, { method: "DELETE" }),
+      );
+    },
   };
 }
 
 export type Api = ReturnType<typeof createApi>;
+
+/**
+ * Read-only client for the ANONYMOUS public-vault surface (public vaults).
+ * Every path is `/api/public/<token>/…` — no session, no bearer, READ tools
+ * only (graph/stats/search/context/concept). There is deliberately NO write,
+ * members, keys, or invites method here: the public surface never exposes them.
+ */
+export function createPublicApi(fetchFn: Fetch, token: string) {
+  const request = createRequest(fetchFn);
+  const enc = encodeURIComponent;
+  const base = `/api/public/${enc(token)}`;
+  return {
+    getConcept(id: string): Promise<ApiConcept> {
+      return request(apiConceptSchema, `${base}/concepts/${enc(id)}`);
+    },
+    graph(): Promise<GraphPayload> {
+      return request(graphResponseSchema, `${base}/graph`);
+    },
+    async search(q: string, limit = 8): Promise<SearchHit[]> {
+      const path = `${base}/search?q=${enc(q)}&limit=${limit}`;
+      return (await request(searchResponseSchema, path)).hits;
+    },
+    async stats(): Promise<VaultStats> {
+      const path = `${base}/stats`;
+      const res = await fetchFn(path);
+      const stats = await parse(res, statsResponseSchema, path);
+      const keywordIndex = res.headers.get("x-brainz-keyword-index") === "like" ? "like" : "fts5";
+      return { ...stats, keywordIndex };
+    },
+  };
+}
+
+export type PublicApi = ReturnType<typeof createPublicApi>;
 
 /** The caller's role on a vault (from GET /api/vaults); defaults to "owner"
  * so a response predating the membership rollout keeps today's behavior. */

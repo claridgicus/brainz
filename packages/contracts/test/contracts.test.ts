@@ -31,13 +31,16 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "10"', () => {
+  it('is "11"', () => {
+    // 11: public vaults — anonymous read-only via an unguessable, revocable
+    //     token (publicStatusSchema, publicEnableResponseSchema) +
+    //     PUBLIC_VAULT_READ_TOOL_NAMES (the viewer-scoped MCP read subset).
     // 10: onboarding at scale (onboard input gains optional areaList;
     //     status/complete output gain optional coverage report) + delete_concept
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("10");
+    expect(CONTRACTS_VERSION).toBe("11");
   });
 });
 

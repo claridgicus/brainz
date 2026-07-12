@@ -755,6 +755,27 @@ export type McpToolOutput<N extends McpToolName = McpToolName> = z.infer<
 
 export const MCP_TOOL_NAMES = MCP_TOOLS.map((t) => t.name) as readonly McpToolName[];
 
+/**
+ * PUBLIC_VAULT_READ_TOOL_NAMES — the READ-ONLY subset of MCP_TOOLS that an
+ * anonymous public-vault token (see api.ts publicEnableResponseSchema) may call
+ * over /mcp. A public token resolves to VIEWER scope: search/read/context only,
+ * NO writes (upsert/delete/link), NO task mutations (create/take/complete_task),
+ * NO onboard, and NONE of the account tools (signup/sign_in/claim). Enforced by
+ * building the public MCP server from exactly this list — write tools are never
+ * registered, so they cannot be invoked. Order-independent (it's a membership
+ * set); keep it in sync with the read tools in MCP_TOOLS.
+ */
+export const PUBLIC_VAULT_READ_TOOL_NAMES = [
+  "search_concepts",
+  "get_concept",
+  "get_related",
+  "get_context",
+  "list_concepts",
+  "vault_stats",
+] as const satisfies readonly McpToolName[];
+
+export type PublicVaultReadToolName = (typeof PUBLIC_VAULT_READ_TOOL_NAMES)[number];
+
 /** Look up a registry entry by name, preserving its concrete schema types. */
 export function getMcpTool<N extends McpToolName>(name: N): Extract<McpTool, { name: N }> {
   const tool = MCP_TOOLS.find((t) => t.name === name);

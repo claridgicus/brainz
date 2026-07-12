@@ -1,0 +1,16 @@
+/** POST /api/public/:token/context {query?, ids?, depth?, tokenBudget?} — anonymous read. */
+import { json } from "@sveltejs/kit";
+import { contextRequestSchema } from "@brainz/contracts";
+import { guarded, HttpError, parseBody, requirePlatform } from "$lib/server/api-util";
+import { requirePublicVault } from "$lib/server/public-read";
+import { vaultClient } from "$lib/server/vault-client";
+
+export const POST = guarded(async (event) => {
+  const vault = await requirePublicVault(event);
+  const input = await parseBody(event, contextRequestSchema);
+  if (!input.query && (!input.ids || input.ids.length === 0)) {
+    throw new HttpError(400, "context requires at least one of `query` or `ids`");
+  }
+  const client = vaultClient(requirePlatform(event).env.VAULT_DO, vault.id);
+  return json(await client.context(input));
+});

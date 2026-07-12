@@ -24,6 +24,7 @@ import {
   MCP_TOOL_NAMES,
   PUBLIC_MCP_TOOLS,
   PUBLIC_MCP_TOOL_NAMES,
+  PUBLIC_VAULT_READ_TOOL_NAMES,
   relatedQuerySchema,
   searchQuerySchema,
   inviteAcceptResponseSchema,
@@ -197,6 +198,34 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOL
       // Round-tripping the parsed value through JSON must be lossless.
       expect(JSON.parse(JSON.stringify(parsed))).toEqual(parsed);
     }
+  });
+
+  it("PUBLIC_VAULT_READ_TOOL_NAMES is a strict READ subset of MCP_TOOLS (public vaults)", () => {
+    // Every viewer-scoped public tool is a real MCP tool …
+    for (const n of PUBLIC_VAULT_READ_TOOL_NAMES) {
+      expect(MCP_TOOL_NAMES).toContain(n);
+    }
+    // … and NONE of the write / task / onboard tools leak into the read set:
+    // a public token must never reach a mutation.
+    const WRITE_OR_MUTATION = [
+      "upsert_concept",
+      "delete_concept",
+      "link_concepts",
+      "onboard",
+      "create_task",
+      "take_task",
+      "complete_task",
+      "list_tasks",
+    ];
+    for (const w of WRITE_OR_MUTATION) {
+      expect(PUBLIC_VAULT_READ_TOOL_NAMES).not.toContain(w);
+    }
+    // …nor the account tools (signup/sign_in/claim).
+    for (const acct of [...PUBLIC_MCP_TOOL_NAMES, ...CLOUD_MCP_TOOL_NAMES]) {
+      expect(PUBLIC_VAULT_READ_TOOL_NAMES as readonly string[]).not.toContain(acct);
+    }
+    // No duplicates.
+    expect(new Set(PUBLIC_VAULT_READ_TOOL_NAMES).size).toBe(PUBLIC_VAULT_READ_TOOL_NAMES.length);
   });
 });
 
