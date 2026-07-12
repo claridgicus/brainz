@@ -14,10 +14,16 @@ import {
   PUBLIC_VAULT_READ_TOOL_NAMES,
   onboardCompleteOutputSchema,
   onboardStatusOutputSchema,
+  syncCompleteOutputSchema,
+  syncStatusOutputSchema,
   upsertConceptOutputSchema,
   vaultStatsOutputSchema,
 } from "@brainz/contracts";
-import { ONBOARDING_NUDGE, ONBOARDING_SUMMARY_ID } from "@brainz/engine";
+import {
+  ONBOARDING_NUDGE,
+  ONBOARDING_SUMMARY_ID,
+  SYNC_STALENESS_NUDGE,
+} from "@brainz/engine";
 import { beforeEach, describe, expect, it } from "vitest";
 import { buildMcpServer, ok, type McpServerHooks } from "./mcp";
 import { VaultDoError, type VaultClient } from "./vault-client";
@@ -40,6 +46,7 @@ interface FakeVault extends VaultClient {
   /** Test seam: onboarded state + upserts + a small task pile + deletes recorded by the fake. */
   state: {
     onboardedAt: string | null;
+    lastSyncedAt: string | null;
     upserts: unknown[];
     tasks: FakeTask[];
     /** Concept ids the fake vault "holds" — deleteConcept removes from here. */
@@ -51,6 +58,7 @@ interface FakeVault extends VaultClient {
 function fakeVault(): FakeVault {
   const state: FakeVault["state"] = {
     onboardedAt: null,
+    lastSyncedAt: null,
     upserts: [],
     concepts: new Set(["lead-scoring", "junk-node"]),
     deletes: [],
@@ -252,6 +260,11 @@ function fakeVault(): FakeVault {
     setOnboardedAt: async (onboardedAt) => {
       state.onboardedAt = onboardedAt;
       return { ok: true, onboardedAt };
+    },
+    syncState: async () => ({ lastSyncedAt: state.lastSyncedAt }),
+    setLastSyncedAt: async (lastSyncedAt) => {
+      state.lastSyncedAt = lastSyncedAt;
+      return { ok: true, lastSyncedAt };
     },
     link: async (args) => ({ ok: true, from: args.from, to: args.to, relation: args.relation ?? "related_to" }),
     destroy: async () => ({ ok: true }),
@@ -675,6 +688,190 @@ describe("onboard tool + nudge", () => {
 
     const status = await client.callTool({ name: "onboard", arguments: { action: "status" } });
     expect(JSON.parse(textBlocks(status)[0]).onboarded).toBe(true);
+  });
+});
+
+describe("sync tool", () => {
+  let vault: FakeVault;
+  let client: Client;
+  let synced: Date | null;
+  // An onboarded, non-stale baseline so sync tests start from a synced vault.
+  const fresh = new Date().toISOString();
+  const stale = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+  beforeEach(async () => {
+    vault = fakeVault();
+    vault.state.onboardedAt = "2026-01-01T00:00:00.000Z";
+    vault.state.lastSyncedAt = fresh;
+    synced = null;
+    client = await connect(vault, { onSynced: async (at) => { synced = at; } });
+  });
+
+  it("start returns the DRIFT playbook (not the onboarding playbook) as one block", async () => {
+    const result = await client.callTool({
+      name: "sync",
+      arguments: { action: "start", productName: "Acme CRM" },
+    });
+    const blocks = textBlocks(result);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toContain("Sync playbook — Acme CRM");
+    expect(blocks[0]).not.toContain("Onboarding playbook");
+    // Teaches diff-since-last-sync → update-stale → index-new.
+    expect(blocks[0]).toContain("Diff the codebase since the last sync");
+    expect(blocks[0]).toContain("Update stale concepts whose code_areas changed");
+    expect(blocks[0]).toContain("Index new / un-mapped work");
+    expect(blocks[0]).toContain('{"action": "complete"');
+  });
+
+  it("start embeds a coverage map from the vault's concepts vs areaList", async () => {
+    const result = await client.callTool({
+      name: "sync",
+      arguments: {
+        action: "start",
+        areaList: ["apps/crm/src", "packages/engine"],
+        changedPaths: ["apps/crm/src/scoring/rank.ts"],
+      },
+    });
+    const text = textBlocks(result)[0];
+    expect(text).toContain("## Coverage map");
+    // fake vault's one concept anchors apps/crm/src/scoring → covered; engine is a gap.
+    expect(text).toContain("**Covered areas:** apps/crm/src");
+    expect(text).toContain("packages/engine");
+    // changedPaths focus the fan-out.
+    expect(text).toContain("apps/crm/src/scoring/rank.ts");
+  });
+
+  it("status reports onboarded, lastSyncedAt, staleness, counts (contract shape)", async () => {
+    const result = await client.callTool({ name: "sync", arguments: { action: "status" } });
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(syncStatusOutputSchema.safeParse(payload).success).toBe(true);
+    expect(payload.onboarded).toBe(true);
+    expect(payload.lastSyncedAt).toBe(fresh);
+    expect(payload.stale).toBe(false);
+    expect(payload.coverage).toBeUndefined();
+  });
+
+  it("status reports stale=true when the last sync is older than the threshold", async () => {
+    vault.state.lastSyncedAt = stale;
+    const result = await client.callTool({ name: "sync", arguments: { action: "status" } });
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(payload.stale).toBe(true);
+    expect(payload.lastSyncedAt).toBe(stale);
+  });
+
+  it("complete requires a summary", async () => {
+    const result = await client.callTool({ name: "sync", arguments: { action: "complete" } });
+    expect(result.isError).toBe(true);
+    expect(textBlocks(result)[0]).toContain("summary");
+  });
+
+  it("complete sets last_synced_at, mirrors to D1, and APPENDS to the summary concept", async () => {
+    // The summary concept already has a body (the initial onboarding summary).
+    vault.getConcept = async (id) =>
+      id === ONBOARDING_SUMMARY_ID
+        ? {
+            concept: {
+              id: ONBOARDING_SUMMARY_ID,
+              title: "Product onboarding summary",
+              type: "spec" as const,
+              status: "active" as const,
+              tags: [],
+              body: "Initial onboarding: indexed 5 domains.",
+              neighbors: [],
+            },
+          }
+        : { concept: null };
+
+    const result = await client.callTool({
+      name: "sync",
+      arguments: { action: "complete", summary: "Re-synced auth after the token refactor." },
+    });
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(syncCompleteOutputSchema.safeParse(payload).success).toBe(true);
+    expect(payload.summaryConceptId).toBe(ONBOARDING_SUMMARY_ID);
+    // last_synced_at advanced + mirrored to D1.
+    expect(vault.state.lastSyncedAt).not.toBe(fresh);
+    expect(payload.lastSyncedAt).toBe(vault.state.lastSyncedAt);
+    expect(synced).toBeInstanceOf(Date);
+    // The upsert APPENDS (running log): prior body preserved + the new note.
+    const upsert = vault.state.upserts.find(
+      (u): u is { id: string; body: string } =>
+        typeof u === "object" && u !== null && (u as { id?: string }).id === ONBOARDING_SUMMARY_ID,
+    );
+    expect(upsert?.body).toContain("Initial onboarding: indexed 5 domains.");
+    expect(upsert?.body).toContain("Re-synced auth after the token refactor.");
+    expect(upsert?.body).toContain("## Sync ");
+  });
+
+  it("complete over an empty vault is rejected", async () => {
+    vault.stats = async () => ({
+      concepts: 0, edges: 0, products: [], tags: [], byType: {},
+      onboarded: true, openTasks: 0, embeddings: "unavailable", keywordIndex: "like",
+    });
+    vault.list = async () => ({ count: 0, concepts: [] });
+    const result = await client.callTool({
+      name: "sync",
+      arguments: { action: "complete", summary: "nothing" },
+    });
+    expect(result.isError).toBe(true);
+    expect(textBlocks(result)[0]).toContain("no concepts");
+    expect(vault.state.lastSyncedAt).toBe(fresh);
+  });
+
+  it("complete with THIN coverage is rejected (drift left gaps)", async () => {
+    const result = await client.callTool({
+      name: "sync",
+      arguments: {
+        action: "complete",
+        summary: "only scoring",
+        areaList: ["apps/crm/src", "packages/engine", "packages/core", "apps/api"],
+      },
+    });
+    expect(result.isError).toBe(true);
+    expect(textBlocks(result)[0]).toContain("sync looks incomplete");
+    expect(vault.state.lastSyncedAt).toBe(fresh);
+    expect(synced).toBeNull();
+  });
+});
+
+describe("staleness nudge (composes with the onboarding nudge)", () => {
+  const stale = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const fresh = new Date().toISOString();
+
+  it("un-onboarded shows the ONBOARDING nudge, not the sync nudge (precedence)", async () => {
+    const vault = fakeVault();
+    // Not onboarded; even a stale-looking lastSyncedAt must not double-nudge.
+    vault.state.onboardedAt = null;
+    vault.state.lastSyncedAt = stale;
+    const client = await connect(vault);
+    const search = await client.callTool({ name: "search_concepts", arguments: { query: "x" } });
+    expect(JSON.parse(textBlocks(search)[0]).notice).toBe(ONBOARDING_NUDGE);
+    const ctx = await client.callTool({ name: "get_context", arguments: { query: "x" } });
+    expect(textBlocks(ctx)[0].startsWith(ONBOARDING_NUDGE)).toBe(true);
+    // Never both.
+    expect(textBlocks(ctx)[0]).not.toContain(SYNC_STALENESS_NUDGE);
+  });
+
+  it("onboarded + stale shows the SYNC nudge on search and get_context", async () => {
+    const vault = fakeVault();
+    vault.state.onboardedAt = "2026-01-01T00:00:00.000Z";
+    vault.state.lastSyncedAt = stale;
+    const client = await connect(vault);
+    const search = await client.callTool({ name: "search_concepts", arguments: { query: "x" } });
+    expect(JSON.parse(textBlocks(search)[0]).notice).toBe(SYNC_STALENESS_NUDGE);
+    const ctx = await client.callTool({ name: "get_context", arguments: { query: "x" } });
+    expect(textBlocks(ctx)[0].startsWith(SYNC_STALENESS_NUDGE)).toBe(true);
+    // Not the onboarding nudge — that's cleared.
+    expect(textBlocks(ctx)[0]).not.toContain(ONBOARDING_NUDGE);
+  });
+
+  it("onboarded + freshly synced shows NO nudge (clears)", async () => {
+    const vault = fakeVault();
+    vault.state.onboardedAt = "2026-01-01T00:00:00.000Z";
+    vault.state.lastSyncedAt = fresh;
+    const client = await connect(vault);
+    const search = await client.callTool({ name: "search_concepts", arguments: { query: "x" } });
+    expect(JSON.parse(textBlocks(search)[0]).notice).toBeUndefined();
   });
 });
 

@@ -7,7 +7,7 @@ import type {
   CliShowNeighbor,
 } from "@brainz/contracts";
 import type { Concept, ConceptType } from "@brainz/core";
-import { onboardingPlaybook, slugify, Vault } from "@brainz/core";
+import { isSyncStale, onboardingPlaybook, slugify, syncPlaybook, Vault } from "@brainz/core";
 import { Command, CommanderError, InvalidArgumentError, Option } from "commander";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
@@ -629,6 +629,105 @@ export function buildProgram(ctx: Ctx): Command {
           });
           if (g.json) {
             printJson(ctx, { onboarded: false, playbook });
+            return;
+          }
+          ctx.out(playbook.endsWith("\n") ? playbook : `${playbook}\n`);
+        });
+      },
+    );
+
+  // ---- sync --------------------------------------------------------------
+  withGlobals(
+    program
+      .command("sync")
+      .description(
+        "print the sync (re-onboard) playbook to re-index drift since the last sync; " +
+          "--status reports sync state + staleness, --complete records the sync",
+      ),
+  )
+    .option("--status", "report onboarded state, last sync time, and staleness")
+    .addOption(
+      new Option("--complete", "record the sync (requires --summary)").conflicts("status"),
+    )
+    .option("--summary <text>", "with --complete: what changed, what you updated/indexed")
+    .option("--product-name <name>", "product name, echoed into the playbook")
+    .action(
+      async (
+        opts: {
+          status?: boolean;
+          complete?: boolean;
+          summary?: string;
+          productName?: string;
+        },
+        cmd: Command,
+      ) => {
+        const g = getGlobals(cmd);
+        await withVault(g.vaultDir, async (vault) => {
+          if (opts.complete) {
+            if (!opts.summary?.trim()) {
+              throw new CliError("--complete requires --summary \"<what changed>\"");
+            }
+            const stats = vault.stats();
+            if (stats.concepts === 0) {
+              throw new CliError(
+                "cannot complete sync: the vault has no concepts — onboard the product first",
+              );
+            }
+            const conceptsLackingCodeAreas = vault
+              .listConcepts()
+              .filter((c) => !c.codeAreas || c.codeAreas.length === 0).length;
+            const saved = await vault.completeSync(opts.summary);
+            if (g.json) {
+              printJson(ctx, {
+                ok: true,
+                lastSyncedAt: vault.lastSyncedAt,
+                summaryConceptId: saved.id,
+                conceptCount: stats.concepts,
+                conceptsLackingCodeAreas,
+                byType: stats.byType,
+              });
+              return;
+            }
+            ctx.out(
+              `${pc.green("✓")} sync recorded — appended to ${pc.cyan(saved.id)} ` +
+                `(last synced ${vault.lastSyncedAt})\n`,
+            );
+            return;
+          }
+          if (opts.status) {
+            const stats = vault.stats();
+            const baseline = vault.lastSyncedAt ?? vault.onboardedAt;
+            const stale = isSyncStale(stats.onboarded, baseline);
+            const status = {
+              onboarded: stats.onboarded,
+              lastSyncedAt: baseline,
+              stale,
+              conceptCount: stats.concepts,
+              byType: stats.byType,
+            };
+            if (g.json) {
+              printJson(ctx, status);
+              return;
+            }
+            ctx.out(
+              status.onboarded
+                ? `${pc.green("✓")} onboarded — last synced ${status.lastSyncedAt ?? "never"}\n`
+                : `${pc.yellow("○")} not onboarded — run \`brainz onboard\` first\n`,
+            );
+            if (status.stale) {
+              ctx.out(pc.yellow("  stale — run `brainz sync` to re-index drift\n"));
+            }
+            return;
+          }
+          // Default: print the drift playbook.
+          const playbook = syncPlaybook({
+            productName: opts.productName,
+            onboarded: vault.onboardedAt !== null,
+            lastSyncedAt: vault.lastSyncedAt ?? vault.onboardedAt,
+            concepts: vault.listConcepts(),
+          });
+          if (g.json) {
+            printJson(ctx, { onboarded: vault.onboardedAt !== null, playbook });
             return;
           }
           ctx.out(playbook.endsWith("\n") ? playbook : `${playbook}\n`);

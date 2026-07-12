@@ -56,7 +56,7 @@ import {
   tokenize,
 } from "./do-helpers";
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
 
 /**
@@ -212,6 +212,15 @@ export class VaultDO {
         // v4 → v5: per-vault concept-type registry (Wave TR). Additive table,
         // BACKFILLED with the 11 built-ins so existing vaults render identically.
         this.#createConceptTypeTable();
+      }
+      if (version < 6) {
+        // v5 → v6: sync / re-onboard ships `last_synced_at` — a nullable meta
+        // KV entry (like `onboarded_at`), not a column. Nothing to ALTER: absent
+        // → null (never synced) is the correct default for a pre-sync vault, so
+        // a vault onboarded before this migration reads as "never synced" until
+        // its next sync (or is stamped at onboard-complete going forward). This
+        // gated branch exists to record the version bump; the `meta` table
+        // already holds the key with no DDL.
       }
     }
     // Idempotent seed: if the registry table exists but is empty (fresh vault or
@@ -520,6 +529,10 @@ export class VaultDO {
           return json(this.onboarding());
         case "setOnboardedAt":
           return json(this.setOnboardedAt(String(args.onboardedAt ?? "")));
+        case "syncState":
+          return json(this.syncState());
+        case "setLastSyncedAt":
+          return json(this.setLastSyncedAt(String(args.lastSyncedAt ?? "")));
         case "link":
           return json(await this.link(args as { from: string; to: string; relation?: string }));
         case "destroy":
@@ -1253,6 +1266,23 @@ export class VaultDO {
     if (!onboardedAt) throw new Error("setOnboardedAt requires an ISO timestamp");
     this.#metaSet("onboarded_at", onboardedAt);
     return { ok: true, onboardedAt };
+  }
+
+  // --------------------------------------------------------------------- sync
+
+  /** Last sync point (ISO), mirrored to the D1 control plane. Null → never synced. */
+  syncState(): { lastSyncedAt: string | null } {
+    return { lastSyncedAt: this.#metaGet("last_synced_at") };
+  }
+
+  /**
+   * Record a sync point (ISO timestamp) in DO meta. Set at onboard-complete
+   * (the initial sync baseline) and again on every `sync {complete}`.
+   */
+  setLastSyncedAt(lastSyncedAt: string): { ok: true; lastSyncedAt: string } {
+    if (!lastSyncedAt) throw new Error("setLastSyncedAt requires an ISO timestamp");
+    this.#metaSet("last_synced_at", lastSyncedAt);
+    return { ok: true, lastSyncedAt };
   }
 
   stats(): {

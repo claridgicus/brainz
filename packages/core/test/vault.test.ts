@@ -644,7 +644,47 @@ describe("onboarding state", () => {
     expect(saved.body).toContain("Indexed 3 concepts");
     expect(vault.onboardedAt).not.toBeNull();
     expect(vault.stats().onboarded).toBe(true);
+    // Onboarding IS the initial sync point.
+    expect(vault.lastSyncedAt).toBe(vault.onboardedAt);
     await expect(vault.completeOnboarding("   ")).rejects.toThrow(/summary/);
+  });
+});
+
+describe("sync state", () => {
+  it("persists lastSyncedAt in brainz.config.json and reloads it", async () => {
+    const vault = await makeVault(GRAPH);
+    expect(vault.lastSyncedAt).toBeNull();
+
+    await vault.setLastSyncedAt("2026-07-10T00:00:00.000Z");
+    expect(vault.lastSyncedAt).toBe("2026-07-10T00:00:00.000Z");
+
+    const config = JSON.parse(
+      await readFile(path.join(vault.dir, "brainz.config.json"), "utf8"),
+    );
+    expect(config.lastSyncedAt).toBe("2026-07-10T00:00:00.000Z");
+
+    const reopened = await Vault.open(vault.dir);
+    cleanups.push(async () => reopened.close());
+    expect(reopened.lastSyncedAt).toBe("2026-07-10T00:00:00.000Z");
+    await reopened.setLastSyncedAt(null);
+    expect(reopened.lastSyncedAt).toBeNull();
+  });
+
+  it("completeSync APPENDS to the summary concept (running log) and stamps lastSyncedAt", async () => {
+    const vault = await makeVault(GRAPH);
+    await vault.completeOnboarding("Initial: indexed the product.");
+    const firstSync = vault.lastSyncedAt;
+
+    expect(firstSync).not.toBeNull();
+    const saved = await vault.completeSync("Re-synced auth after the refactor.");
+    expect(saved.id).toBe("product-onboarding-summary");
+    // Both the prior body and the new note survive (never overwrite).
+    expect(saved.body).toContain("Initial: indexed the product.");
+    expect(saved.body).toContain("Re-synced auth after the refactor.");
+    expect(saved.body).toContain("## Sync ");
+    // last_synced_at is (re)stamped by the sync.
+    expect(vault.lastSyncedAt).not.toBeNull();
+    await expect(vault.completeSync("   ")).rejects.toThrow(/summary/);
   });
 });
 

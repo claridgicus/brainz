@@ -91,6 +91,8 @@ export interface VaultClient {
   stats(): Promise<VaultStatsResult>;
   onboarding(): Promise<{ onboardedAt: string | null }>;
   setOnboardedAt(onboardedAt: string): Promise<{ ok: true; onboardedAt: string }>;
+  syncState(): Promise<{ lastSyncedAt: string | null }>;
+  setLastSyncedAt(lastSyncedAt: string): Promise<{ ok: true; lastSyncedAt: string }>;
   link(args: { from: string; to: string; relation?: string }): Promise<{
     ok: true;
     from: string;
@@ -135,6 +137,8 @@ export function vaultClient(ns: DurableObjectNamespace, vaultId: string): VaultC
     stats: () => call("stats"),
     onboarding: () => call("onboarding"),
     setOnboardedAt: (onboardedAt) => call("setOnboardedAt", { onboardedAt }),
+    syncState: () => call("syncState"),
+    setLastSyncedAt: (lastSyncedAt) => call("setLastSyncedAt", { lastSyncedAt }),
     link: (args) => call("link", args),
     destroy: () => call("destroy"),
   };

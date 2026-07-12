@@ -449,6 +449,59 @@ describe("brainz onboard", () => {
   });
 });
 
+describe("brainz sync", () => {
+  it("prints the DRIFT playbook (default), not the onboarding playbook", async () => {
+    const dir = await copyDemoVault();
+    const res = await run(["sync", "--vault", dir, "--product-name", "Acme CRM"]);
+    expect(res.code).toBe(0);
+    expect(res.out).toContain("Sync playbook — Acme CRM");
+    expect(res.out).not.toContain("Onboarding playbook");
+    expect(res.out).toContain("Diff the codebase since the last sync");
+    expect(res.out).toContain("Update stale concepts whose code_areas changed");
+    expect(res.out).toContain("Index new / un-mapped work");
+
+    const json = await run(["sync", "--vault", dir, "--json"]);
+    const parsed = JSON.parse(json.out);
+    expect(parsed.playbook).toContain("# Sync playbook");
+  });
+
+  it("--status reports sync state; --complete records last_synced_at and appends the log", async () => {
+    const dir = await copyDemoVault();
+    // Onboard first (the initial sync point) so sync makes sense.
+    await run([
+      "onboard", "--complete", "--summary", "Initial index.", "--vault", dir, "--json",
+    ]);
+
+    const before = await run(["sync", "--status", "--vault", dir, "--json"]);
+    const status = JSON.parse(before.out);
+    expect(status.onboarded).toBe(true);
+    expect(typeof status.lastSyncedAt).toBe("string");
+    expect(status.stale).toBe(false);
+
+    const missingSummary = await run(["sync", "--complete", "--vault", dir]);
+    expect(missingSummary.code).toBe(1);
+    expect(missingSummary.err).toContain("--summary");
+
+    const complete = await run([
+      "sync", "--complete", "--summary", "Re-synced billing after the refactor.", "--vault", dir, "--json",
+    ]);
+    expect(complete.code).toBe(0);
+    expect(JSON.parse(complete.out)).toMatchObject({
+      ok: true,
+      summaryConceptId: "product-onboarding-summary",
+    });
+
+    const config = JSON.parse(await readFile(path.join(dir, "brainz.config.json"), "utf8"));
+    expect(typeof config.lastSyncedAt).toBe("string");
+
+    // The summary concept is a RUNNING log: both notes survive.
+    const summary = await run(["show", "product-onboarding-summary", "--vault", dir, "--json"]);
+    const concept = JSON.parse(summary.out);
+    expect(concept.body).toContain("Initial index.");
+    expect(concept.body).toContain("Re-synced billing after the refactor.");
+  });
+});
+
 describe("mcp/web runtime resolution", () => {
   it("resolvePackageDir returns null for a package that is not installed", () => {
     expect(resolvePackageDir("@brainz/definitely-not-a-real-package")).toBeNull();

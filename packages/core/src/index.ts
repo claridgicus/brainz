@@ -21,5 +21,15 @@ export {
   onboardingPlaybook,
   computeCoverage,
   slugify,
+  SYNC_STALENESS_DAYS,
+  SYNC_STALENESS_MS,
+  SYNC_STALENESS_NUDGE,
+  isSyncStale,
+  syncPlaybook,
 } from "@brainz/engine";
-export type { OnboardingPlaybookOptions, Coverage, CoverageConcept } from "@brainz/engine";
+export type {
+  OnboardingPlaybookOptions,
+  Coverage,
+  CoverageConcept,
+  SyncPlaybookOptions,
+} from "@brainz/engine";

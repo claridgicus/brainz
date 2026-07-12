@@ -4,7 +4,7 @@
 
 	const title = "Docs — Get started with Brainz";
 	const description =
-		"Wire Brainz into your agents in minutes: hosted remote MCP at brainz.brownmatter.ai or the local-first CLI over stdio. All fourteen MCP tools, documented.";
+		"Wire Brainz into your agents in minutes: hosted remote MCP at brainz.brownmatter.ai or the local-first CLI over stdio. All fifteen MCP tools, documented.";
 
 	const remoteMcpSnippet = `{
   "mcpServers": {
@@ -163,6 +163,19 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 				"get_context results carry a reminder to run it.",
 		},
 		{
+			name: "sync",
+			title: "Sync this vault to the current code",
+			description:
+				"Re-onboard: keep the knowledge graph true to the artifact as code changes. Onboarding is one-shot; " +
+				"sync is the supported path to re-index drift. Call {action: \"start\"} for the sync playbook — a drift " +
+				"playbook (not the full onboarding one): diff the codebase since last_synced_at (you run git and pass " +
+				"back changedPaths + areaList), fan out over the CHANGED areas, update stale concepts in place, index " +
+				"new/un-mapped work, and report coverage gaps. {action: \"complete\", summary, areaList} stamps " +
+				"last_synced_at and appends your summary to the product-onboarding-summary concept (a running sync log). " +
+				"{action: \"status\"} reports last sync time and staleness. Past ~14 days without a sync, get_context and " +
+				"search results carry a staleness reminder to run it.",
+		},
+		{
 			name: "list_tasks",
 			title: "List tasks",
 			description:
@@ -256,7 +269,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 	<p>
 		An orchestrator doesn't need a pre-made account. Point it at <code>{MCP_URL}</code>
 		<em>without</em> an <code>Authorization</code> header and it gets a public MCP server exposing
-		two tools — <code>signup</code> and <code>sign_in</code> (the fourteen vault tools stay behind
+		two tools — <code>signup</code> and <code>sign_in</code> (the fifteen vault tools stay behind
 		authentication):
 	</p>
 	<pre><code>{agentSignupSnippet}</code></pre>
@@ -330,7 +343,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		isn't configured or available, it degrades gracefully to keyword-only.
 	</p>
 
-	<h2 id="tools">The fourteen MCP tools</h2>
+	<h2 id="tools">The fifteen MCP tools</h2>
 	<p>
 		These names and descriptions are the exact text your orchestrator sees — lifted from the tool
 		registry that both the hosted and local servers register from, so they never drift.

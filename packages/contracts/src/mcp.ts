@@ -171,6 +171,36 @@ export const onboardInputSchema = z.object({
     ),
 });
 
+export const syncInputSchema = z.object({
+  action: z
+    .enum(["start", "complete", "status"])
+    .describe(
+      '"start" returns the sync (re-onboard) playbook — a DRIFT playbook scoped to what changed since the last sync (NOT the full onboarding playbook). "complete" records last_synced_at and appends the summary to the running sync log (requires `summary`). "status" reports onboarded state, last sync time, concept counts, staleness, and (with areaList) coverage.',
+    ),
+  productName: z
+    .string()
+    .optional()
+    .describe("With \"start\": the product's name, echoed into the playbook heading."),
+  summary: z
+    .string()
+    .optional()
+    .describe(
+      'Required with "complete": 2–5 sentences on what changed, what you updated, and what you indexed — APPENDED to the product-onboarding-summary concept as a running sync log (never overwritten).',
+    ),
+  areaList: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'With "start", "status", or "complete": the repo\'s top-level source areas from your own repo walk (Brainz can\'t read the repo). Used to compute the coverage map (covered vs uncovered areas) — "complete" is REJECTED if too many areas are still uncovered.',
+    ),
+  changedPaths: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'With "start": paths you found CHANGED since last_synced_at (from your own git diff/log). The playbook focuses the fan-out on the areas these fall under.',
+    ),
+});
+
 // ------------------------------------------------------------- task tool i/o
 
 export const listTasksInputSchema = z.object({
@@ -376,6 +406,49 @@ export const onboardOutputSchema = z.union([
   onboardStatusOutputSchema,
 ]);
 
+/**
+ * SYNC OUTPUT CONVENTION — `sync {action: "start"}` responds with ONE markdown
+ * text block: the sync (drift) playbook itself (read it, don't parse it), same
+ * as onboard start. "status" and "complete" respond with one JSON text block
+ * that parses with the schemas below. Sync reuses the shared coverageSchema.
+ */
+export const SYNC_START_CONTENT = "markdown-playbook" as const;
+
+export const syncStatusOutputSchema = z
+  .object({
+    onboarded: z.boolean(),
+    /** ISO timestamp of the last sync (or initial onboarding), null if never. */
+    lastSyncedAt: z.string().nullable(),
+    /** True when onboarded and last sync is older than the staleness threshold. */
+    stale: z.boolean(),
+    conceptCount: z.number().int(),
+    byType: z.record(z.string(), z.number()),
+    // Present only when the caller supplied `areaList`: covered vs uncovered
+    // source areas + coveragePct — drift measured with the onboarding machinery.
+    coverage: coverageSchema.optional(),
+  })
+  .strict();
+
+export const syncCompleteOutputSchema = z
+  .object({
+    ok: z.literal(true),
+    /** ISO timestamp stamped as the new drift baseline. */
+    lastSyncedAt: z.string(),
+    /** The summary concept the sync note was appended to (running sync log). */
+    summaryConceptId: z.string(),
+    conceptCount: z.number().int(),
+    conceptsLackingCodeAreas: z.number().int(),
+    byType: z.record(z.string(), z.number()),
+    // Present only when the caller supplied `areaList`: the coverage the sync
+    // was sealed at (having passed the thin-coverage gate).
+    coverage: coverageSchema.optional(),
+    // Present only when NO `areaList` was supplied: a note coverage wasn't judged.
+    coverageNote: z.string().optional(),
+  })
+  .strict();
+
+export const syncOutputSchema = z.union([syncCompleteOutputSchema, syncStatusOutputSchema]);
+
 // ----------------------------------------------------------- task tool output
 
 /** A task concept as the task tools emit it (compact meta with task fields). */
@@ -551,6 +624,24 @@ export const MCP_TOOLS = [
       "get_context results carry a reminder to run it.",
     inputSchema: onboardInputSchema,
     outputSchema: onboardOutputSchema,
+  },
+  {
+    name: "sync",
+    title: "Sync this vault to the current code",
+    description:
+      "Re-onboard: keep the knowledge graph TRUE to the artifact as code changes. Onboarding is one-shot; " +
+      "`sync` is the supported path to re-index drift. Call {action: \"start\"} to receive the sync playbook — a " +
+      "DRIFT playbook (NOT the full onboarding one): it embeds a coverage map over your concepts' code_areas " +
+      "and instructs you to (a) diff the codebase since last_synced_at with git (you run git — Brainz can't " +
+      "read the repo — and pass back changedPaths + areaList), (b) fan out over the CHANGED areas only, (c) " +
+      "UPDATE stale concepts whose code_areas changed (in place, don't duplicate), (d) INDEX new/un-mapped work " +
+      "as new concepts and file tasks for incomplete work, (e) report coverage gaps. {action: \"status\", " +
+      "areaList} reports onboarded state, last sync time, staleness, concept counts, and coverage. When the " +
+      "changed areas are re-indexed call {action: \"complete\", summary, areaList} — it stamps last_synced_at " +
+      "and APPENDS your summary to the product-onboarding-summary concept (a running sync log). Past ~14 days " +
+      "without a sync, get_context and search results carry a staleness reminder to run it.",
+    inputSchema: syncInputSchema,
+    outputSchema: syncOutputSchema,
   },
   {
     name: "list_tasks",

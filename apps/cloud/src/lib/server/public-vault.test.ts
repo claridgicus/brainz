@@ -23,6 +23,7 @@ function vaultRow(over: Partial<VaultRow> = {}): VaultRow {
     name: "Acme",
     createdAt: new Date("2026-07-10T00:00:00.000Z"),
     onboardedAt: null,
+    lastSyncedAt: null,
     publicEnabled: false,
     publicTokenHash: null,
     publicCreatedAt: null,

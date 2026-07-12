@@ -91,6 +91,13 @@ export const vault = sqliteTable(
     /** Set when the onboard flow completes; mirrored in the vault's DO meta. */
     onboardedAt: integer("onboarded_at", { mode: "timestamp_ms" }),
     /**
+     * Last sync point — set at onboard-complete (the initial baseline) and on
+     * every `sync {complete}`; mirrored in the vault's DO meta (last_synced_at).
+     * The DO meta is the tool-facing source of truth; this column is the D1
+     * control-plane mirror (like onboarded_at). Null → never synced.
+     */
+    lastSyncedAt: integer("last_synced_at", { mode: "timestamp_ms" }),
+    /**
      * Public read-only access (anonymous VIEWER via an unguessable token).
      * `publicEnabled` gates it; `publicTokenHash` is the SHA-256 of the 32-byte
      * token (only the hash is stored — plaintext shown once at enable/rotate);

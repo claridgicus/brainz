@@ -33,6 +33,7 @@
         "list_concepts",
         "vault_stats",
         "onboard",
+        "sync",
         "list_tasks",
         "take_task",
         "complete_task",

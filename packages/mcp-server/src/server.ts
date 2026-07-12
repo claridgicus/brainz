@@ -11,8 +11,11 @@ import {
 } from "@brainz/contracts";
 import {
   ONBOARDING_NUDGE,
+  SYNC_STALENESS_NUDGE,
   computeCoverage,
+  isSyncStale,
   onboardingPlaybook,
+  syncPlaybook,
   type ConceptMeta,
   type Vault,
 } from "@brainz/core";
@@ -109,13 +112,27 @@ export function createServer(vault: Vault): McpServer {
 
   // ------------------------------------------------------------ tool handlers
 
+  /**
+   * The one-line nudge to prefix on search/context results, or null for none.
+   * Onboarding takes precedence; an onboarded-but-stale vault (last sync older
+   * than the threshold) gets the sync nudge instead. The two never stack.
+   */
+  const nudgeNotice = (): string | null => {
+    if (vault.onboardedAt === null) return ONBOARDING_NUDGE;
+    // Fall back to onboardedAt when last_synced_at was never set (onboarded
+    // before sync shipped) so staleness measures from a real point.
+    if (isSyncStale(true, vault.lastSyncedAt ?? vault.onboardedAt)) return SYNC_STALENESS_NUDGE;
+    return null;
+  };
+
   const handlers: ToolHandlers = {
     search_concepts: async ({ query, mode, product, tags, type, limit }) =>
       guarded(async () => {
         const hits = await vault.search({ query, mode, product, tags, type, limit });
+        const notice = nudgeNotice();
         return ok({
-          // Nudge, not a wall: un-onboarded vaults carry the onboarding notice.
-          ...(vault.onboardedAt === null ? { notice: ONBOARDING_NUDGE } : {}),
+          // Nudge, not a wall: un-onboarded → onboarding nudge; stale → sync nudge.
+          ...(notice ? { notice } : {}),
           hits: hits.map((h) => ({
             id: h.concept.id,
             title: h.concept.title,
@@ -178,11 +195,11 @@ export function createServer(vault: Vault): McpServer {
         const bundle = await vault.assembleContext({ query, ids, product, depth, tokenBudget });
         // Two-block convention (see GET_CONTEXT_CONTENT_BLOCKS in @brainz/contracts):
         // markdown briefing first, then the JSON footer that matches the outputSchema.
-        // Un-onboarded vaults get the one-line onboarding nudge atop the markdown.
+        // Un-onboarded vaults get the onboarding nudge; onboarded-but-stale vaults
+        // get the sync nudge (never both) atop the markdown.
+        const notice = nudgeNotice();
         const markdown =
-          vault.onboardedAt === null && bundle.markdown
-            ? `${ONBOARDING_NUDGE}\n\n${bundle.markdown}`
-            : bundle.markdown;
+          notice && bundle.markdown ? `${notice}\n\n${bundle.markdown}` : bundle.markdown;
         const footer = JSON.stringify({
           included: bundle.included.map((c) => c.id),
           truncated: bundle.truncated,
@@ -355,6 +372,101 @@ export function createServer(vault: Vault): McpServer {
         }
         return ok({
           onboarded: stats.onboarded,
+          conceptCount: stats.concepts,
+          byType: stats.byType,
+        });
+      }),
+
+    sync: async ({ action, productName, summary, areaList, changedPaths }) =>
+      guarded(async () => {
+        if (action === "start") {
+          // Drift playbook (diff since last sync → update stale → index new),
+          // scoped to change — NOT the full onboard playbook.
+          const playbook = syncPlaybook({
+            productName,
+            onboarded: vault.onboardedAt !== null,
+            lastSyncedAt: vault.lastSyncedAt ?? vault.onboardedAt,
+            areaList,
+            concepts: vault.listConcepts(),
+            changedPaths,
+          });
+          return { content: [{ type: "text", text: playbook }] };
+        }
+        if (action === "complete") {
+          if (!summary?.trim()) {
+            return fail('sync {action: "complete"} requires a non-empty `summary`');
+          }
+          const stats = vault.stats();
+          if (stats.concepts === 0) {
+            return fail(
+              "cannot complete sync: the vault has no concepts — onboard the product first",
+            );
+          }
+          const concepts = vault.listConcepts();
+          const conceptsLackingCodeAreas = concepts.filter(
+            (c) => !c.codeAreas || c.codeAreas.length === 0,
+          ).length;
+          // Coverage-gate the seal exactly like onboard complete.
+          let coverage: ReturnType<typeof computeCoverage> | undefined;
+          let coverageNote: string | undefined;
+          if (areaList && areaList.length > 0) {
+            coverage = computeCoverage(concepts, areaList);
+            const uncoveredFraction = coverage.uncovered.length / (areaList.length || 1);
+            if (uncoveredFraction > THIN_COVERAGE_UNCOVERED_FRACTION) {
+              return fail(
+                "sync looks incomplete — these areas have no concepts yet: " +
+                  `${coverage.uncovered.join(", ")} (${coverage.coveragePct}% covered). ` +
+                  "Keep indexing each uncovered area, then complete.",
+              );
+            }
+          } else {
+            coverageNote =
+              "no areaList supplied — coverage was not verified; " +
+              "pass the repo's source areas to have completion coverage-gated.";
+          }
+          // Append to the running sync log + stamp the new drift baseline.
+          const saved = await vault.completeSync(summary);
+          return ok({
+            ok: true,
+            lastSyncedAt: vault.lastSyncedAt ?? new Date().toISOString(),
+            summaryConceptId: saved.id,
+            conceptCount: stats.concepts,
+            conceptsLackingCodeAreas,
+            byType: stats.byType,
+            ...(coverage
+              ? {
+                  coverage: {
+                    covered: coverage.covered,
+                    uncovered: coverage.uncovered,
+                    coveragePct: coverage.coveragePct,
+                  },
+                }
+              : {}),
+            ...(coverageNote ? { coverageNote } : {}),
+          });
+        }
+        // status — onboarded state, last sync, staleness, counts, + coverage.
+        const stats = vault.stats();
+        const baseline = vault.lastSyncedAt ?? vault.onboardedAt;
+        const stale = isSyncStale(stats.onboarded, baseline);
+        if (areaList && areaList.length > 0) {
+          const { covered, uncovered, coveragePct } = computeCoverage(
+            vault.listConcepts(),
+            areaList,
+          );
+          return ok({
+            onboarded: stats.onboarded,
+            lastSyncedAt: baseline,
+            stale,
+            conceptCount: stats.concepts,
+            byType: stats.byType,
+            coverage: { covered, uncovered, coveragePct },
+          });
+        }
+        return ok({
+          onboarded: stats.onboarded,
+          lastSyncedAt: baseline,
+          stale,
           conceptCount: stats.concepts,
           byType: stats.byType,
         });

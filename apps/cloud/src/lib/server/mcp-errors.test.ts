@@ -63,6 +63,8 @@ function vaultWith(overrides: Partial<VaultClient>): VaultClient {
     reopenTask: async () => notFound("ghost"),
     onboarding: async () => ({ onboardedAt: "2026-07-10T00:00:00.000Z" }),
     setOnboardedAt: async (at) => ({ ok: true, onboardedAt: at }),
+    syncState: async () => ({ lastSyncedAt: "2026-07-10T00:00:00.000Z" }),
+    setLastSyncedAt: async (at) => ({ ok: true, lastSyncedAt: at }),
     link: async ({ from, to, relation }) => ({ ok: true, from, to, relation: relation ?? "related_to" }),
     destroy: async () => ({ ok: true }),
   };

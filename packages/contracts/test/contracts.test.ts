@@ -22,6 +22,9 @@ import {
   onboardCompleteOutputSchema,
   onboardInputSchema,
   onboardStatusOutputSchema,
+  syncInputSchema,
+  syncStatusOutputSchema,
+  syncCompleteOutputSchema,
   PUBLIC_MCP_TOOLS,
   PUBLIC_MCP_TOOL_NAMES,
   searchConceptsOutputSchema,
@@ -35,7 +38,11 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "12"', () => {
+  it('is "13"', () => {
+    // 13: sync / re-onboard — new `sync` MCP tool (syncInputSchema +
+    //     syncStatusOutputSchema/syncCompleteOutputSchema) that hands the caller
+    //     a drift playbook, records last_synced_at, and appends to the running
+    //     sync log; status output gains lastSyncedAt + stale. Additive.
     // 12: public vaults — anonymous read-only via an unguessable, revocable
     //     token (publicStatusSchema, publicEnableResponseSchema) +
     //     PUBLIC_VAULT_READ_TOOL_NAMES (the viewer-scoped MCP read subset);
@@ -48,7 +55,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("12");
+    expect(CONTRACTS_VERSION).toBe("13");
   });
 });
 
@@ -65,6 +72,7 @@ describe("MCP_TOOLS registry", () => {
       "list_concepts",
       "vault_stats",
       "onboard",
+      "sync",
       "list_tasks",
       "take_task",
       "complete_task",
@@ -449,6 +457,112 @@ describe("onboard tool contract", () => {
     ).toBe(false);
     expect(
       onboardCompleteOutputSchema.safeParse({ ok: true, onboarded: false }).success,
+    ).toBe(false);
+  });
+});
+
+describe("sync tool contract", () => {
+  it("is registered with a drift-playbook description", () => {
+    const sync = getMcpTool("sync");
+    expect(sync.description).toMatch(/drift/i);
+    expect(sync.description).toMatch(/last_synced_at/);
+    expect(sync.description).toMatch(/product-onboarding-summary/);
+  });
+
+  it("input takes start/complete/status actions and rejects unknown", () => {
+    expect(syncInputSchema.safeParse({ action: "start", productName: "Acme" }).success).toBe(true);
+    expect(syncInputSchema.safeParse({ action: "complete", summary: "resynced" }).success).toBe(
+      true,
+    );
+    expect(syncInputSchema.safeParse({ action: "status" }).success).toBe(true);
+    expect(syncInputSchema.safeParse({ action: "restart" }).success).toBe(false);
+  });
+
+  it("input accepts optional areaList + changedPaths (drift focus)", () => {
+    expect(
+      syncInputSchema.safeParse({
+        action: "start",
+        areaList: ["packages/engine", "apps/cloud/src"],
+        changedPaths: ["apps/cloud/src/lib/server/mcp.ts"],
+      }).success,
+    ).toBe(true);
+    // both must be string arrays.
+    expect(syncInputSchema.safeParse({ action: "start", changedPaths: [1] }).success).toBe(false);
+    expect(syncInputSchema.safeParse({ action: "status", areaList: [2] }).success).toBe(false);
+  });
+
+  it("status output round-trips lastSyncedAt + stale + optional coverage", () => {
+    const coverage = {
+      covered: ["packages/engine"],
+      uncovered: ["apps/cloud/src"],
+      coveragePct: 50,
+    };
+    expect(
+      syncStatusOutputSchema.safeParse({
+        onboarded: true,
+        lastSyncedAt: "2026-07-01T00:00:00.000Z",
+        stale: false,
+        conceptCount: 3,
+        byType: { feature: 3 },
+        coverage,
+      }).success,
+    ).toBe(true);
+    // lastSyncedAt is nullable (never synced).
+    expect(
+      syncStatusOutputSchema.safeParse({
+        onboarded: false,
+        lastSyncedAt: null,
+        stale: false,
+        conceptCount: 0,
+        byType: {},
+      }).success,
+    ).toBe(true);
+    // strict: unknown coverage keys rejected.
+    expect(
+      syncStatusOutputSchema.safeParse({
+        onboarded: true,
+        lastSyncedAt: null,
+        stale: true,
+        conceptCount: 0,
+        byType: {},
+        coverage: { covered: [], uncovered: [], coveragePct: 0, extra: true },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("complete output round-trips lastSyncedAt + quality signals", () => {
+    expect(
+      syncCompleteOutputSchema.safeParse({
+        ok: true,
+        lastSyncedAt: "2026-07-12T00:00:00.000Z",
+        summaryConceptId: "product-onboarding-summary",
+        conceptCount: 5,
+        conceptsLackingCodeAreas: 0,
+        byType: { domain: 1, feature: 4 },
+        coverage: { covered: ["packages/engine"], uncovered: [], coveragePct: 100 },
+      }).success,
+    ).toBe(true);
+    // coverageNote (no-areaList path) validates too.
+    expect(
+      syncCompleteOutputSchema.safeParse({
+        ok: true,
+        lastSyncedAt: "2026-07-12T00:00:00.000Z",
+        summaryConceptId: "product-onboarding-summary",
+        conceptCount: 5,
+        conceptsLackingCodeAreas: 1,
+        byType: { feature: 5 },
+        coverageNote: "no areaList supplied",
+      }).success,
+    ).toBe(true);
+    // lastSyncedAt is required on complete.
+    expect(
+      syncCompleteOutputSchema.safeParse({
+        ok: true,
+        summaryConceptId: "product-onboarding-summary",
+        conceptCount: 5,
+        conceptsLackingCodeAreas: 0,
+        byType: {},
+      }).success,
     ).toBe(false);
   });
 });

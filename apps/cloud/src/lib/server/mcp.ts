@@ -19,8 +19,11 @@ import {
 import {
   ONBOARDING_NUDGE,
   ONBOARDING_SUMMARY_ID,
+  SYNC_STALENESS_NUDGE,
   computeCoverage,
+  isSyncStale,
   onboardingPlaybook,
+  syncPlaybook,
 } from "@brainz/engine";
 import { syntheticFilePath } from "./do-helpers";
 import { VaultDoError, type VaultClient } from "./vault-client";
@@ -73,6 +76,13 @@ export interface McpServerHooks {
    */
   onOnboarded?: (onboardedAt: Date) => Promise<void>;
   /**
+   * Called when a sync point is recorded — at `onboard {complete}` (the initial
+   * baseline) and every `sync {complete}` — to mirror last_synced_at into the D1
+   * control-plane column. Failures must not fail the tool call; the DO meta is
+   * the tool-facing source of truth.
+   */
+  onSynced?: (lastSyncedAt: Date) => Promise<void>;
+  /**
    * Cloud-only tools registered ALONGSIDE the vault tools (e.g. `claim` from
    * CLOUD_MCP_TOOLS — account concerns that only exist on Brainz Cloud). The
    * route supplies the wired handlers; the local stdio server never sees
@@ -100,15 +110,34 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
   const isOnboarded = async (): Promise<boolean> =>
     (await vault.onboarding()).onboardedAt !== null;
 
+  /**
+   * The one-line nudge to prefix on search/context results, or null for none.
+   * Onboarding takes precedence (you can't be stale before onboarding); an
+   * onboarded-but-stale vault (last sync older than the threshold) gets the
+   * sync nudge instead. A nudge, not a wall — the two never stack.
+   */
+  const nudgeNotice = async (): Promise<string | null> => {
+    const [{ onboardedAt }, { lastSyncedAt }] = await Promise.all([
+      vault.onboarding(),
+      vault.syncState(),
+    ]);
+    if (onboardedAt === null) return ONBOARDING_NUDGE;
+    // Fall back to onboardedAt as the baseline if last_synced_at was never set
+    // (a vault onboarded before sync shipped) so staleness is measured from a
+    // real point, not treated as "never synced".
+    if (isSyncStale(true, lastSyncedAt ?? onboardedAt)) return SYNC_STALENESS_NUDGE;
+    return null;
+  };
+
   const handlers: ToolHandlers = {
     search_concepts: async ({ query, mode, product, tags, type, limit }) =>
       guarded(async () => {
-        const [{ hits }, onboarded] = await Promise.all([
+        const [{ hits }, notice] = await Promise.all([
           vault.search({ query, mode, product, tags, type, limit }),
-          isOnboarded(),
+          nudgeNotice(),
         ]);
-        // Nudge, not a wall: un-onboarded vaults carry the onboarding notice.
-        return ok({ ...(onboarded ? {} : { notice: ONBOARDING_NUDGE }), hits });
+        // Nudge, not a wall: un-onboarded → onboarding nudge; stale → sync nudge.
+        return ok({ ...(notice ? { notice } : {}), hits });
       }),
 
     get_concept: async ({ id }) =>
@@ -146,17 +175,16 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
         if (!query && (!ids || ids.length === 0)) {
           return fail("get_context requires at least one of `query` or `ids`");
         }
-        const [bundle, onboarded] = await Promise.all([
+        const [bundle, notice] = await Promise.all([
           vault.context({ query, ids, product, depth, tokenBudget }),
-          isOnboarded(),
+          nudgeNotice(),
         ]);
         // Two-block convention (GET_CONTEXT_CONTENT_BLOCKS in @brainz/contracts):
-        // markdown briefing first, then the JSON footer. Un-onboarded vaults
-        // get the one-line onboarding nudge atop the markdown.
+        // markdown briefing first, then the JSON footer. Un-onboarded vaults get
+        // the onboarding nudge; onboarded-but-stale vaults get the sync nudge
+        // (never both) atop the markdown.
         const markdown =
-          !onboarded && bundle.markdown
-            ? `${ONBOARDING_NUDGE}\n\n${bundle.markdown}`
-            : bundle.markdown;
+          notice && bundle.markdown ? `${notice}\n\n${bundle.markdown}` : bundle.markdown;
         const footer = JSON.stringify({
           included: bundle.included.map((c) => c.id),
           truncated: bundle.truncated,
@@ -327,8 +355,12 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
           });
           const onboardedAt = new Date();
           await vault.setOnboardedAt(onboardedAt.toISOString());
-          // Mirror into the D1 control plane; never fail the tool call on it.
+          // Onboarding IS the initial sync point — stamp last_synced_at now so
+          // the staleness clock starts here, not from "never synced".
+          await vault.setLastSyncedAt(onboardedAt.toISOString());
+          // Mirror both into the D1 control plane; never fail the tool call on it.
           await hooks.onOnboarded?.(onboardedAt).catch(() => {});
+          await hooks.onSynced?.(onboardedAt).catch(() => {});
           return ok({
             ok: true,
             onboarded: true,
@@ -364,6 +396,120 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
           });
         }
         return ok({ onboarded, conceptCount, byType });
+      }),
+
+    sync: async ({ action, productName, summary, areaList, changedPaths }) =>
+      guarded(async () => {
+        if (action === "start") {
+          // Sync start hands out the DRIFT playbook (diff since last sync →
+          // update stale → index new), scoped to change — NOT the full onboard
+          // playbook. It embeds a coverage map when an areaList is supplied.
+          const [{ onboardedAt }, { lastSyncedAt }, { concepts }] = await Promise.all([
+            vault.onboarding(),
+            vault.syncState(),
+            vault.list(),
+          ]);
+          const playbook = syncPlaybook({
+            productName,
+            onboarded: onboardedAt !== null,
+            lastSyncedAt: lastSyncedAt ?? onboardedAt,
+            areaList,
+            concepts,
+            changedPaths,
+          });
+          return { content: [{ type: "text", text: playbook }] };
+        }
+        if (action === "complete") {
+          if (!summary?.trim()) {
+            return fail('sync {action: "complete"} requires a non-empty `summary`');
+          }
+          const [{ concepts: conceptCount, byType }, { concepts }] = await Promise.all([
+            vault.stats(),
+            vault.list(),
+          ]);
+          // Guard the same "sealed but empty" dead state as onboard complete.
+          if (conceptCount === 0) {
+            return fail(
+              "cannot complete sync: the vault has no concepts — onboard the product first",
+            );
+          }
+          const conceptsLackingCodeAreas = concepts.filter(
+            (c) => !c.codeAreas || c.codeAreas.length === 0,
+          ).length;
+          // Coverage-gate the seal exactly like onboard complete: with an
+          // areaList, refuse if the graph went too thin (drift left gaps).
+          let coverage: ReturnType<typeof computeCoverage> | undefined;
+          let coverageNote: string | undefined;
+          if (areaList && areaList.length > 0) {
+            coverage = computeCoverage(concepts, areaList);
+            const uncoveredFraction = coverage.uncovered.length / (areaList.length || 1);
+            if (uncoveredFraction > THIN_COVERAGE_UNCOVERED_FRACTION) {
+              return fail(
+                "sync looks incomplete — these areas have no concepts yet: " +
+                  `${coverage.uncovered.join(", ")} (${coverage.coveragePct}% covered). ` +
+                  "Keep indexing each uncovered area, then complete.",
+              );
+            }
+          } else {
+            coverageNote =
+              "no areaList supplied — coverage was not verified; " +
+              "pass the repo's source areas to have completion coverage-gated.";
+          }
+          // Append (never overwrite) this sync note to the running sync log on
+          // the product-onboarding-summary concept.
+          const lastSyncedAt = new Date();
+          const stamp = lastSyncedAt.toISOString();
+          const { concept: existing } = await vault.getConcept(ONBOARDING_SUMMARY_ID);
+          const prior = existing?.body?.trimEnd();
+          const note = `## Sync ${stamp}\n\n${summary.trim()}`;
+          const body = prior ? `${prior}\n\n${note}\n` : `${note}\n`;
+          const { concept } = await vault.upsertConcept({
+            id: ONBOARDING_SUMMARY_ID,
+            title: "Product onboarding summary",
+            type: "spec",
+            body,
+          });
+          await vault.setLastSyncedAt(stamp);
+          // Mirror into the D1 control plane; never fail the tool call on it.
+          await hooks.onSynced?.(lastSyncedAt).catch(() => {});
+          return ok({
+            ok: true,
+            lastSyncedAt: stamp,
+            summaryConceptId: concept.id,
+            conceptCount,
+            conceptsLackingCodeAreas,
+            byType,
+            ...(coverage
+              ? {
+                  coverage: {
+                    covered: coverage.covered,
+                    uncovered: coverage.uncovered,
+                    coveragePct: coverage.coveragePct,
+                  },
+                }
+              : {}),
+            ...(coverageNote ? { coverageNote } : {}),
+          });
+        }
+        // status — onboarded state, last sync, staleness, counts, + coverage.
+        const [{ concepts: conceptCount, byType, onboarded }, { onboardedAt }, { lastSyncedAt }] =
+          await Promise.all([vault.stats(), vault.onboarding(), vault.syncState()]);
+        const baseline = lastSyncedAt ?? onboardedAt;
+        const stale = isSyncStale(onboarded, baseline);
+        let coverage: { covered: string[]; uncovered: string[]; coveragePct: number } | undefined;
+        if (areaList && areaList.length > 0) {
+          const { concepts } = await vault.list();
+          const c = computeCoverage(concepts, areaList);
+          coverage = { covered: c.covered, uncovered: c.uncovered, coveragePct: c.coveragePct };
+        }
+        return ok({
+          onboarded,
+          lastSyncedAt: baseline,
+          stale,
+          conceptCount,
+          byType,
+          ...(coverage ? { coverage } : {}),
+        });
       }),
 
     list_tasks: async ({ taskStatus, domain }) =>

@@ -60,6 +60,8 @@ import {
   signInOutputSchema,
   signupOutputSchema,
   statsResponseSchema,
+  syncCompleteOutputSchema,
+  syncStatusOutputSchema,
   upsertConceptOutputSchema,
   vaultSchema,
 } from "@brainz/contracts";
@@ -821,6 +823,62 @@ async function main() {
     step(
       "nudge disappears from get_context after complete",
       !ctxAfterMarkdown.startsWith(ONBOARDING_NUDGE),
+    );
+
+    // 9b-sync. sync flow: start (drift playbook) → status → complete (appends log + last_synced_at)
+    const syncStart = await mcp.callTool({
+      name: "sync",
+      arguments: { action: "start", productName: "E2E CRM", areaList: ["apps/crm/src"] },
+    });
+    const syncStartText = syncStart.content.filter((c) => c.type === "text").map((c) => c.text)[0] ?? "";
+    step(
+      "sync start returns the DRIFT playbook (not the onboarding playbook)",
+      syncStart.isError !== true &&
+        syncStartText.includes("Sync playbook — E2E CRM") &&
+        !syncStartText.includes("Onboarding playbook") &&
+        syncStartText.includes("Diff the codebase since the last sync") &&
+        syncStartText.includes("Update stale concepts whose code_areas changed") &&
+        syncStartText.includes("Index new / un-mapped work"),
+      syncStartText.slice(0, 200),
+    );
+
+    const syncStatus = await mcp.callTool({ name: "sync", arguments: { action: "status" } });
+    const syncStatusPayload = JSON.parse(syncStatus.content.find((c) => c.type === "text").text);
+    step(
+      "sync status reports onboarded + lastSyncedAt + stale=false (freshly onboarded)",
+      syncStatusOutputSchema.safeParse(syncStatusPayload).success &&
+        syncStatusPayload.onboarded === true &&
+        typeof syncStatusPayload.lastSyncedAt === "string" &&
+        syncStatusPayload.stale === false,
+      JSON.stringify(syncStatusPayload),
+    );
+
+    const syncComplete = await mcp.callTool({
+      name: "sync",
+      arguments: { action: "complete", summary: "Re-synced CRM after the scoring change." },
+    });
+    const syncCompletePayload = JSON.parse(syncComplete.content.find((c) => c.type === "text").text);
+    step(
+      "sync complete records last_synced_at and names the summary concept",
+      syncCompleteOutputSchema.safeParse(syncCompletePayload).success &&
+        typeof syncCompletePayload.lastSyncedAt === "string" &&
+        syncCompletePayload.summaryConceptId === ONBOARDING_SUMMARY_ID,
+      JSON.stringify(syncCompletePayload),
+    );
+
+    const summaryAfterSync = await mcp.callTool({
+      name: "get_concept",
+      arguments: { id: ONBOARDING_SUMMARY_ID },
+    });
+    const summaryAfterSyncPayload = JSON.parse(
+      summaryAfterSync.content.find((c) => c.type === "text").text,
+    );
+    step(
+      "sync complete APPENDS to the summary concept (running log): onboarding note + sync note both survive",
+      summaryAfterSyncPayload.body.includes("Indexed the E2E CRM") &&
+        summaryAfterSyncPayload.body.includes("Re-synced CRM after the scoring change.") &&
+        summaryAfterSyncPayload.body.includes("## Sync "),
+      summaryAfterSyncPayload.body,
     );
 
     // 9c. task tools: create → list → take (+ context bundle) → reject → complete

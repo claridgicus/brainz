@@ -81,6 +81,7 @@ describe("tool registration", () => {
       "list_tasks",
       "onboard",
       "search_concepts",
+      "sync",
       "take_task",
       "upsert_concept",
       "vault_stats",
@@ -476,6 +477,56 @@ describe("onboarding (onboard tool + nudge)", () => {
     expect(text).toContain("already onboarded on");
     expect(text).toContain("duplicate concepts");
     expect(text).not.toContain("Onboarding playbook");
+  });
+});
+
+describe("sync (drift playbook + staleness)", () => {
+  // Runs after the onboarding block above, so the shared vault is onboarded and
+  // freshly synced (onboarding is the initial sync point).
+  it("start returns the DRIFT playbook (not the onboarding playbook)", async () => {
+    const result = await callTool("sync", { action: "start", productName: "Acme CRM" });
+    expect(result.isError ?? false).toBe(false);
+    const playbook = result.content[0].text;
+    expect(playbook).toContain("Sync playbook — Acme CRM");
+    expect(playbook).not.toContain("Onboarding playbook");
+    expect(playbook).toContain("Diff the codebase since the last sync");
+    expect(playbook).toContain("Update stale concepts whose code_areas changed");
+    expect(playbook).toContain("Index new / un-mapped work");
+  });
+
+  it("status reports onboarded, lastSyncedAt, and stale=false when fresh", async () => {
+    const status = await callJson("sync", { action: "status" });
+    expect(status.onboarded).toBe(true);
+    expect(typeof status.lastSyncedAt).toBe("string");
+    expect(status.stale).toBe(false);
+  });
+
+  it("complete APPENDS to the running summary log and re-stamps last_synced_at", async () => {
+    const before = await callJson("get_concept", { id: "product-onboarding-summary" });
+    expect(before.body).toContain("acme-crm demo product"); // the onboarding note
+
+    const done = await callJson("sync", {
+      action: "complete",
+      summary: "Re-synced the scoring domain after the ranking change.",
+    });
+    expect(done).toMatchObject({ ok: true, summaryConceptId: "product-onboarding-summary" });
+    expect(typeof done.lastSyncedAt).toBe("string");
+
+    const after = await callJson("get_concept", { id: "product-onboarding-summary" });
+    // Running log: the prior onboarding note AND the new sync note both survive.
+    expect(after.body).toContain("acme-crm demo product");
+    expect(after.body).toContain("Re-synced the scoring domain");
+    expect(after.body).toContain("## Sync ");
+
+    const fs = await import("node:fs/promises");
+    const config = JSON.parse(await fs.readFile(path.join(tmpVault, "brainz.config.json"), "utf8"));
+    expect(typeof config.lastSyncedAt).toBe("string");
+  });
+
+  it("complete requires a summary", async () => {
+    const result = await callTool("sync", { action: "complete" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("summary");
   });
 });
 

@@ -76,6 +76,7 @@ export const POST = guarded(async (event) => {
     name: body.name,
     createdAt: new Date(),
     onboardedAt: null,
+    lastSyncedAt: null,
     // New vaults start private; public access is opt-in via settings.
     publicEnabled: false,
     publicTokenHash: null,

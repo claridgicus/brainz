@@ -187,6 +187,13 @@ const handleMcp: RequestHandler = async (event) => {
           .set({ onboardedAt })
           .where(eq(schema.vault.id, vaultId));
       },
+      // Mirror sync completion (last_synced_at) into the D1 control-plane column.
+      onSynced: async (lastSyncedAt) => {
+        await createDb(platform.env.DB)
+          .update(schema.vault)
+          .set({ lastSyncedAt })
+          .where(eq(schema.vault.id, vaultId));
+      },
       // Cloud-only claim tool: attach this workspace to a human's email. The
       // approval link is EMAILED — never present in the tool result.
       extraTools: CLOUD_MCP_TOOLS.map((def) => ({

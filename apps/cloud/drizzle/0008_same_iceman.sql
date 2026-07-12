@@ -1,0 +1,1 @@
+ALTER TABLE `vault` ADD `last_synced_at` integer;

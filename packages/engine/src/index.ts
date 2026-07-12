@@ -37,5 +37,14 @@ export {
 } from "./onboard.js";
 export type { OnboardingPlaybookOptions, Coverage, CoverageConcept } from "./onboard.js";
 
+export {
+  SYNC_STALENESS_DAYS,
+  SYNC_STALENESS_MS,
+  SYNC_STALENESS_NUDGE,
+  isSyncStale,
+  syncPlaybook,
+} from "./sync.js";
+export type { SyncPlaybookOptions } from "./sync.js";
+
 export { validateGraph } from "./validate.js";
 export type { GraphIssue, GraphValidation } from "./validate.js";

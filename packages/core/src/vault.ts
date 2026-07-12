@@ -39,6 +39,8 @@ interface VaultConfig {
   embedding: EmbeddingConfig;
   /** ISO timestamp set when the onboard flow completes; absent → un-onboarded. */
   onboardedAt?: string;
+  /** ISO timestamp of the last sync (or initial onboarding); absent → never synced. */
+  lastSyncedAt?: string;
   [key: string]: unknown;
 }
 
@@ -695,6 +697,7 @@ export class Vault {
   /**
    * Complete onboarding: store the summary as the spec-type
    * `product-onboarding-summary` concept and mark the vault onboarded.
+   * Onboarding IS the initial sync point, so last_synced_at is stamped too.
    */
   async completeOnboarding(summary: string): Promise<Concept> {
     const text = summary.trim();
@@ -705,7 +708,49 @@ export class Vault {
       type: "spec",
       body: text,
     });
-    await this.setOnboardedAt(new Date().toISOString());
+    const now = new Date().toISOString();
+    await this.setOnboardedAt(now);
+    await this.setLastSyncedAt(now);
+    return saved;
+  }
+
+  // --------------------------------------------------------------------- sync
+
+  /** ISO timestamp of the last sync (or initial onboarding), or null. */
+  get lastSyncedAt(): string | null {
+    return typeof this.#config.lastSyncedAt === "string" && this.#config.lastSyncedAt
+      ? this.#config.lastSyncedAt
+      : null;
+  }
+
+  /** Persist (or clear, with null) the last-synced timestamp in brainz.config.json. */
+  async setLastSyncedAt(iso: string | null): Promise<void> {
+    if (iso === null) delete this.#config.lastSyncedAt;
+    else this.#config.lastSyncedAt = iso;
+    const configPath = path.join(this.dir, "brainz.config.json");
+    await fsp.writeFile(configPath, `${JSON.stringify(this.#config, null, 2)}\n`);
+  }
+
+  /**
+   * Complete a sync: APPEND the summary to the running sync log on the
+   * `product-onboarding-summary` concept (never overwrite) and stamp
+   * last_synced_at as the new drift baseline.
+   */
+  async completeSync(summary: string): Promise<Concept> {
+    const text = summary.trim();
+    if (!text) throw new Error("completeSync requires a non-empty summary");
+    const stamp = new Date().toISOString();
+    const existing = this.getConcept(ONBOARDING_SUMMARY_ID);
+    const prior = existing?.body?.trimEnd();
+    const note = `## Sync ${stamp}\n\n${text}`;
+    const body = prior ? `${prior}\n\n${note}` : note;
+    const saved = await this.upsertConcept({
+      id: ONBOARDING_SUMMARY_ID,
+      title: "Product onboarding summary",
+      type: "spec",
+      body,
+    });
+    await this.setLastSyncedAt(stamp);
     return saved;
   }
 
