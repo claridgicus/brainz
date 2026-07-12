@@ -11,7 +11,13 @@
  * concept metadata is the tool-compact shape (no filePath) plus timestamps.
  */
 import { z } from "zod";
-import { conceptTypeSchema, edgeSchema, searchModeSchema, taskStatusSchema } from "./domain.js";
+import {
+  conceptTypeEntrySchema,
+  conceptTypeSchema,
+  edgeSchema,
+  searchModeSchema,
+  taskStatusSchema,
+} from "./domain.js";
 import {
   createTaskInputSchema,
   getContextInputSchema,
@@ -241,15 +247,17 @@ export const contextResponseSchema = z
 // -------------------------------------------------------------------- graph
 
 /**
- * Node in the graph payload — exactly packages/web's /api/graph shape.
- * Pending nodes are edge targets with no concept yet: `type: "pending"`,
- * `pending: true`, title falls back to the id.
+ * Node in the graph payload — packages/web's /api/graph shape. `type` is a
+ * registry-resolved string (a key in the vault's concept-type registry), not
+ * the strict enum: a concept can carry a custom type. Pending nodes are edge
+ * targets with no concept yet: `type: "pending"`, `pending: true`, title falls
+ * back to the id.
  */
 export const graphNodeSchema = z
   .object({
     id: z.string(),
     title: z.string(),
-    type: z.union([conceptTypeSchema, z.literal("pending")]),
+    type: z.string(),
     product: z.string().optional(),
     tags: z.array(z.string()),
     degree: z.number().int(),
@@ -258,10 +266,17 @@ export const graphNodeSchema = z
   .strict();
 export type GraphNode = z.infer<typeof graphNodeSchema>;
 
+/**
+ * Graph payload. `types` carries the vault's concept-type registry (colors +
+ * weights + order + hidden) so the client renders custom types' chips/colors
+ * and drives the semantic-zoom LOD + node sizing from the vault's weights
+ * instead of a hardcoded table. Optional for back-compat with older producers.
+ */
 export const graphResponseSchema = z
   .object({
     nodes: z.array(graphNodeSchema),
     edges: z.array(edgeSchema),
+    types: z.array(conceptTypeEntrySchema).optional(),
   })
   .strict();
 export type GraphPayload = z.infer<typeof graphResponseSchema>;

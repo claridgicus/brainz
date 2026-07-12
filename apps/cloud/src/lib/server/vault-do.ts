@@ -33,6 +33,7 @@ import {
   unpackVector,
 } from "@brainz/engine";
 import type {
+  AnyConceptType,
   Concept,
   ConceptMeta,
   ConceptStatus,
@@ -41,6 +42,8 @@ import type {
   TaskStatus,
   UpsertInput,
 } from "@brainz/engine";
+import type { ConceptTypeEntry } from "@brainz/contracts";
+import { BUILTIN_CONCEPT_TYPES, slugifyTypeKey } from "@brainz/contracts";
 import {
   buildGraphPayload,
   compactMeta,
@@ -53,7 +56,7 @@ import {
   tokenize,
 } from "./do-helpers";
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
 
 /**
@@ -176,6 +179,9 @@ export class VaultDO {
         at INTEGER NOT NULL
       )`);
       this.#sql.exec(`CREATE INDEX IF NOT EXISTS embed_event_at ON embed_event (at)`);
+      // Per-vault concept-type registry (Wave TR): types are data, seeded with
+      // the 11 built-ins so a fresh vault behaves identically to today.
+      this.#createConceptTypeTable();
       if (this.#metaGet("embeddings") === null) this.#metaSet("embeddings", "ready");
     } else {
       // Gated additive migrations for pre-existing vaults. Never edit past
@@ -202,7 +208,15 @@ export class VaultDO {
         )`);
         this.#sql.exec(`CREATE INDEX IF NOT EXISTS embed_event_at ON embed_event (at)`);
       }
+      if (version < 5) {
+        // v4 → v5: per-vault concept-type registry (Wave TR). Additive table,
+        // BACKFILLED with the 11 built-ins so existing vaults render identically.
+        this.#createConceptTypeTable();
+      }
     }
+    // Idempotent seed: if the registry table exists but is empty (fresh vault or
+    // just-backfilled), populate the built-ins. Safe to run every init.
+    this.#seedBuiltinTypes();
     if (version < SCHEMA_VERSION) this.#metaSet("schema_version", String(SCHEMA_VERSION));
     // FTS5 probe: try to create the virtual table; fall back to token/LIKE
     // keyword search when DO SQLite lacks the extension.
@@ -237,6 +251,201 @@ export class VaultDO {
       key,
       value,
     );
+  }
+
+  // -------------------------------------------------- concept-type registry
+
+  /** Create the per-vault concept-type registry table (idempotent). */
+  #createConceptTypeTable(): void {
+    this.#sql.exec(`CREATE TABLE IF NOT EXISTS concept_type (
+      key TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      color TEXT NOT NULL,
+      weight REAL NOT NULL,
+      sort_order INTEGER NOT NULL,
+      hidden INTEGER NOT NULL DEFAULT 0,
+      builtin INTEGER NOT NULL DEFAULT 0
+    )`);
+  }
+
+  /** Seed the 11 built-in types iff the registry is empty (fresh/backfilled). */
+  #seedBuiltinTypes(): void {
+    const count = Number(
+      this.#sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM concept_type`).one().n,
+    );
+    if (count > 0) return;
+    BUILTIN_CONCEPT_TYPES.forEach((t, i) => {
+      this.#sql.exec(
+        `INSERT OR IGNORE INTO concept_type (key, label, color, weight, sort_order, hidden, builtin)
+         VALUES (?, ?, ?, ?, ?, 0, 1)`,
+        t.key,
+        t.label,
+        t.color,
+        t.weight,
+        i,
+      );
+    });
+  }
+
+  #typeRowToEntry(row: {
+    key: string;
+    label: string;
+    color: string;
+    weight: number;
+    sort_order: number;
+    hidden: number;
+    builtin: number;
+  }): ConceptTypeEntry {
+    return {
+      key: row.key,
+      label: row.label,
+      color: row.color,
+      weight: Number(row.weight),
+      order: Number(row.sort_order),
+      hidden: Number(row.hidden) !== 0,
+      builtin: Number(row.builtin) !== 0,
+    };
+  }
+
+  /** All registry entries, ordered by sort_order then key. */
+  #typeEntries(): ConceptTypeEntry[] {
+    return this.#sql
+      .exec<{
+        key: string;
+        label: string;
+        color: string;
+        weight: number;
+        sort_order: number;
+        hidden: number;
+        builtin: number;
+      }>(`SELECT * FROM concept_type ORDER BY sort_order, key`)
+      .toArray()
+      .map((r) => this.#typeRowToEntry(r));
+  }
+
+  #getTypeRow(key: string): ConceptTypeEntry | null {
+    const rows = this.#sql
+      .exec<{
+        key: string;
+        label: string;
+        color: string;
+        weight: number;
+        sort_order: number;
+        hidden: number;
+        builtin: number;
+      }>(`SELECT * FROM concept_type WHERE key = ?`, key)
+      .toArray();
+    return rows.length > 0 ? this.#typeRowToEntry(rows[0]) : null;
+  }
+
+  /**
+   * Resolve a wire-supplied concept type against the registry. A known key is
+   * kept as-is; an unknown/removed type FALLS BACK to "concept" (matching the
+   * prior unknown-type behavior). This is the single boundary that makes
+   * concept `type` registry-validated instead of a strict enum.
+   */
+  #resolveType(type: string | undefined | null): string {
+    if (!type) return "concept";
+    return this.#getTypeRow(type) ? type : "concept";
+  }
+
+  listTypes(): { types: ConceptTypeEntry[] } {
+    return { types: this.#typeEntries() };
+  }
+
+  /** Create a custom type (key slugified). Duplicate key → error. */
+  createType(input: {
+    key: string;
+    label: string;
+    color: string;
+    weight?: number;
+    order?: number;
+    hidden?: boolean;
+  }): { type: ConceptTypeEntry } {
+    const key = slugifyTypeKey(input.key);
+    if (!key) throw new Error(`could not derive a type key from ${JSON.stringify(input.key)}`);
+    if (this.#getTypeRow(key)) throw new Error(`type "${key}" already exists`);
+    const label = input.label?.trim() || key;
+    const color = input.color?.trim();
+    if (!color) throw new Error("createType requires a color");
+    const weight = input.weight ?? 40;
+    const maxOrder = Number(
+      this.#sql
+        .exec<{ n: number | null }>(`SELECT MAX(sort_order) AS n FROM concept_type`)
+        .one().n ?? -1,
+    );
+    const order = input.order ?? maxOrder + 1;
+    const hidden = input.hidden ? 1 : 0;
+    this.#sql.exec(
+      `INSERT INTO concept_type (key, label, color, weight, sort_order, hidden, builtin)
+       VALUES (?, ?, ?, ?, ?, ?, 0)`,
+      key,
+      label,
+      color,
+      weight,
+      order,
+      hidden,
+    );
+    const saved = this.#getTypeRow(key);
+    if (!saved) throw new Error(`failed to create type: ${key}`);
+    return { type: saved };
+  }
+
+  /** Update any type (built-in or custom): label/color/weight/order/hidden. */
+  updateType(
+    key: string,
+    patch: {
+      label?: string;
+      color?: string;
+      weight?: number;
+      order?: number;
+      hidden?: boolean;
+    },
+  ): { type: ConceptTypeEntry } {
+    const existing = this.#getTypeRow(key);
+    if (!existing) throw new NotFoundError(`no type with key "${key}"`);
+    const label = patch.label !== undefined ? patch.label.trim() || existing.label : existing.label;
+    const color = patch.color !== undefined ? patch.color.trim() || existing.color : existing.color;
+    const weight = patch.weight !== undefined ? patch.weight : existing.weight;
+    const order = patch.order !== undefined ? patch.order : existing.order;
+    const hidden = patch.hidden !== undefined ? (patch.hidden ? 1 : 0) : existing.hidden ? 1 : 0;
+    this.#sql.exec(
+      `UPDATE concept_type SET label = ?, color = ?, weight = ?, sort_order = ?, hidden = ? WHERE key = ?`,
+      label,
+      color,
+      weight,
+      order,
+      hidden,
+      key,
+    );
+    const saved = this.#getTypeRow(key);
+    if (!saved) throw new Error(`failed to update type: ${key}`);
+    return { type: saved };
+  }
+
+  /**
+   * Delete a CUSTOM type. Built-ins can't be hard-deleted (hide them instead).
+   * Blocked while any concept still carries the type — the caller must reassign
+   * those concepts first (or hide the type).
+   */
+  deleteType(key: string): { ok: true; deleted: boolean } {
+    const existing = this.#getTypeRow(key);
+    if (!existing) return { ok: true, deleted: false };
+    if (existing.builtin) {
+      throw new Error(`type "${key}" is built-in — hide it instead of deleting`);
+    }
+    const inUse = Number(
+      this.#sql
+        .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM concept WHERE type = ?`, key)
+        .one().n,
+    );
+    if (inUse > 0) {
+      throw new Error(
+        `type "${key}" is used by ${inUse} concept${inUse === 1 ? "" : "s"} — reassign them before deleting`,
+      );
+    }
+    this.#sql.exec(`DELETE FROM concept_type WHERE key = ?`, key);
+    return { ok: true, deleted: true };
   }
 
   // ------------------------------------------------------------------- fetch
@@ -280,6 +489,33 @@ export class VaultDO {
           return json(await this.context(args as ContextArgs));
         case "stats":
           return json(this.stats());
+        case "listTypes":
+          return json(this.listTypes());
+        case "createType":
+          return json(
+            this.createType(
+              args as {
+                key: string;
+                label: string;
+                color: string;
+                weight?: number;
+                order?: number;
+                hidden?: boolean;
+              },
+            ),
+          );
+        case "updateType":
+          return json(
+            this.updateType(String(args.key ?? ""), args as {
+              label?: string;
+              color?: string;
+              weight?: number;
+              order?: number;
+              hidden?: boolean;
+            }),
+          );
+        case "deleteType":
+          return json(this.deleteType(String(args.key ?? "")));
         case "onboarding":
           return json(this.onboarding());
         case "setOnboardedAt":
@@ -307,7 +543,12 @@ export class VaultDO {
 
     const existing = this.#getRow(id);
     const now = new Date().toISOString();
-    const type: ConceptType = input.type ?? (existing?.type as ConceptType | undefined) ?? "concept";
+    // Registry-based type validation (Wave TR): the incoming type must resolve
+    // to a key in this vault's concept-type registry; an unknown/removed type
+    // falls back to "concept" (matching prior unknown-type behavior). Existing
+    // rows keep their stored type when no new type is supplied.
+    const requestedType = input.type ?? existing?.type ?? "concept";
+    const type: AnyConceptType = this.#resolveType(requestedType);
     const status: ConceptStatus =
       input.status ?? (existing?.status as ConceptStatus | undefined) ?? "active";
     const product =
@@ -947,12 +1188,14 @@ export class VaultDO {
     };
   }
 
-  graph(): ReturnType<typeof buildGraphPayload> {
+  graph(): ReturnType<typeof buildGraphPayload> & { types: ConceptTypeEntry[] } {
     const metas = this.#sql
       .exec<ConceptRow>(`SELECT * FROM concept ORDER BY id`)
       .toArray()
       .map((r) => this.#rowToMeta(r));
-    return buildGraphPayload(metas, this.#edges());
+    // Carry the vault's type registry so the client renders custom types' chips/
+    // colors and drives the semantic-zoom LOD + node sizing from vault weights.
+    return { ...buildGraphPayload(metas, this.#edges()), types: this.#typeEntries() };
   }
 
   async context(args: ContextArgs): Promise<{
@@ -1124,7 +1367,7 @@ export class VaultDO {
 export interface WireConcept {
   id: string;
   title: string;
-  type: ConceptType;
+  type: AnyConceptType;
   status: ConceptStatus;
   product?: string;
   tags: string[];
@@ -1141,7 +1384,7 @@ export interface WireConcept {
 export interface WireNeighbor {
   id: string;
   title: string;
-  type: ConceptType;
+  type: AnyConceptType;
   status: ConceptStatus;
   product?: string;
   tags: string[];
@@ -1153,7 +1396,7 @@ export interface WireNeighbor {
 export interface WireHit {
   id: string;
   title: string;
-  type: ConceptType;
+  type: AnyConceptType;
   score: number;
   snippet: string;
 }
@@ -1161,7 +1404,7 @@ export interface WireHit {
 export interface WireRelated {
   id: string;
   title: string;
-  type: ConceptType;
+  type: AnyConceptType;
   status: ConceptStatus;
   product?: string;
   tags: string[];

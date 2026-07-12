@@ -1,9 +1,9 @@
 <script lang="ts">
 	// The vault workspace: force-directed graph + concept panel + editor +
 	// search + type filters + stats bar.
-	import type { ApiConcept, GraphNode, GraphPayload } from "@brainz/contracts";
+	import type { ApiConcept, ConceptTypeEntry, GraphNode, GraphPayload } from "@brainz/contracts";
 	import { ApiError, createApi, roleOf, type UpsertConceptBody, type VaultStats } from "$lib/api";
-	import { ALL_TYPES, TYPE_COLORS } from "$lib/graph-data";
+	import { colorForType, typeColorsFromRegistry } from "$lib/graph-data";
 	import {
 		defaultVisibleTypes,
 		filterModeStorageKey,
@@ -48,6 +48,20 @@
 	const nodeById = (id: string): GraphNode | undefined => graph.nodes.find((n) => n.id === id);
 	const titleFor = (id: string): string => nodeById(id)?.title ?? id;
 
+	// -------------------------------------------------- concept-type registry
+	// The graph payload carries the vault's type registry (Wave TR): the chips,
+	// palette, and default-visible set all read it, so custom types get chips +
+	// colors + a place in the zoom progression, and re-weighting/hiding in
+	// settings shows up here on the next refresh.
+	const registry = $derived<ConceptTypeEntry[]>(graph.types ?? []);
+	/** Chip source: non-hidden types in registry order, else built-in palette. */
+	const chipTypes = $derived(registry.filter((t) => !t.hidden).map((t) => t.key));
+	/** All registry keys (for validating persisted filters). */
+	const registryKeys = $derived(registry.map((t) => t.key));
+	const typeColors = $derived(typeColorsFromRegistry(registry));
+	const labelFor = (key: string): string =>
+		registry.find((t) => t.key === key)?.label ?? key;
+
 	// -------------------------------------------------------------- filters
 	// First load shows only the high-signal structural types (domain/feature/
 	// spec/story/task) so the initial graph is small and paints fast; the rest
@@ -56,16 +70,23 @@
 	// a CSS hide. State is persisted per-vault in localStorage.
 	const storageKey = $derived(`brainz:graph-types:${vault.id}`);
 	function loadEnabledTypes(key: string): string[] {
-		if (typeof localStorage === "undefined") return defaultVisibleTypes();
+		const fallback = defaultVisibleTypes(registry);
+		if (typeof localStorage === "undefined") return fallback;
 		try {
 			const raw = localStorage.getItem(key);
-			if (!raw) return defaultVisibleTypes();
+			if (!raw) return fallback;
 			const parsed = JSON.parse(raw);
-			if (Array.isArray(parsed)) return parsed.filter((t) => ALL_TYPES.includes(t));
+			// Keep only keys that still exist in the registry (dropped/removed types
+			// fall away); if nothing survives, fall back to the defaults.
+			if (Array.isArray(parsed)) {
+				const known = new Set(registryKeys);
+				const kept = parsed.filter((t) => known.has(t));
+				return kept.length > 0 ? kept : fallback;
+			}
 		} catch {
 			/* fall through to defaults */
 		}
-		return defaultVisibleTypes();
+		return fallback;
 	}
 	// svelte-ignore state_referenced_locally
 	let enabledTypes = $state<string[]>(loadEnabledTypes(storageKey));
@@ -123,7 +144,7 @@
 	const activeTypes = $derived(filterMode === "auto" ? lodVisibleTypes : enabledTypes);
 	const isTypeShown = (t: string): boolean => activeTypes.includes(t);
 
-	const allEnabled = $derived(filterMode === "manual" && enabledTypes.length === ALL_TYPES.length);
+	const allEnabled = $derived(filterMode === "manual" && enabledTypes.length === chipTypes.length);
 	function toggleType(t: string) {
 		// First manual touch flips out of auto-LOD: seed the manual selection from
 		// whatever the LOD is currently showing, then apply the toggle so the click
@@ -132,7 +153,7 @@
 			const base = new Set(lodVisibleTypes);
 			if (base.has(t)) base.delete(t);
 			else base.add(t);
-			enabledTypes = ALL_TYPES.filter((x) => base.has(x));
+			enabledTypes = chipTypes.filter((x) => base.has(x));
 			filterMode = "manual";
 			return;
 		}
@@ -141,7 +162,7 @@
 			: [...enabledTypes, t];
 	}
 	function showAllTypes() {
-		enabledTypes = [...ALL_TYPES];
+		enabledTypes = [...chipTypes];
 		filterMode = "manual";
 	}
 	/** Return to auto-LOD without a full reset (keeps anchors/focus/positions). */
@@ -155,7 +176,7 @@
 		if (typeof confirm === "function" && !confirm("Reset the graph? This clears pinned node positions and restores the default (auto) zoom view.")) {
 			return;
 		}
-		enabledTypes = defaultVisibleTypes();
+		enabledTypes = defaultVisibleTypes(registry);
 		filterMode = "auto";
 		graphRef?.resetGraph();
 	}
@@ -265,7 +286,7 @@
 			>
 				<span class="mode-dot" class:live={filterMode === "auto"}></span>{filterMode === "auto" ? "Auto zoom" : "Auto"}
 			</button>
-			{#each ALL_TYPES as t (t)}
+			{#each chipTypes as t (t)}
 				<button
 					type="button"
 					class="chip"
@@ -273,10 +294,10 @@
 					class:lod={filterMode === "auto"}
 					onclick={() => toggleType(t)}
 					title={filterMode === "auto"
-						? (isTypeShown(t) ? `${t} — shown at this zoom (click to filter manually)` : `${t} — hidden; zoom in to reveal, or click to filter manually`)
-						: t}
+						? (isTypeShown(t) ? `${labelFor(t)} — shown at this zoom (click to filter manually)` : `${labelFor(t)} — hidden; zoom in to reveal, or click to filter manually`)
+						: labelFor(t)}
 				>
-					<span class="dot" style="background:{TYPE_COLORS[t]}; color:{TYPE_COLORS[t]}"></span>{t}
+					<span class="dot" style="background:{colorForType(t, typeColors)}; color:{colorForType(t, typeColors)}"></span>{labelFor(t)}
 				</button>
 			{/each}
 			{#if !allEnabled}
@@ -331,6 +352,7 @@
 					bind:this={graphRef}
 					{graph}
 					{enabledTypes}
+					{registry}
 					vaultId={vault.id}
 					{filterMode}
 					{focusId}
@@ -389,6 +411,7 @@
 	<Modal title={editing === "new" ? "New concept" : `Edit ${concept?.title ?? ""}`} onclose={() => (editing = null)}>
 		<ConceptEditor
 			initial={editing === "edit" ? concept : null}
+			types={registry}
 			onsubmit={saveConcept}
 			oncancel={() => (editing = null)}
 		/>

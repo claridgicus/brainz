@@ -33,7 +33,11 @@ function vaultWith(overrides: Partial<VaultClient>): VaultClient {
     list: async () => ({ count: 0, concepts: [] }),
     search: async () => ({ hits: [] }),
     related: async () => notFound("ghost"),
-    graph: async () => ({ nodes: [], edges: [] }),
+    graph: async () => ({ nodes: [], edges: [], types: [] }),
+    listTypes: async () => ({ types: [] }),
+    createType: async () => notFound("types unsupported in this fake"),
+    updateType: async () => notFound("types unsupported in this fake"),
+    deleteType: async () => ({ ok: true, deleted: false }),
     context: async (args) => ({
       markdown: `## Auth system (auth-system)\n\nBody for ${JSON.stringify(args.ids)}.`,
       included: [META],

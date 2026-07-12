@@ -1,6 +1,12 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
-	import type { ApiKey, VaultInvite, VaultMember, VaultRole } from "@brainz/contracts";
+	import type {
+		ApiKey,
+		ConceptTypeEntry,
+		VaultInvite,
+		VaultMember,
+		VaultRole,
+	} from "@brainz/contracts";
 	import { ApiError, createApi, roleOf } from "$lib/api";
 	import CopyButton from "$lib/components/CopyButton.svelte";
 	import Modal from "$lib/components/Modal.svelte";
@@ -65,6 +71,97 @@
 			removeMemberError = errMsg(err, "Failed to remove member.");
 		} finally {
 			removingMember = false;
+		}
+	}
+
+	// -------------------------------------------------------- concept types
+	// The per-vault type registry (Wave TR): list built-in + custom types, edit
+	// label/color/weight/order/hide, add a custom type. Owner/editor gated (the
+	// server enforces the role; viewers see a read-only list). Re-weighting a type
+	// shifts where it appears in the graph's zoom progression and its node size.
+	// svelte-ignore state_referenced_locally
+	let types = $state<ConceptTypeEntry[] | null>(data.types);
+	const canEditTypes = $derived(role !== "viewer");
+	let typesError = $state<string | null>(null);
+	let typeBusyKey = $state<string | null>(null);
+
+	/** Persist one field change on a type (optimistic, with rollback). */
+	async function patchType(t: ConceptTypeEntry, patch: Partial<ConceptTypeEntry>) {
+		if (!types) return;
+		const snapshot = types;
+		typesError = null;
+		typeBusyKey = t.key;
+		types = types.map((x) => (x.key === t.key ? { ...x, ...patch } : x));
+		try {
+			const updated = await api.updateType(vault.id, t.key, {
+				label: patch.label,
+				color: patch.color,
+				weight: patch.weight,
+				order: patch.order,
+				hidden: patch.hidden,
+			});
+			types = (types ?? []).map((x) => (x.key === t.key ? updated : x));
+		} catch (err) {
+			types = snapshot;
+			typesError = errMsg(err, "Failed to update type.");
+		} finally {
+			typeBusyKey = null;
+		}
+	}
+
+	// New-custom-type form.
+	let newTypeLabel = $state("");
+	let newTypeColor = $state("#a78bfa");
+	let newTypeWeight = $state(40);
+	let addingType = $state(false);
+	const newTypeKeyPreview = $derived(
+		newTypeLabel
+			.trim()
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, ""),
+	);
+
+	async function addType(e: SubmitEvent) {
+		e.preventDefault();
+		if (!types || !newTypeKeyPreview) return;
+		addingType = true;
+		typesError = null;
+		try {
+			const created = await api.createType(vault.id, {
+				key: newTypeKeyPreview,
+				label: newTypeLabel.trim() || newTypeKeyPreview,
+				color: newTypeColor,
+				weight: newTypeWeight,
+			});
+			types = [...(types ?? []), created];
+			newTypeLabel = "";
+			newTypeColor = "#a78bfa";
+			newTypeWeight = 40;
+		} catch (err) {
+			typesError = errMsg(err, "Failed to add type.");
+		} finally {
+			addingType = false;
+		}
+	}
+
+	let deleteTypeTarget = $state<ConceptTypeEntry | null>(null);
+	let deletingType = $state(false);
+	let deleteTypeError = $state<string | null>(null);
+
+	async function confirmDeleteType() {
+		if (!deleteTypeTarget) return;
+		const target = deleteTypeTarget;
+		deletingType = true;
+		deleteTypeError = null;
+		try {
+			await api.deleteType(vault.id, target.key);
+			types = (types ?? []).filter((x) => x.key !== target.key);
+			deleteTypeTarget = null;
+		} catch (err) {
+			deleteTypeError = errMsg(err, "Failed to delete type.");
+		} finally {
+			deletingType = false;
 		}
 	}
 
@@ -329,6 +426,150 @@
 		{/if}
 	</section>
 
+	<!-- ---------------------------------------------------- concept types -->
+	<section class="card">
+		<h2>Concept types</h2>
+		<p class="muted section-hint">
+			Types drive the graph's colors, chips, and semantic-zoom. <strong>Weight</strong> is the
+			one knob: a higher weight reveals a type earlier as you zoom out and draws its nodes
+			larger. Built-in types can be re-weighted, recolored, reordered, and hidden, but not
+			deleted (hide them instead). {#if !canEditTypes}<em>Viewers see this read-only.</em>{/if}
+		</p>
+		{#if types === null}
+			<p class="error-text" role="alert">Couldn't load concept types — reload to try again.</p>
+		{:else}
+			{#if typesError}<p class="error-text" role="alert">{typesError}</p>{/if}
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr><th>Type</th><th>Color</th><th>Weight</th><th>Order</th><th>Shown</th><th></th></tr>
+					</thead>
+					<tbody>
+						{#each types as t (t.key)}
+							<tr class:type-hidden={t.hidden}>
+								<td>
+									<div class="who-cell">
+										{#if canEditTypes}
+											<input
+												class="input type-label"
+												value={t.label}
+												disabled={typeBusyKey !== null}
+												onchange={(e) => void patchType(t, { label: e.currentTarget.value })}
+												aria-label="Label for {t.key}"
+											/>
+										{:else}
+											<span>{t.label}</span>
+										{/if}
+										<span class="muted who-email">
+											{t.key}{t.builtin ? " · built-in" : " · custom"}
+										</span>
+									</div>
+								</td>
+								<td>
+									<span class="color-cell">
+										<span class="dot" style="background:{t.color}"></span>
+										{#if canEditTypes}
+											<input
+												type="color"
+												class="color-input"
+												value={t.color}
+												disabled={typeBusyKey !== null}
+												onchange={(e) => void patchType(t, { color: e.currentTarget.value })}
+												aria-label="Color for {t.key}"
+											/>
+										{/if}
+									</span>
+								</td>
+								<td>
+									{#if canEditTypes}
+										<input
+											type="number"
+											class="input num-input"
+											value={t.weight}
+											disabled={typeBusyKey !== null}
+											onchange={(e) => void patchType(t, { weight: Number(e.currentTarget.value) })}
+											aria-label="Weight for {t.key}"
+										/>
+									{:else}
+										{t.weight}
+									{/if}
+								</td>
+								<td>
+									{#if canEditTypes}
+										<input
+											type="number"
+											class="input num-input"
+											value={t.order}
+											disabled={typeBusyKey !== null}
+											onchange={(e) => void patchType(t, { order: Number(e.currentTarget.value) })}
+											aria-label="Order for {t.key}"
+										/>
+									{:else}
+										{t.order}
+									{/if}
+								</td>
+								<td>
+									<input
+										type="checkbox"
+										checked={!t.hidden}
+										disabled={!canEditTypes || typeBusyKey !== null}
+										onchange={(e) => void patchType(t, { hidden: !e.currentTarget.checked })}
+										aria-label="Show {t.key} in the graph"
+									/>
+								</td>
+								<td class="ta-right">
+									{#if canEditTypes && !t.builtin}
+										<button
+											type="button"
+											class="btn btn-danger btn-sm"
+											disabled={typeBusyKey !== null}
+											onclick={() => { deleteTypeError = null; deleteTypeTarget = t; }}
+										>
+											Delete
+										</button>
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+
+			{#if canEditTypes}
+				<form class="add-type" onsubmit={addType}>
+					<div class="field grow">
+						<label for="nt-label">New custom type</label>
+						<input
+							id="nt-label"
+							class="input"
+							bind:value={newTypeLabel}
+							placeholder="Risk"
+							maxlength="40"
+						/>
+						{#if newTypeKeyPreview}
+							<span class="muted key-preview">key: {newTypeKeyPreview}</span>
+						{/if}
+					</div>
+					<div class="field">
+						<label for="nt-color">Color</label>
+						<input id="nt-color" type="color" class="color-input" bind:value={newTypeColor} />
+					</div>
+					<div class="field">
+						<label for="nt-weight">Weight</label>
+						<input id="nt-weight" type="number" class="input num-input" bind:value={newTypeWeight} />
+					</div>
+					<button
+						type="submit"
+						class="btn btn-primary btn-sm"
+						disabled={addingType || !newTypeKeyPreview}
+					>
+						{addingType ? "Adding…" : "Add type"}
+					</button>
+				</form>
+			{/if}
+		{/if}
+	</section>
+
 	{#if isOwner}
 		<!-- --------------------------------------------------------- invites -->
 		<section class="card">
@@ -569,6 +810,26 @@
 	</Modal>
 {/if}
 
+{#if deleteTypeTarget}
+	<Modal title="Delete concept type" onclose={() => (deleteTypeTarget = null)}>
+		<p>
+			Delete the custom type <strong>{deleteTypeTarget.label}</strong>
+			(<code>{deleteTypeTarget.key}</code>)? This can't be undone. Concepts still using it
+			must be reassigned first, or the delete is blocked.
+		</p>
+		{#if deleteTypeError}<p class="error-text" role="alert">{deleteTypeError}</p>{/if}
+		<div class="row">
+			<button type="button" class="btn btn-danger" onclick={confirmDeleteType} disabled={deletingType}>
+				{#if deletingType}<span class="spinner"></span>{/if}
+				Delete
+			</button>
+			<button type="button" class="btn" onclick={() => (deleteTypeTarget = null)} disabled={deletingType}>
+				Cancel
+			</button>
+		</div>
+	</Modal>
+{/if}
+
 {#if revokeTarget}
 	<Modal title="Revoke key" onclose={() => (revokeTarget = null)}>
 		<p>
@@ -719,5 +980,58 @@
 		font-size: 13px;
 		word-break: break-all;
 		background: var(--bg);
+	}
+
+	/* -------------------------------------------------- concept types panel */
+	.section-hint {
+		margin: -4px 0 14px;
+		font-size: 13px;
+		line-height: 1.5;
+	}
+	.type-hidden {
+		opacity: 0.55;
+	}
+	.type-label {
+		max-width: 220px;
+		padding: 4px 8px;
+		font-size: 13px;
+	}
+	.num-input {
+		width: 72px;
+		padding: 4px 8px;
+		font-size: 13px;
+	}
+	.color-cell {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.color-cell .dot {
+		width: 12px;
+		height: 12px;
+		border-radius: 50%;
+		display: inline-block;
+	}
+	.color-input {
+		width: 34px;
+		height: 26px;
+		padding: 0;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		background: var(--bg);
+		cursor: pointer;
+	}
+	.add-type {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: flex-end;
+		gap: 12px;
+		margin-top: 16px;
+		padding-top: 16px;
+		border-top: 1px solid var(--border);
+	}
+	.key-preview {
+		font-size: 12px;
+		margin-top: 2px;
 	}
 </style>

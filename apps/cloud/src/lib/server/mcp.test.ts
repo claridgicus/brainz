@@ -173,7 +173,15 @@ function fakeVault(): FakeVault {
         },
       ],
     }),
-    graph: async () => ({ nodes: [], edges: [] }),
+    graph: async () => ({ nodes: [], edges: [], types: [] }),
+    listTypes: async () => ({ types: [] }),
+    createType: async () => ({
+      type: { key: "custom", label: "Custom", color: "#a78bfa", weight: 40, order: 11, hidden: false, builtin: false },
+    }),
+    updateType: async () => ({
+      type: { key: "concept", label: "Concept", color: "#a78bfa", weight: 40, order: 0, hidden: false, builtin: true },
+    }),
+    deleteType: async () => ({ ok: true as const, deleted: true }),
     context: async () => ({
       markdown: "## Lead scoring (lead-scoring)\n\nScores leads.",
       included: [

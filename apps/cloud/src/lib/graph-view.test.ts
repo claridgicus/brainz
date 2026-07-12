@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Edge } from "@brainz/contracts";
+import type { ConceptTypeEntry, Edge } from "@brainz/contracts";
+import { BUILTIN_CONCEPT_TYPES } from "@brainz/contracts";
 import {
 	anchorStorageKey,
 	applyAnchors,
@@ -21,9 +22,11 @@ import {
 	parseFilterMode,
 	planEdges,
 	radiusForTypeDegree,
+	registryView,
 	serializeAnchors,
 	setAnchor,
 	signalRank,
+	sizeScaleForWeight,
 	stubEdgesFor,
 	toScreen,
 	typeClusterCenter,
@@ -35,6 +38,19 @@ import {
 	type ViewTransform,
 } from "./graph-view";
 import { ALL_TYPES } from "./graph-data";
+
+/** Build the seed registry exactly as a fresh vault does (canonical order). */
+function seedRegistry(): ConceptTypeEntry[] {
+	return BUILTIN_CONCEPT_TYPES.map((t, i) => ({
+		key: t.key,
+		label: t.label,
+		color: t.color,
+		weight: t.weight,
+		order: i,
+		hidden: false,
+		builtin: true,
+	}));
+}
 
 const rect = { width: 100, height: 100 };
 const identity: ViewTransform = { x: 0, y: 0, k: 1 };
@@ -468,5 +484,113 @@ describe("clearAnchorsFromNodes", () => {
 		];
 		clearAnchorsFromNodes(ns);
 		expect(ns.every((n) => n.fx === null && n.fy === null)).toBe(true);
+	});
+});
+
+// ------------------------------------------ per-vault type registry (Wave TR)
+
+describe("registryView (weight → LOD rank + size)", () => {
+	it("maps the seed registry's distinct weights onto today's exact signal ranks", () => {
+		const view = registryView(seedRegistry());
+		// domain (weight 100) = rank 0; feature/spec/constraint (80) = 1;
+		// story/workflow/pattern/decision (60) = 2; glossary/concept/task (40) = 3.
+		expect(view.rank.get("domain")).toBe(0);
+		expect(view.rank.get("feature")).toBe(1);
+		expect(view.rank.get("spec")).toBe(1);
+		expect(view.rank.get("constraint")).toBe(1);
+		expect(view.rank.get("story")).toBe(2);
+		expect(view.rank.get("glossary")).toBe(3);
+		expect(view.rank.get("concept")).toBe(3);
+		expect(view.rank.get("task")).toBe(3);
+		// pending folds in below every real type at the lowest rank (== maxRank).
+		expect(view.rank.get("pending")).toBe(4);
+		expect(view.maxRank).toBe(4);
+	});
+
+	it("orders and filters hidden types", () => {
+		const reg = seedRegistry();
+		reg.find((t) => t.key === "glossary")!.hidden = true;
+		const view = registryView(reg);
+		expect(view.order).toContain("glossary");
+		expect(view.visible).not.toContain("glossary");
+	});
+
+	it("derives node sizes from weight (higher weight = larger)", () => {
+		const view = registryView(seedRegistry());
+		const domain = view.size.get("domain")!; // weight 100
+		const glossary = view.size.get("glossary")!; // weight 40
+		expect(domain).toBeGreaterThan(glossary);
+		expect(view.size.get("pending")!).toBeLessThan(glossary); // pending weight 20
+	});
+});
+
+describe("signalRank / typesVisibleAtZoom with a registry", () => {
+	it("the SEED registry reproduces the hardcoded LOD set at every scale (identical behavior)", () => {
+		const view = registryView(seedRegistry());
+		for (const scale of [0.05, LOD_MIN_SCALE, 0.6, 1, 1.4, LOD_MAX_SCALE, LOD_MAX_SCALE * 1.2, 8]) {
+			const hardcoded = [...typesVisibleAtZoom(scale)].sort();
+			const fromReg = [...typesVisibleAtZoom(scale, { view })].sort();
+			expect(fromReg).toEqual(hardcoded);
+		}
+	});
+
+	it("re-weighting a type moves its zoom-LOD tier (glossary up to domain's weight → rank 0)", () => {
+		const reg = seedRegistry();
+		reg.find((t) => t.key === "glossary")!.weight = 100; // promote to the top tier
+		const view = registryView(reg);
+		expect(signalRank("glossary", view)).toBe(0);
+		// Now glossary shows at min zoom alongside domain, where before it was hidden.
+		const atMin = typesVisibleAtZoom(LOD_MIN_SCALE, { view });
+		expect(atMin.has("glossary")).toBe(true);
+		expect(atMin.has("domain")).toBe(true);
+	});
+
+	it("a custom type lands in a tier by its weight and reveals at that zoom", () => {
+		const reg = seedRegistry();
+		reg.push({ key: "risk", label: "Risk", color: "#f00", weight: 100, order: 11, hidden: false, builtin: false });
+		const view = registryView(reg);
+		expect(signalRank("risk", view)).toBe(0);
+		expect(typesVisibleAtZoom(LOD_MIN_SCALE, { view }).has("risk")).toBe(true);
+	});
+});
+
+describe("radiusForTypeDegree / typeSizeScale with a registry", () => {
+	it("re-weighting a type resizes it (heavier = larger radius)", () => {
+		const light = registryView(seedRegistry());
+		const reg = seedRegistry();
+		reg.find((t) => t.key === "glossary")!.weight = 100;
+		const heavy = registryView(reg);
+		const before = radiusForTypeDegree("glossary", 3, light);
+		const after = radiusForTypeDegree("glossary", 3, heavy);
+		expect(after).toBeGreaterThan(before);
+	});
+
+	it("without a registry, sizing falls back to the built-in TYPE_SIZE_SCALE (unchanged)", () => {
+		// concept is the broadest built-in → largest hardcoded scale.
+		expect(typeSizeScale("concept")).toBeGreaterThan(typeSizeScale("glossary"));
+		expect(radiusForTypeDegree("concept", 0)).toBeGreaterThan(radiusForTypeDegree("glossary", 0));
+	});
+});
+
+describe("sizeScaleForWeight", () => {
+	it("is monotonic in weight and clamps to [lo, hi]", () => {
+		expect(sizeScaleForWeight(40, 40, 100)).toBeLessThan(sizeScaleForWeight(100, 40, 100));
+		expect(sizeScaleForWeight(40, 40, 100)).toBeCloseTo(0.8); // floor
+		expect(sizeScaleForWeight(100, 40, 100)).toBeCloseTo(1.9); // ceil
+		expect(sizeScaleForWeight(500, 40, 100)).toBeCloseTo(1.9); // clamp above
+	});
+	it("maps a degenerate (all-equal) weight range to the midpoint", () => {
+		expect(sizeScaleForWeight(50, 50, 50)).toBeCloseTo((0.8 + 1.9) / 2);
+	});
+});
+
+describe("defaultVisibleTypes with a registry", () => {
+	it("keeps today's default set for the seed registry", () => {
+		expect(defaultVisibleTypes(seedRegistry())).toEqual(["domain", "feature", "spec", "story", "task"]);
+	});
+	it("drops a default type that is hidden in the registry", () => {
+		const reg = seedRegistry();
+		reg.find((t) => t.key === "feature")!.hidden = true;
+		expect(defaultVisibleTypes(reg)).toEqual(["domain", "spec", "story", "task"]);
 	});
 });
