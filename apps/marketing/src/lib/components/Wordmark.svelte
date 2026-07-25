@@ -1,8 +1,9 @@
 <!--
 	The marketing site is the company's home, so the wordmark reads Brownmatter
-	(Brainz — the product — keeps its own "💩 Brainz" wordmark in the app).
-	The logo mark is the pile-of-poo emoji; the chrome around it is warm paper
-	and ink; the contrast is the point.
+	(Brainz — the product — has its own zombie half-eaten-brain mark in the app,
+	see apps/cloud/src/lib/components/Mark.svelte). The company logo mark is the
+	pile-of-poo emoji; the chrome around it is warm paper and ink; the contrast
+	is the point.
 -->
 <span class="wordmark">
 	<span class="mark" aria-hidden="true">&#x1F4A9;</span>
