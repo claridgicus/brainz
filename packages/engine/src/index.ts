@@ -46,5 +46,21 @@ export {
 } from "./sync.js";
 export type { SyncPlaybookOptions } from "./sync.js";
 
+export {
+  DEFAULT_MCP_SERVER_NAME,
+  SESSION_BLOCK_END,
+  SESSION_BLOCK_START,
+  SESSION_HOOK_CLIENTS,
+  SESSION_PRIMER_PATH,
+  claudeCodeSessionHook,
+  sessionHookPlaybook,
+  sessionInstructions,
+} from "./session.js";
+export type {
+  SessionHookClient,
+  SessionHookPlaybookOptions,
+  SessionInstructionsOptions,
+} from "./session.js";
+
 export { validateGraph } from "./validate.js";
 export type { GraphIssue, GraphValidation } from "./validate.js";

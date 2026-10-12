@@ -152,6 +152,14 @@ Authenticated toolset:
   - `create_task {title, body, domain?, realizes?, governedBy?, codeAreas?, tags?}`
     — turn findings into first-class work items.
 
+Make it the default (do this once per repository):
+
+- `session_hook {client?, serverName?}` — returns a playbook for installing a
+  session-start hook in YOUR harness (a Claude Code `SessionStart` hook, or a
+  marked block in `AGENTS.md` for other clients) so every future session opens
+  already knowing to use Brainz. Brainz can't write to the repo — you apply the
+  edits, then tell your human to commit them.
+
 Cadence:
 
 - Before ANY coding task: `get_context` (or `take_task`, which includes it).

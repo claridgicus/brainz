@@ -1,5 +1,5 @@
 /**
- * MCP tool registry — THE source of truth for the 9 Brainz tools.
+ * MCP tool registry — THE source of truth for the Brainz tools.
  *
  * Names, titles, descriptions (the orchestrator-facing UX text), input schemas,
  * and defaults live here, NOT in the servers. `@brainz/mcp-server` (stdio) and
@@ -198,6 +198,21 @@ export const syncInputSchema = z.object({
     .optional()
     .describe(
       'With "start": paths you found CHANGED since last_synced_at (from your own git diff/log). The playbook focuses the fan-out on the areas these fall under.',
+    ),
+});
+
+export const sessionHookInputSchema = z.object({
+  client: z
+    .enum(["claude-code", "other"])
+    .optional()
+    .describe(
+      'Which agent harness you are: "claude-code" for the SessionStart hook steps, "other" for the rules-file (AGENTS.md) steps. Omit to get both.',
+    ),
+  serverName: z
+    .string()
+    .optional()
+    .describe(
+      'The name this MCP server is registered under in your client, echoed into the primer (default "brainz").',
     ),
 });
 
@@ -449,6 +464,15 @@ export const syncCompleteOutputSchema = z
 
 export const syncOutputSchema = z.union([syncCompleteOutputSchema, syncStatusOutputSchema]);
 
+/**
+ * SESSION_HOOK OUTPUT CONVENTION — `session_hook` responds with ONE markdown
+ * text block: the session-hook playbook itself (read it and act on it, don't
+ * parse it), same as onboard/sync start. There is no JSON form.
+ */
+export const SESSION_HOOK_CONTENT = "markdown-playbook" as const;
+
+export const sessionHookOutputSchema = z.string().min(1);
+
 // ----------------------------------------------------------- task tool output
 
 /** A task concept as the task tools emit it (compact meta with task fields). */
@@ -642,6 +666,20 @@ export const MCP_TOOLS = [
       "without a sync, get_context and search results carry a staleness reminder to run it.",
     inputSchema: syncInputSchema,
     outputSchema: syncOutputSchema,
+  },
+  {
+    name: "session_hook",
+    title: "Install the Brainz session hook",
+    description:
+      "Make Brainz the default in EVERY future session, not just this one. Returns the session-hook " +
+      "playbook: a short primer (get_context before planning or delegating, take_task for work, " +
+      "upsert_concept to write back what changed) plus the exact steps to install it as a session-start " +
+      "hook in your own harness — a Claude Code SessionStart hook in .claude/settings.json, or a marked " +
+      "block in AGENTS.md / your client's rules file. Brainz can't write to your repo, so YOU apply the " +
+      "edits. Call this once per repository, right after connecting (or after onboarding); the steps are " +
+      "idempotent, so re-running refreshes the primer instead of duplicating it.",
+    inputSchema: sessionHookInputSchema,
+    outputSchema: sessionHookOutputSchema,
   },
   {
     name: "list_tasks",

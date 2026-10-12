@@ -158,6 +158,18 @@ Brownmatter is not just a map of the product — it's the pile of work on it, an
 - Staleness nudge: `get_context` prefixes a one-liner when last_synced_at is older than 14 days ("knowledge may be stale — run sync"), same style as the onboarding nudge.
 - Stats expose `openTasks`, `lastSyncedAt` (UI: task count chip on dashboard cards; tasks filterable in the workspace, `task` gets its own palette color + open/taken/done badge).
 
+### Session defaults — agents use Brainz every session (`session_hook` tool + server instructions)
+
+**Problem:** connecting the MCP server gives an agent the tools but no reason to reach for them; a fresh session only uses Brainz if a human says so. Fix, in two layers, both rendered from `packages/engine/src/session.ts` (one voice, like the onboarding playbook):
+
+- **Server `instructions` (zero install):** both MCP servers (local stdio + cloud `/mcp`) return `sessionInstructions()` as the MCP `instructions` on initialize — a short primer: `get_context` before planning or delegating, `list_tasks`/`take_task`/`complete_task` for work, `upsert_concept`/`create_task` to write back, `onboard`/`sync` when nudged. A viewer-scoped public-vault connection gets the read-only variant (no write/task tools named, since they aren't registered). The unauthenticated signup surface is unchanged.
+- **MCP tool `session_hook`** (in MCP_TOOLS, so local + cloud authenticated surfaces; NOT in the public read set): `{client?: "claude-code" | "other", serverName?}` → ONE markdown text block, the SESSION-HOOK PLAYBOOK (same convention as `onboard`/`sync` start; no JSON form). Brainz can't write to the caller's repo, so the playbook instructs the CALLING agent to install the primer in its own harness:
+  - **Claude Code:** write the primer to `.claude/brainz-session.md` and merge a `SessionStart` hook (`cat .claude/brainz-session.md`, no matcher → fires on startup, resume, clear, and compact) into `.claude/settings.json`, preserving existing keys and hooks.
+  - **Other clients:** add the primer to `AGENTS.md` (or the client's rules file) between `<!-- brainz:session:start -->` / `<!-- brainz:session:end -->` markers.
+  - Idempotent: re-running replaces the primer / marked block, never duplicates. Stateless on the Brainz side — nothing is recorded in the vault.
+- **CLI:** `brainz hook [--client] [--server-name]` prints the same playbook (no vault required — the hook lives in the code repo); `brainz hook --install [--dir <repo>]` performs the Claude Code install itself (refuses to touch an unparseable `settings.json`).
+- Docs: skill.md gains the install step after onboarding; discovery documents list the tool.
+
 ### Projects, membership & tenancy (Wave P)
 
 The tenant unit becomes the **project** — human-readable name, many users ↔ many projects, one knowledge vault (VaultDO) per project.

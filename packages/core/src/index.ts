@@ -26,6 +26,19 @@ export {
   SYNC_STALENESS_NUDGE,
   isSyncStale,
   syncPlaybook,
+  DEFAULT_MCP_SERVER_NAME,
+  SESSION_BLOCK_END,
+  SESSION_BLOCK_START,
+  SESSION_HOOK_CLIENTS,
+  SESSION_PRIMER_PATH,
+  claudeCodeSessionHook,
+  sessionHookPlaybook,
+  sessionInstructions,
+} from "@brainz/engine";
+export type {
+  SessionHookClient,
+  SessionHookPlaybookOptions,
+  SessionInstructionsOptions,
 } from "@brainz/engine";
 export type {
   OnboardingPlaybookOptions,

@@ -389,6 +389,56 @@ describe("brainz validate", () => {
   });
 });
 
+describe("brainz hook", () => {
+  it("prints the session-hook playbook without needing a vault", async () => {
+    const res = await run(["hook", "--client", "claude-code"]);
+    expect(res.code).toBe(0);
+    expect(res.out).toMatch(/^# Session hook playbook/);
+    expect(res.out).toContain('"SessionStart"');
+    const json = await run(["hook", "--json"]);
+    expect(JSON.parse(json.out).playbook).toContain("AGENTS.md");
+  });
+
+  it("--install writes the primer and merges the hook, preserving existing settings", async () => {
+    const dir = await makeDir();
+    await mkdir(path.join(dir, ".claude"), { recursive: true });
+    const settingsPath = path.join(dir, ".claude", "settings.json");
+    const mine = { hooks: [{ type: "command", command: "echo hi" }] };
+    await writeFile(
+      settingsPath,
+      JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] }, hooks: { SessionStart: [mine] } }),
+    );
+
+    const first = await run(["hook", "--install", "--dir", dir, "--json"]);
+    expect(first.code).toBe(0);
+    expect(JSON.parse(first.out).settingsChanged).toBe(true);
+    const primer = await readFile(path.join(dir, ".claude", "brainz-session.md"), "utf8");
+    expect(primer).toContain("`get_context`");
+    const settings = JSON.parse(await readFile(settingsPath, "utf8"));
+    expect(settings.permissions).toEqual({ allow: ["Bash(ls:*)"] });
+    expect(settings.hooks.SessionStart).toEqual([
+      mine,
+      { hooks: [{ type: "command", command: "cat .claude/brainz-session.md" }] },
+    ]);
+
+    // Idempotent: a second install adds nothing.
+    const second = await run(["hook", "--install", "--dir", dir, "--json"]);
+    expect(JSON.parse(second.out).settingsChanged).toBe(false);
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(settings);
+  });
+
+  it("--install refuses to clobber an unparseable settings.json", async () => {
+    const dir = await makeDir();
+    await mkdir(path.join(dir, ".claude"), { recursive: true });
+    await writeFile(path.join(dir, ".claude", "settings.json"), "{ not json");
+    const res = await run(["hook", "--install", "--dir", dir]);
+    expect(res.code).toBe(1);
+    expect(res.err).toContain("not valid JSON");
+    expect(await readFile(path.join(dir, ".claude", "settings.json"), "utf8")).toBe("{ not json");
+    expect(existsSync(path.join(dir, ".claude", "brainz-session.md"))).toBe(false);
+  });
+});
+
 describe("brainz onboard", () => {
   it("prints the playbook (default) and a --json variant", async () => {
     const dir = await copyDemoVault();

@@ -38,7 +38,10 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "13"', () => {
+  it('is "14"', () => {
+    // 14: session defaults — new `session_hook` MCP tool (sessionHookInputSchema
+    //     + sessionHookOutputSchema) that hands the caller a playbook for
+    //     installing a session-start hook in its own harness. Additive.
     // 13: sync / re-onboard — new `sync` MCP tool (syncInputSchema +
     //     syncStatusOutputSchema/syncCompleteOutputSchema) that hands the caller
     //     a drift playbook, records last_synced_at, and appends to the running
@@ -55,7 +58,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("13");
+    expect(CONTRACTS_VERSION).toBe("14");
   });
 });
 
@@ -73,6 +76,7 @@ describe("MCP_TOOLS registry", () => {
       "vault_stats",
       "onboard",
       "sync",
+      "session_hook",
       "list_tasks",
       "take_task",
       "complete_task",

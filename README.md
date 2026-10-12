@@ -117,6 +117,11 @@ errors) in `brainz validate`.
 | `list_concepts` | `{product?, type?, tag?}` | metas |
 | `vault_stats` | `{}` | VaultStats (incl. `onboarded`) |
 | `onboard` | `{action: start\|complete\|status, productName?, repoHint?, summary?}` | the onboarding playbook / status / completion |
+| `session_hook` | `{client?: claude-code\|other, serverName?}` | the session-hook playbook: steps for the agent to install a session-start hook so every session uses Brainz by default |
+
+Both MCP servers also send session `instructions` on initialize (get_context before planning,
+write back with upsert_concept after), so clients that surface server instructions get the
+default with nothing installed; `session_hook` makes it stick in the repo itself.
 
 Relations are free-form strings; the documented conventions are `part_of`, `realized_by`,
 `governs`, `depends_on`, `constrains`, `supersedes`, `related_to` (a story is `part_of` its
@@ -127,6 +132,7 @@ domain and `realized_by` features; a spec `governs` what it constrains).
 ```
 brainz init [dir]                      # scaffold vault + config + sample note
 brainz onboard [--status | --complete --summary "..."]   # onboarding playbook / progress / completion
+brainz hook [--client claude-code|other] [--install [--dir <repo>]]   # session-hook playbook / install the Claude Code SessionStart hook
 brainz add <title> [--type --product --tags --code-areas --body|--stdin]
 brainz search <query> [--mode --product --limit]
 brainz show <id>

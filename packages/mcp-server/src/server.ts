@@ -15,6 +15,8 @@ import {
   computeCoverage,
   isSyncStale,
   onboardingPlaybook,
+  sessionHookPlaybook,
+  sessionInstructions,
   syncPlaybook,
   type ConceptMeta,
   type Vault,
@@ -108,7 +110,12 @@ type ToolHandlers = {
  * handlers (and the resource template) live in this server.
  */
 export function createServer(vault: Vault): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+  // `instructions` ride the initialize response, so every client that surfaces
+  // them starts each session already told to reach for Brainz by default.
+  const server = new McpServer(
+    { name: SERVER_NAME, version: SERVER_VERSION },
+    { instructions: sessionInstructions() },
+  );
 
   // ------------------------------------------------------------ tool handlers
 
@@ -471,6 +478,14 @@ export function createServer(vault: Vault): McpServer {
           byType: stats.byType,
         });
       }),
+
+    // Session-hook convention (SESSION_HOOK_CONTENT in @brainz/contracts): ONE
+    // markdown text block — the playbook the calling agent applies to its own
+    // harness. Stateless: Brainz can't write to the caller's repo.
+    session_hook: async ({ client, serverName }) =>
+      guarded(async () => ({
+        content: [{ type: "text", text: sessionHookPlaybook({ client, serverName }) }],
+      })),
 
     list_tasks: async ({ taskStatus, domain }) =>
       guarded(() => {

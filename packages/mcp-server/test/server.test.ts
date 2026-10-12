@@ -81,6 +81,7 @@ describe("tool registration", () => {
       "list_tasks",
       "onboard",
       "search_concepts",
+      "session_hook",
       "sync",
       "take_task",
       "upsert_concept",
@@ -477,6 +478,32 @@ describe("onboarding (onboard tool + nudge)", () => {
     expect(text).toContain("already onboarded on");
     expect(text).toContain("duplicate concepts");
     expect(text).not.toContain("Onboarding playbook");
+  });
+});
+
+describe("session defaults", () => {
+  it("sends the use-Brainz-by-default instructions on initialize", () => {
+    const instructions = client.getInstructions() ?? "";
+    expect(instructions).toContain("every session");
+    expect(instructions).toContain("`get_context`");
+    expect(instructions).toContain("`upsert_concept`");
+  });
+
+  it("session_hook returns the playbook as one markdown block matching the contract", async () => {
+    const result = await callTool("session_hook", { serverName: "acme-brain" });
+    expect(result.isError ?? false).toBe(false);
+    expect(result.content).toHaveLength(1);
+    const playbook = result.content[0].text;
+    expect(getMcpTool("session_hook").outputSchema.safeParse(playbook).success).toBe(true);
+    expect(playbook).toMatch(/^# Session hook playbook/);
+    expect(playbook).toContain("`acme-brain` MCP server");
+    expect(playbook).toContain('"SessionStart"');
+    expect(playbook).toContain("AGENTS.md");
+  });
+
+  it("session_hook {client} narrows to one harness", async () => {
+    const result = await callTool("session_hook", { client: "other" });
+    expect(result.content[0].text).not.toContain('"SessionStart"');
   });
 });
 

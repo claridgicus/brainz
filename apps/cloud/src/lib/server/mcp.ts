@@ -23,6 +23,8 @@ import {
   computeCoverage,
   isSyncStale,
   onboardingPlaybook,
+  sessionHookPlaybook,
+  sessionInstructions,
   syncPlaybook,
 } from "@brainz/engine";
 import { syntheticFilePath } from "./do-helpers";
@@ -102,10 +104,16 @@ export interface McpServerHooks {
 
 /** Build the MCP server for one vault (stateless: one per request). */
 export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): McpServer {
-  const server = new McpServer({
-    name: hooks.only ? `${SERVER_NAME}-public-read` : SERVER_NAME,
-    version: SERVER_VERSION,
-  });
+  // `instructions` ride the initialize response, so every client that surfaces
+  // them starts each session already told to reach for Brainz by default. A
+  // viewer-scoped connection gets the read-only variant (no write-back advice).
+  const server = new McpServer(
+    {
+      name: hooks.only ? `${SERVER_NAME}-public-read` : SERVER_NAME,
+      version: SERVER_VERSION,
+    },
+    { instructions: sessionInstructions({ readOnly: hooks.only !== undefined }) },
+  );
 
   const isOnboarded = async (): Promise<boolean> =>
     (await vault.onboarding()).onboardedAt !== null;
@@ -511,6 +519,14 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
           ...(coverage ? { coverage } : {}),
         });
       }),
+
+    // Session-hook convention (SESSION_HOOK_CONTENT in @brainz/contracts): ONE
+    // markdown text block — the playbook the calling agent applies to its own
+    // harness. Stateless: Brainz can't write to the caller's repo.
+    session_hook: async ({ client, serverName }) =>
+      guarded(async () => ({
+        content: [{ type: "text", text: sessionHookPlaybook({ client, serverName }) }],
+      })),
 
     list_tasks: async ({ taskStatus, domain }) =>
       guarded(async () => {

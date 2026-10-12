@@ -6,8 +6,19 @@ import type {
   CliShowJson,
   CliShowNeighbor,
 } from "@brainz/contracts";
-import type { Concept, ConceptType } from "@brainz/core";
-import { isSyncStale, onboardingPlaybook, slugify, syncPlaybook, Vault } from "@brainz/core";
+import type { Concept, ConceptType, SessionHookClient } from "@brainz/core";
+import {
+  claudeCodeSessionHook,
+  isSyncStale,
+  onboardingPlaybook,
+  SESSION_HOOK_CLIENTS,
+  SESSION_PRIMER_PATH,
+  sessionHookPlaybook,
+  sessionInstructions,
+  slugify,
+  syncPlaybook,
+  Vault,
+} from "@brainz/core";
 import { Command, CommanderError, InvalidArgumentError, Option } from "commander";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
@@ -113,6 +124,54 @@ async function withVault<T>(dir: string, fn: (vault: Vault) => Promise<T>): Prom
   }
 }
 
+/**
+ * Install the Claude Code session-start hook under `dir`: write the primer
+ * file and merge the hook entry into `.claude/settings.json`, preserving every
+ * existing key/hook. Idempotent — returns whether settings had to change.
+ */
+async function installClaudeCodeHook(
+  dir: string,
+  serverName?: string,
+): Promise<{ primerPath: string; settingsPath: string; settingsChanged: boolean }> {
+  const primerPath = path.join(dir, SESSION_PRIMER_PATH);
+  const settingsPath = path.join(dir, ".claude", "settings.json");
+
+  let settings: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await fsp.readFile(settingsPath, "utf8"));
+    } catch {
+      throw new CliError(`${settingsPath} is not valid JSON — fix it, then re-run`);
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new CliError(`${settingsPath} must contain a JSON object`);
+    }
+    settings = parsed as Record<string, unknown>;
+  }
+  const entry = claudeCodeSessionHook().hooks.SessionStart[0];
+  const command = entry.hooks[0].command;
+  const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
+  if (typeof hooks !== "object" || hooks === null || Array.isArray(hooks)) {
+    throw new CliError(`${settingsPath}: "hooks" must be an object`);
+  }
+  const existing = hooks.SessionStart ?? [];
+  if (!Array.isArray(existing)) {
+    throw new CliError(`${settingsPath}: "hooks.SessionStart" must be an array`);
+  }
+  const present = existing.some((group: { hooks?: { command?: string }[] } | null) =>
+    Array.isArray(group?.hooks) && group.hooks.some((h) => h?.command === command),
+  );
+  // Settings validated — only now touch the repo, so a refusal leaves no half-install.
+  await fsp.mkdir(path.dirname(primerPath), { recursive: true });
+  await fsp.writeFile(primerPath, `${sessionInstructions({ serverName })}\n`, "utf8");
+  if (!present) {
+    settings.hooks = { ...hooks, SessionStart: [...existing, entry] };
+    await fsp.writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  }
+  return { primerPath, settingsPath, settingsChanged: !present };
+}
+
 function printJson(ctx: Ctx, value: unknown): void {
   ctx.out(`${JSON.stringify(value, null, 2)}\n`);
 }
@@ -156,6 +215,8 @@ patterns, and glossary entries.
 
 - Index an existing product with \`brainz onboard\` (prints the playbook an
   agent follows to map the codebase into concepts).
+- Make agents use this vault by default with \`brainz hook --install\` (run in
+  the code repo; adds a Claude Code session-start hook).
 - Add concepts with \`brainz add "Title" --body "..."\` or by dropping \`.md\`
   files into \`concepts/\`.
 - Link concepts with inline wiki-links (\`[[some-id]]\`) or typed
@@ -732,6 +793,65 @@ export function buildProgram(ctx: Ctx): Command {
           }
           ctx.out(playbook.endsWith("\n") ? playbook : `${playbook}\n`);
         });
+      },
+    );
+
+  // ---- hook --------------------------------------------------------------
+  // No vault needed: the hook lives in the CODE repo the agents work in.
+  withGlobals(
+    program
+      .command("hook")
+      .description(
+        "print the session-hook playbook (make agents use Brainz by default every session); " +
+          "--install writes the Claude Code SessionStart hook into a repo",
+      ),
+  )
+    .addOption(
+      new Option("--client <client>", "limit the playbook to one harness").choices([
+        ...SESSION_HOOK_CLIENTS,
+      ]),
+    )
+    .option("--server-name <name>", "name the Brainz MCP server is registered under")
+    .option("--install", "write .claude/brainz-session.md and merge the hook into .claude/settings.json")
+    .option("--dir <dir>", "with --install: the repo to install into (default: current directory)")
+    .action(
+      async (
+        opts: {
+          client?: SessionHookClient;
+          serverName?: string;
+          install?: boolean;
+          dir?: string;
+        },
+        cmd: Command,
+      ) => {
+        const g = getGlobals(cmd);
+        if (opts.install) {
+          if (opts.client === "other") {
+            throw new CliError(
+              "--install only supports Claude Code; run `brainz hook --client other` for the rules-file steps",
+            );
+          }
+          const dir = path.resolve(opts.dir ?? process.cwd());
+          const res = await installClaudeCodeHook(dir, opts.serverName);
+          if (g.json) {
+            printJson(ctx, { installed: true, ...res });
+            return;
+          }
+          ctx.out(`${pc.green("✓")} wrote ${pc.cyan(res.primerPath)}\n`);
+          ctx.out(
+            res.settingsChanged
+              ? `${pc.green("✓")} added the SessionStart hook to ${pc.cyan(res.settingsPath)}\n`
+              : `${pc.green("✓")} SessionStart hook already in ${pc.cyan(res.settingsPath)}\n`,
+          );
+          ctx.out(pc.dim("  takes effect from the next Claude Code session — commit both files\n"));
+          return;
+        }
+        const playbook = sessionHookPlaybook({ client: opts.client, serverName: opts.serverName });
+        if (g.json) {
+          printJson(ctx, { playbook });
+          return;
+        }
+        ctx.out(playbook);
       },
     );
 

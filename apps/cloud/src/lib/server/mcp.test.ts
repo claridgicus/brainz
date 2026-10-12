@@ -691,6 +691,34 @@ describe("onboard tool + nudge", () => {
   });
 });
 
+describe("session defaults", () => {
+  it("sends the use-Brainz-by-default instructions on initialize", async () => {
+    const client = await connect();
+    const instructions = client.getInstructions() ?? "";
+    expect(instructions).toContain("every session");
+    expect(instructions).toContain("`upsert_concept`");
+  });
+
+  it("a viewer-scoped (public) connection gets read-only instructions", async () => {
+    const client = await connect(fakeVault(), { only: ["search_concepts", "get_context"] });
+    const instructions = client.getInstructions() ?? "";
+    expect(instructions).toContain("`get_context`");
+    expect(instructions).toContain("read-only");
+    expect(instructions).not.toContain("upsert_concept");
+  });
+
+  it("session_hook returns the playbook as one markdown block matching the contract", async () => {
+    const client = await connect();
+    const result = await client.callTool({ name: "session_hook", arguments: {} });
+    expect(result.isError ?? false).toBe(false);
+    const blocks = textBlocks(result);
+    expect(blocks).toHaveLength(1);
+    expect(getMcpTool("session_hook").outputSchema.safeParse(blocks[0]).success).toBe(true);
+    expect(blocks[0]).toMatch(/^# Session hook playbook/);
+    expect(blocks[0]).toContain('"SessionStart"');
+  });
+});
+
 describe("sync tool", () => {
   let vault: FakeVault;
   let client: Client;
