@@ -170,6 +170,48 @@ Brownmatter is not just a map of the product — it's the pile of work on it, an
 - **CLI:** `brainz hook [--client] [--server-name]` prints the same playbook (no vault required — the hook lives in the code repo); `brainz hook --install [--dir <repo>]` performs the Claude Code install itself (refuses to touch an unparseable `settings.json`).
 - Docs: skill.md gains the install step after onboarding; discovery documents list the tool.
 
+### Dreaming — autonomous nightly vault consolidation (`dream` tool + DO alarm)
+
+**Problem:** the graph only improves when an agent remembers to `sync`. Duplicates pile up, knowledge that only lives in a finished task's `## Outcome` never becomes a concept, and contradictions sit unnoticed. Dreaming is **fully autonomous** background consolidation (user decision 2026-10-27): the server does the thinking and applies the changes itself, no agent in the loop — bounded by hard safety rails and fully revertible. Ideas (not code) from OpenClaw's memory-core dreaming: light → REM → deep phases plus a Dream Diary.
+
+**Where the logic lives.** Everything deterministic is pure engine code in `packages/engine/src/dream.ts` (Workers-safe): candidate detection, the REM prompt + response parser, threshold gates, the loss rail, plan building (the exact after-state of every touched concept), the resumable sweep state machine, and diary rendering. Hosts (VaultDO in cloud, `Vault` in core) only snapshot their data, call the LLM through a provider seam, persist checkpoints, apply the plan and keep preimages.
+
+**A sweep** (one "dream") runs three phases in order over the vault's concepts (`task`-type concepts are inputs, never merge candidates; the `product-onboarding-summary` concept is never touched):
+
+- **Light** (no durable write) — stages what changed since the previous sweep (`updatedAt > lastDreamAt`; everything on the first sweep):
+  - *duplicate candidates*: pairs of non-task concepts, at least one of them changed, scored by embedding cosine when both have vectors (`≥ 0.92`), else lexical similarity (same `slugify(title)` ⇒ 1.0, else Jaccard over title+body word tokens `≥ 0.8`). Work is chunked: each step compares at most `lightBatch` (200) changed concepts against the vault.
+  - *outcome candidates*: `done` tasks with a `## Outcome` section, done since the previous sweep, that no concept is yet `derived_from`.
+  - *hygiene counts*: orphans (no edges either way), pending wiki-links (targets with no concept), concepts lacking `codeAreas`. Counted for the diary only.
+- **REM** (no durable write) — an LLM pass over the staged material in chunks (≤ 6 duplicate pairs + ≤ 4 outcomes + changed concept titles per call, at most `maxLlmCallsPerStep` (3) calls per step). The model returns JSON *proposals*, never prose to splice in: `merges [{keep, drop, confidence}]`, `promotions [{task, title, type, body, confidence}]`, `links [{from, to, relation, confidence}]`, `contradictions [{ids, summary, confidence}]`, `themes [string]`. Malformed output is dropped (counted as `unparseable`), never retried in a loop.
+- **Deep** (the only durable write) — gates every proposal, builds the plan, checks the loss rail, applies:
+  - *merge* — only for a pair Light staged (the model cannot invent merges), confidence `≥ 0.8`. Survivor `keep` absorbs the other: tags / codeAreas / relations unioned, `drop`'s body appended under `## Merged from <title> (<id>)` unless already contained. Every concept that referenced `drop` (relation targets or `[[drop]]` / `[[drop|label]]` wiki-links) is rewritten to point at `keep` — edges redirect. `drop` is **tombstoned**: removed from the live graph, its full prior state kept in the dream's preimage log.
+  - *promote* — outcome of a staged task, confidence `≥ 0.7`, type in `feature | decision | constraint | spec | pattern | glossary | concept`, id (`slugify(title)`) not already taken. Creates the concept with `relations.derived_from: [task]`, tag `dreamed`, and a provenance line.
+  - *link* — both ends exist, not already linked with that relation, confidence `≥ 0.7`; appended to the source concept's relations.
+  - *contradiction* — confidence `≥ 0.6` ⇒ files an open `task` (`tags: [dream, contradiction]`, `related_to` both concepts) for a human/agent. Dreaming never silently picks a side.
+  - Per-sweep caps: `maxMerges` 5, `maxPromotions` 5, `maxLinks` 10, `maxContradictions` 3. Over-cap proposals are rejected with reason `cap`.
+  - **Loss rail**: `touched` = existing concepts the plan would remove or modify. If `touched > max(minTouchAllowance (3), floor(maxTouchFraction (0.2) × priorConceptCount))` the WHOLE deep phase is rejected (`rejected: loss-threshold`) and nothing is written. Additions (new concepts, new tasks) don't count.
+  - Rejections are reported as counts by reason (`below-threshold`, `not-staged`, `exists`, `missing`, `bad-type`, `cap`, `unparseable`), never by dumping snippets.
+
+**No LLM ⇒ light only.** If no provider is available (no `AI` binding — e.g. `wrangler.dev.jsonc`, tests, local without a provider), REM and deep are `skipped` with a reason and the sweep still writes a diary entry. Same spirit as the embeddings fallback: never crash, always leave a visible trace. LLM failures mid-REM mark REM `skipped` (`llm-error`) and skip deep.
+
+**LLM provider seam** — `DreamLlm { name; complete({system, user, maxTokens}) → Promise<string> }`. Cloud default: Workers AI `@cf/meta/llama-3.3-70b-instruct-fp8-fast` via `env.AI` (no key to manage); an Anthropic-backed provider can be swapped in later without touching the engine. Local (`@brainz/core`): `Vault.dream({llm})` takes an injected provider; the CLI ships none yet, so `brainz dream run` locally does light + diary.
+
+**Preimages & revert.** Before applying, the host records a preimage per touched concept (cloud: the full DO row; local: the raw markdown file + path; `null` for created concepts) and the after-state's `updatedAt`. `dream {action:"revert", id}` restores every preimage (deletes created concepts, restores modified/tombstoned ones byte-for-byte, rebuilding edges/FTS) — the vault returns to its exact pre-dream state. Revert **refuses** (listing conflicts) when any touched concept changed after the dream (its current `updatedAt` ≠ recorded after-state or it was deleted/created since), so later agent work is never clobbered. A dream can be reverted once; the diary entry is marked `reverted`.
+
+**Dream Diary.** One entry per sweep that found material: `{id, startedAt, finishedAt, trigger: "alarm"|"manual", status: "applied"|"nothing-applied"|"rejected"|"light-only"|"reverted", phases: {light, rem, deep}, applied: [{kind, id, summary}], rejected: {reason: count}, themes, markdown}`. Counts and ids, not dumps. An empty sweep (nothing changed since the last one) records `lastDreamAt` and writes no entry.
+
+**Storage.**
+- Cloud (VaultDO, schema v7, additive): table `dream(id TEXT PK, started_at, finished_at, trigger, status, diary_json, preimage_json, reverted_at)`; meta keys `dream_enabled` (default on), `dream_cadence_hours` (default 24, 1–168), `last_dream_at`, `dream_checkpoint` (JSON sweep state while a sweep is in flight). Diary retention: newest 50 entries (older rows pruned with their preimages).
+- Local: `<vault>/.dreams/<id>.json` (diary + preimages) and `lastDreamAt` in `brainz.config.json`. NOT under `.brainz/` — preimages are not derivable state.
+
+**Scheduling (cloud).** The VaultDO schedules its own DO alarm: on construction, if dreaming is enabled and no alarm is set, it sets one `cadence` hours after the last dream (or from now). `alarm()` advances the in-flight sweep by ONE bounded step (`lightBatch` comparisons, ≤ `maxLlmCallsPerStep` LLM calls; deep applies in one step since touched is bounded by the rail) and persists the checkpoint; if the sweep isn't finished it re-arms the alarm for +1s, else for the next cadence. That keeps every invocation inside the Workers CPU-time and subrequest budget. Embeddings for concepts a dream writes are recomputed (≤ the touched bound). `destroy` deletes the alarm. Disabling dreaming clears the alarm and any in-flight checkpoint.
+
+**Surfaces.**
+- MCP tool `dream` in `MCP_TOOLS` (authenticated surfaces, cloud + local stdio; not in the public read set): `{action: "status"}` → `{enabled, cadenceHours, lastDreamAt, nextDreamAt, inFlight, llm, lastEntry?}`; `{action: "run"}` → starts (or continues) a sweep and advances it as far as one request allows, returns `{status: "done"|"in-progress", entry?}`; `{action: "diary", limit?}` → recent entries (newest first); `{action: "revert", id}` → `{reverted, restored, conflicts?}`; `{action: "configure", enabled?, cadenceHours?}` → status. CONTRACTS_VERSION 15.
+- `vault_stats` gains optional `lastDreamAt`.
+- CLI: `brainz dream [status|run|diary|revert <id>]` over a local vault (`--json` uses the same contract shapes).
+- Docs: skill.md, discovery documents, marketing `/docs` tool count.
+
 ### Projects, membership & tenancy (Wave P)
 
 The tenant unit becomes the **project** — human-readable name, many users ↔ many projects, one knowledge vault (VaultDO) per project.
