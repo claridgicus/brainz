@@ -38,7 +38,10 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "14"', () => {
+  it('is "15"', () => {
+    // 15: dreaming — new `dream` MCP tool (dreamInputSchema + dreamOutputSchema,
+    //     dreamDiaryEntrySchema); vault_stats output gains optional lastDreamAt.
+    //     Additive.
     // 14: session defaults — new `session_hook` MCP tool (sessionHookInputSchema
     //     + sessionHookOutputSchema) that hands the caller a playbook for
     //     installing a session-start hook in its own harness. Additive.
@@ -58,7 +61,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("14");
+    expect(CONTRACTS_VERSION).toBe("15");
   });
 });
 
@@ -77,6 +80,7 @@ describe("MCP_TOOLS registry", () => {
       "onboard",
       "sync",
       "session_hook",
+      "dream",
       "list_tasks",
       "take_task",
       "complete_task",

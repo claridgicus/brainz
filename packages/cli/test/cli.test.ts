@@ -6,6 +6,9 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  dreamDiaryOutputSchema,
+  dreamRunOutputSchema,
+  dreamStatusOutputSchema,
   cliContextJsonSchema,
   cliRelatedJsonSchema,
   cliSearchJsonSchema,
@@ -590,5 +593,32 @@ describe("dist smoke tests (child process)", () => {
   it("exits 1 with a usage error for unknown commands", () => {
     const res = spawnSync(process.execPath, [DIST_BIN, "frobnicate"], { encoding: "utf8" });
     expect(res.status).toBe(1);
+  });
+});
+
+describe("brainz dream", () => {
+  it("status → run (light only) → diary, --json matching the dream contract", async () => {
+    const dir = await copyDemoVault();
+    const status = await run(["dream", "--vault", dir, "--json"]);
+    expect(status.code).toBe(0);
+    expect(dreamStatusOutputSchema.parse(JSON.parse(status.out))).toMatchObject({
+      enabled: true,
+      lastDreamAt: null,
+    });
+
+    const ran = await run(["dream", "run", "--vault", dir, "--json"]);
+    expect(ran.code).toBe(0);
+    const res = dreamRunOutputSchema.parse(JSON.parse(ran.out));
+    expect(res.entry?.status).toBe("light-only");
+
+    const diary = await run(["dream", "diary", "--vault", dir, "--json"]);
+    expect(dreamDiaryOutputSchema.parse(JSON.parse(diary.out)).entries[0].id).toBe(res.id);
+
+    const human = await run(["dream", "diary", "--vault", dir]);
+    expect(human.out).toContain("REM:** skipped");
+
+    const bad = await run(["dream", "revert", "--vault", dir]);
+    expect(bad.code).toBe(1);
+    expect(bad.err).toContain("dream id");
   });
 });

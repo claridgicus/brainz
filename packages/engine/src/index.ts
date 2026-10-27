@@ -62,5 +62,50 @@ export type {
   SessionInstructionsOptions,
 } from "./session.js";
 
+export {
+  DREAM_DEFAULTS,
+  DREAM_DEFAULT_CADENCE_HOURS,
+  DREAM_MAX_CADENCE_HOURS,
+  DREAM_MIN_CADENCE_HOURS,
+  DREAM_PROMOTABLE_TYPES,
+  DREAM_PROTECTED_IDS,
+  DREAM_REM_SYSTEM,
+  advanceSweep,
+  clampCadenceHours,
+  diaryEntry,
+  dreamId,
+  extractOutcome,
+  isEmptySweep,
+  lexicalSimilarity,
+  parseRemResponse,
+  planDeep,
+  remChunkPrompt,
+  renderDiaryEntry,
+  startSweep,
+} from "./dream.js";
+export type {
+  ContradictionProposal,
+  DreamAppliedChange,
+  DreamChangeKind,
+  DreamConcept,
+  DreamDiaryEntry,
+  DreamEntryStatus,
+  DreamLlm,
+  DreamOp,
+  DreamOptions,
+  DreamPhase,
+  DreamPlan,
+  DreamRejectReason,
+  DreamSnapshot,
+  DreamSweepState,
+  DreamTrigger,
+  DuplicateCandidate,
+  LinkProposal,
+  MergeProposal,
+  OutcomeCandidate,
+  PromoteProposal,
+  RemProposals,
+} from "./dream.js";
+
 export { validateGraph } from "./validate.js";
 export type { GraphIssue, GraphValidation } from "./validate.js";

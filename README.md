@@ -118,6 +118,7 @@ errors) in `brainz validate`.
 | `vault_stats` | `{}` | VaultStats (incl. `onboarded`) |
 | `onboard` | `{action: start\|complete\|status, productName?, repoHint?, summary?}` | the onboarding playbook / status / completion |
 | `session_hook` | `{client?: claude-code\|other, serverName?}` | the session-hook playbook: steps for the agent to install a session-start hook so every session uses Brainz by default |
+| `dream` | `{action: status\|run\|diary\|revert\|configure, id?, limit?, enabled?, cadenceHours?}` | autonomous consolidation (merge duplicates, promote task outcomes, link, flag contradictions) + the Dream Diary; nightly on Brainz Cloud, on demand locally (`brainz dream`) |
 
 Both MCP servers also send session `instructions` on initialize (get_context before planning,
 write back with upsert_concept after), so clients that surface server instructions get the

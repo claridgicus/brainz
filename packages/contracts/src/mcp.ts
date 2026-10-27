@@ -216,6 +216,30 @@ export const sessionHookInputSchema = z.object({
     ),
 });
 
+export const dreamInputSchema = z.object({
+  action: z
+    .enum(["status", "run", "diary", "revert", "configure"])
+    .describe(
+      '"status" reports whether dreaming is on, its cadence, the last/next dream and any sweep in flight. "run" starts (or continues) a sweep NOW and advances it as far as one request allows. "diary" returns recent Dream Diary entries (newest first). "revert" undoes one dream via its preimages (requires `id`). "configure" turns dreaming on/off and sets the cadence.',
+    ),
+  id: z.string().optional().describe('With "revert": the dream id to undo (from "diary" or "status").'),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(50)
+    .optional()
+    .describe('With "diary": how many entries to return (default 10).'),
+  enabled: z.boolean().optional().describe('With "configure": turn nightly dreaming on or off.'),
+  cadenceHours: z
+    .number()
+    .int()
+    .min(1)
+    .max(168)
+    .optional()
+    .describe('With "configure": hours between dreams (default 24).'),
+});
+
 // ------------------------------------------------------------- task tool i/o
 
 export const listTasksInputSchema = z.object({
@@ -361,6 +385,8 @@ export const listConceptsOutputSchema = z
 
 export const vaultStatsOutputSchema = vaultStatsSchema.extend({
   embeddings: embeddingStatusSchema,
+  /** Start of the last completed dream sweep (null if never); absent on hosts without dreaming. */
+  lastDreamAt: z.string().nullable().optional(),
 });
 
 /**
@@ -472,6 +498,116 @@ export const syncOutputSchema = z.union([syncCompleteOutputSchema, syncStatusOut
 export const SESSION_HOOK_CONTENT = "markdown-playbook" as const;
 
 export const sessionHookOutputSchema = z.string().min(1);
+
+// --------------------------------------------------------------- dream output
+
+const dreamAppliedChangeSchema = z
+  .object({
+    kind: z.enum(["merge", "promote", "link", "contradiction"]),
+    id: z.string(),
+    summary: z.string(),
+  })
+  .strict();
+
+/** One Dream Diary entry (engine DreamDiaryEntry): counts and ids, never dumps. */
+export const dreamDiaryEntrySchema = z
+  .object({
+    id: z.string(),
+    trigger: z.enum(["alarm", "manual"]),
+    startedAt: z.string(),
+    finishedAt: z.string(),
+    status: z.enum(["applied", "nothing-applied", "rejected", "light-only", "reverted"]),
+    light: z
+      .object({
+        changed: z.number().int(),
+        duplicates: z.number().int(),
+        outcomes: z.number().int(),
+        orphans: z.number().int(),
+        pendingLinks: z.number().int(),
+        missingCodeAreas: z.number().int(),
+      })
+      .strict(),
+    rem: z
+      .object({
+        status: z.enum(["ok", "skipped"]),
+        reason: z.string().optional(),
+        calls: z.number().int(),
+        proposals: z.number().int(),
+        themes: z.array(z.string()),
+      })
+      .strict(),
+    deep: z
+      .object({
+        status: z.enum(["applied", "nothing-applied", "rejected", "skipped"]),
+        reason: z.string().optional(),
+        touched: z.number().int(),
+        allowance: z.number().int(),
+        merged: z.number().int(),
+        promoted: z.number().int(),
+        linked: z.number().int(),
+        contradictions: z.number().int(),
+      })
+      .strict(),
+    applied: z.array(dreamAppliedChangeSchema),
+    rejected: z.record(z.string(), z.number().int()),
+    revertedAt: z.string().optional(),
+    markdown: z.string(),
+  })
+  .strict();
+
+/** `dream {action: "status" | "configure"}`. */
+export const dreamStatusOutputSchema = z
+  .object({
+    enabled: z.boolean(),
+    cadenceHours: z.number().int(),
+    /** Start of the last completed sweep (changes after it feed the next one); null if never. */
+    lastDreamAt: z.string().nullable(),
+    /** When the next nightly sweep is due; null when dreaming is off or not scheduled (local). */
+    nextDreamAt: z.string().nullable(),
+    inFlight: z
+      .object({ id: z.string(), phase: z.enum(["light", "rem", "deep"]), startedAt: z.string() })
+      .strict()
+      .nullable(),
+    /** The LLM provider REM would use, or null (REM/deep are skipped without one). */
+    llm: z.string().nullable(),
+    lastEntry: dreamDiaryEntrySchema.optional(),
+  })
+  .strict();
+
+/** `dream {action: "run"}`: done (entry written), idle (nothing changed), or in-progress (continues on the alarm). */
+export const dreamRunOutputSchema = z
+  .object({
+    status: z.enum(["done", "idle", "in-progress"]),
+    id: z.string().nullable(),
+    phase: z.enum(["light", "rem", "deep"]).optional(),
+    entry: dreamDiaryEntrySchema.optional(),
+  })
+  .strict();
+
+export const dreamDiaryOutputSchema = z
+  .object({
+    count: z.number().int(),
+    entries: z.array(dreamDiaryEntrySchema),
+  })
+  .strict();
+
+export const dreamRevertOutputSchema = z
+  .object({
+    id: z.string(),
+    reverted: z.boolean(),
+    /** Concepts restored to their pre-dream state (created ones removed). */
+    restored: z.number().int(),
+    /** Concepts changed since the dream — revert refuses while any exist. */
+    conflicts: z.array(z.string()),
+  })
+  .strict();
+
+export const dreamOutputSchema = z.union([
+  dreamStatusOutputSchema,
+  dreamRunOutputSchema,
+  dreamDiaryOutputSchema,
+  dreamRevertOutputSchema,
+]);
 
 // ----------------------------------------------------------- task tool output
 
@@ -680,6 +816,22 @@ export const MCP_TOOLS = [
       "idempotent, so re-running refreshes the primer instead of duplicating it.",
     inputSchema: sessionHookInputSchema,
     outputSchema: sessionHookOutputSchema,
+  },
+  {
+    name: "dream",
+    title: "Dream (nightly consolidation)",
+    description:
+      "Brainz dreams: an autonomous, unattended consolidation sweep that improves the graph between agent " +
+      "sessions. Light stages what changed since the last dream (near-duplicate concepts, finished task " +
+      "outcomes, hygiene counts); REM asks an LLM for proposals; deep applies the ones that pass threshold " +
+      "gates — merges duplicates (edges redirected, the other tombstoned), promotes outcome knowledge into " +
+      "concepts, adds missing links, and files a task for each contradiction instead of picking a side. A " +
+      "sweep that would touch too much of the vault is rejected; every applied dream keeps preimages and can " +
+      "be reverted. {action: \"status\"} shows schedule + last dream; {action: \"run\"} dreams now; " +
+      "{action: \"diary\"} reads the Dream Diary; {action: \"revert\", id} undoes one dream; " +
+      "{action: \"configure\", enabled?, cadenceHours?} sets it up. Without an LLM only light runs.",
+    inputSchema: dreamInputSchema,
+    outputSchema: dreamOutputSchema,
   },
   {
     name: "list_tasks",

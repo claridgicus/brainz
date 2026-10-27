@@ -4,7 +4,7 @@
 
 	const title = "Docs — Get started with Brainz";
 	const description =
-		"Wire Brainz into your agents in minutes: hosted remote MCP at brainz.brownmatter.ai or the local-first CLI over stdio. All sixteen MCP tools, documented.";
+		"Wire Brainz into your agents in minutes: hosted remote MCP at brainz.brownmatter.ai or the local-first CLI over stdio. All seventeen MCP tools, documented.";
 
 	const remoteMcpSnippet = `{
   "mcpServers": {
@@ -217,6 +217,17 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 				"applies the edits. Call once per repository; the steps are idempotent.",
 		},
 		{
+			name: "dream",
+			title: "Dream (nightly consolidation)",
+			description:
+				"Brainz dreams: an unattended nightly sweep that improves the graph between agent sessions. Light " +
+				"stages what changed (near-duplicates, finished task outcomes); REM asks an LLM for proposals; deep " +
+				"applies the ones that pass threshold gates — merges duplicates with edges redirected, promotes " +
+				"outcome knowledge into concepts, adds missing links, and files a task for each contradiction. " +
+				"Sweeps that would touch too much of the vault are rejected, and every dream can be reverted. " +
+				"Actions: status, run, diary, revert {id}, configure {enabled?, cadenceHours?}.",
+		},
+		{
 			name: "create_task",
 			title: "Create a task",
 			description:
@@ -280,7 +291,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 	<p>
 		An orchestrator doesn't need a pre-made account. Point it at <code>{MCP_URL}</code>
 		<em>without</em> an <code>Authorization</code> header and it gets a public MCP server exposing
-		two tools — <code>signup</code> and <code>sign_in</code> (the sixteen vault tools stay behind
+		two tools — <code>signup</code> and <code>sign_in</code> (the seventeen vault tools stay behind
 		authentication):
 	</p>
 	<pre><code>{agentSignupSnippet}</code></pre>
@@ -354,7 +365,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		isn't configured or available, it degrades gracefully to keyword-only.
 	</p>
 
-	<h2 id="tools">The sixteen MCP tools</h2>
+	<h2 id="tools">The seventeen MCP tools</h2>
 	<p>
 		These names and descriptions are the exact text your orchestrator sees — lifted from the tool
 		registry that both the hosted and local servers register from, so they never drift.

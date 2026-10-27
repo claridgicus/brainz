@@ -67,9 +67,23 @@ function vaultWith(overrides: Partial<VaultClient>): VaultClient {
     setLastSyncedAt: async (at) => ({ ok: true, lastSyncedAt: at }),
     link: async ({ from, to, relation }) => ({ ok: true, from, to, relation: relation ?? "related_to" }),
     destroy: async () => ({ ok: true }),
+    dreamStatus: async () => DREAM_STATUS,
+    dreamRun: async () => ({ status: "idle", id: null }),
+    dreamDiary: async () => ({ count: 0, entries: [] }),
+    dreamRevert: async (id) => notFound(id),
+    dreamConfigure: async () => DREAM_STATUS,
   };
   return { ...base, ...overrides };
 }
+
+const DREAM_STATUS = {
+  enabled: true,
+  cadenceHours: 24,
+  lastDreamAt: null,
+  nextDreamAt: null,
+  inFlight: null,
+  llm: null,
+};
 
 async function connect(vault: VaultClient): Promise<Client> {
   const server = buildMcpServer(vault);

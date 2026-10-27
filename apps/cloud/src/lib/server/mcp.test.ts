@@ -52,6 +52,7 @@ interface FakeVault extends VaultClient {
     /** Concept ids the fake vault "holds" — deleteConcept removes from here. */
     concepts: Set<string>;
     deletes: string[];
+    dream: { enabled?: boolean; cadenceHours?: number };
   };
 }
 
@@ -59,6 +60,7 @@ function fakeVault(): FakeVault {
   const state: FakeVault["state"] = {
     onboardedAt: null,
     lastSyncedAt: null,
+    dream: {},
     upserts: [],
     concepts: new Set(["lead-scoring", "junk-node"]),
     deletes: [],
@@ -268,8 +270,50 @@ function fakeVault(): FakeVault {
     },
     link: async (args) => ({ ok: true, from: args.from, to: args.to, relation: args.relation ?? "related_to" }),
     destroy: async () => ({ ok: true }),
+    dreamStatus: async () => ({ ...DREAM_STATUS, ...state.dream }),
+    dreamRun: async () => ({ status: "done", id: DREAM_ENTRY.id, entry: DREAM_ENTRY }),
+    dreamDiary: async (limit) => ({ count: 1, entries: [DREAM_ENTRY].slice(0, limit ?? 10) }),
+    dreamRevert: async (id) => {
+      if (id !== DREAM_ENTRY.id) throw new VaultDoError(`no dream with id "${id}"`, 404);
+      return { id, reverted: true, restored: 3, conflicts: [] };
+    },
+    dreamConfigure: async (args) => {
+      state.dream = { ...state.dream, ...args };
+      return { ...DREAM_STATUS, ...state.dream };
+    },
   };
 }
+
+const DREAM_STATUS = {
+  enabled: true,
+  cadenceHours: 24,
+  lastDreamAt: null,
+  nextDreamAt: "2026-10-28T03:00:00.000Z",
+  inFlight: null,
+  llm: "workers-ai:@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+};
+
+const DREAM_ENTRY = {
+  id: "dream-20261027030000",
+  trigger: "manual" as const,
+  startedAt: "2026-10-27T03:00:00.000Z",
+  finishedAt: "2026-10-27T03:00:05.000Z",
+  status: "applied" as const,
+  light: { changed: 4, duplicates: 1, outcomes: 1, orphans: 0, pendingLinks: 0, missingCodeAreas: 1 },
+  rem: { status: "ok" as const, calls: 1, proposals: 2, themes: ["sessions"] },
+  deep: {
+    status: "applied" as const,
+    touched: 2,
+    allowance: 3,
+    merged: 1,
+    promoted: 1,
+    linked: 0,
+    contradictions: 0,
+  },
+  applied: [{ kind: "merge" as const, id: "a", summary: "merged b into a" }],
+  rejected: {},
+  markdown: "## Dream dream-20261027030000 — applied\n",
+};
 
 async function connect(
   vault: VaultClient = fakeVault(),
@@ -998,5 +1042,42 @@ describe("public-vault viewer surface (only: PUBLIC_VAULT_READ_TOOL_NAMES)", () 
       expect(MCP_TOOL_NAMES).toContain(n);
       expect(WRITE_TOOLS).not.toContain(n);
     }
+  });
+});
+
+describe("dream tool", () => {
+  async function dreamCall(client: Client, args: Record<string, unknown>) {
+    const result = (await client.callTool({ name: "dream", arguments: args })) as {
+      content: { text: string }[];
+      isError?: boolean;
+    };
+    return result;
+  }
+
+  it("routes every action to the VaultDO and the outputs match the contract", async () => {
+    const vault = fakeVault();
+    const client = await connect(vault);
+    const schema = getMcpTool("dream").outputSchema;
+    for (const args of [
+      { action: "status" },
+      { action: "run" },
+      { action: "diary", limit: 1 },
+      { action: "revert", id: "dream-20261027030000" },
+      { action: "configure", enabled: false, cadenceHours: 12 },
+    ]) {
+      const result = await dreamCall(client, args);
+      expect(result.isError ?? false, JSON.stringify(args)).toBe(false);
+      const data = JSON.parse(result.content[0].text);
+      expect(schema.safeParse(data).success, JSON.stringify(args)).toBe(true);
+    }
+    expect(vault.state.dream).toEqual({ enabled: false, cadenceHours: 12 });
+  });
+
+  it("revert needs an id and unknown ids are isError, never a throw", async () => {
+    const client = await connect(fakeVault());
+    expect((await dreamCall(client, { action: "revert" })).isError).toBe(true);
+    const missing = await dreamCall(client, { action: "revert", id: "nope" });
+    expect(missing.isError).toBe(true);
+    expect(missing.content[0].text).toContain("no dream");
   });
 });

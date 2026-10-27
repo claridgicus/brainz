@@ -34,7 +34,12 @@ export {
   claudeCodeSessionHook,
   sessionHookPlaybook,
   sessionInstructions,
+  DREAM_DEFAULTS,
+  DREAM_DEFAULT_CADENCE_HOURS,
+  renderDiaryEntry,
 } from "@brainz/engine";
+export type { DreamDiaryEntry, DreamLlm, DreamOptions, DreamTrigger } from "@brainz/engine";
+export type { LocalDreamOp, LocalDreamRecord } from "./dream.js";
 export type {
   SessionHookClient,
   SessionHookPlaybookOptions,

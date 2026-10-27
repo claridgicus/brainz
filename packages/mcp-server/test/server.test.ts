@@ -73,6 +73,7 @@ describe("tool registration", () => {
       "complete_task",
       "create_task",
       "delete_concept",
+      "dream",
       "get_concept",
       "get_context",
       "get_related",
@@ -603,5 +604,32 @@ describe("task tools", () => {
     const done = await callJson("complete_task", { id: created.id, outcome: "Shipped." });
     expect(done.task.taskStatus).toBe("done");
     expect(done.reminder).toContain("upsert_concept");
+  });
+});
+
+describe("dream tool (local)", () => {
+  it("status → run (light only without an LLM) → diary, all matching the contract", async () => {
+    const status = await callJson("dream", { action: "status" });
+    expect(status).toMatchObject({ enabled: true, cadenceHours: 24, llm: null, inFlight: null });
+
+    const run = await callJson("dream", { action: "run" });
+    expect(run.status).toBe("done");
+    expect(run.entry.status).toBe("light-only");
+    expect(run.entry.rem.status).toBe("skipped");
+
+    const diary = await callJson("dream", { action: "diary", limit: 5 });
+    expect(diary.entries[0].id).toBe(run.id);
+
+    const configured = await callJson("dream", { action: "configure", cadenceHours: 12 });
+    expect(configured.cadenceHours).toBe(12);
+    expect(configured.lastEntry.id).toBe(run.id);
+
+    const stats = await callJson("vault_stats");
+    expect(stats.lastDreamAt).toBe(configured.lastDreamAt);
+  });
+
+  it("revert without an id is an isError result, not a throw", async () => {
+    const result = await callTool("dream", { action: "revert" });
+    expect(result.isError).toBe(true);
   });
 });

@@ -19,6 +19,7 @@ import {
   sessionInstructions,
   syncPlaybook,
   type ConceptMeta,
+  type DreamLlm,
   type Vault,
 } from "@brainz/core";
 
@@ -109,7 +110,17 @@ type ToolHandlers = {
  * `@brainz/contracts` — nothing wire-visible is declared here. Only the
  * handlers (and the resource template) live in this server.
  */
-export function createServer(vault: Vault): McpServer {
+export interface CreateServerOptions {
+  /**
+   * LLM provider for the dream tool's REM phase. The stdio server ships none
+   * yet, so a local `dream run` does light only (REM/deep skipped, diary
+   * written); tests and embedders can inject one.
+   */
+  dreamLlm?: DreamLlm | null;
+}
+
+export function createServer(vault: Vault, options: CreateServerOptions = {}): McpServer {
+  const dreamLlm = options.dreamLlm ?? null;
   // `instructions` ride the initialize response, so every client that surfaces
   // them starts each session already told to reach for Brainz by default.
   const server = new McpServer(
@@ -276,7 +287,7 @@ export function createServer(vault: Vault): McpServer {
     vault_stats: async () =>
       guarded(() => {
         const stats = vault.stats();
-        return ok({ ...stats, embeddings: vault.embeddingStatus });
+        return ok({ ...stats, embeddings: vault.embeddingStatus, lastDreamAt: vault.lastDreamAt });
       }),
 
     onboard: async ({ action, productName, repoHint, summary, areaList }) =>
@@ -486,6 +497,33 @@ export function createServer(vault: Vault): McpServer {
       guarded(async () => ({
         content: [{ type: "text", text: sessionHookPlaybook({ client, serverName }) }],
       })),
+
+    dream: async ({ action, id, limit, enabled, cadenceHours }) =>
+      guarded(async () => {
+        const status = async () => {
+          const [lastEntry] = await vault.dreamDiary(1);
+          return {
+            ...vault.dreamConfig(),
+            lastDreamAt: vault.lastDreamAt,
+            // Local vaults have no scheduler: dreams run on demand only.
+            nextDreamAt: null,
+            inFlight: null,
+            llm: dreamLlm?.name ?? null,
+            ...(lastEntry ? { lastEntry } : {}),
+          };
+        };
+        if (action === "run") return ok(await vault.dream({ llm: dreamLlm, trigger: "manual" }));
+        if (action === "diary") {
+          const entries = await vault.dreamDiary(limit ?? 10);
+          return ok({ count: entries.length, entries });
+        }
+        if (action === "revert") {
+          if (!id) return fail('dream {action: "revert"} requires the dream `id`');
+          return ok(await vault.revertDream(id));
+        }
+        if (action === "configure") await vault.configureDreaming({ enabled, cadenceHours });
+        return ok(await status());
+      }),
 
     list_tasks: async ({ taskStatus, domain }) =>
       guarded(() => {

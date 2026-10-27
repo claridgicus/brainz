@@ -62,6 +62,7 @@ import {
   statsResponseSchema,
   syncCompleteOutputSchema,
   syncStatusOutputSchema,
+  dreamOutputSchema,
   upsertConceptOutputSchema,
   vaultSchema,
 } from "@brainz/contracts";
@@ -879,6 +880,36 @@ async function main() {
         summaryAfterSyncPayload.body.includes("Re-synced CRM after the scoring change.") &&
         summaryAfterSyncPayload.body.includes("## Sync "),
       summaryAfterSyncPayload.body,
+    );
+
+    // 9b-dream. dreaming: the DO armed its alarm; a manual run sweeps the vault.
+    // `wrangler dev --local` has no usable Workers AI, so REM is skipped
+    // (absent binding or llm-error) and the run is light-only — nothing written.
+    const dreamStatus = await mcp.callTool({ name: "dream", arguments: { action: "status" } });
+    const dreamStatusPayload = JSON.parse(dreamStatus.content.find((c) => c.type === "text").text);
+    step(
+      "dream status: enabled with a scheduled nightly alarm",
+      dreamOutputSchema.safeParse(dreamStatusPayload).success &&
+        dreamStatusPayload.enabled === true &&
+        typeof dreamStatusPayload.nextDreamAt === "string",
+      JSON.stringify(dreamStatusPayload),
+    );
+    const dreamRun = await mcp.callTool({ name: "dream", arguments: { action: "run" } });
+    const dreamRunPayload = JSON.parse(dreamRun.content.find((c) => c.type === "text").text);
+    step(
+      "dream run sweeps the vault and writes a diary entry (REM skipped without AI)",
+      dreamOutputSchema.safeParse(dreamRunPayload).success &&
+        dreamRunPayload.status === "done" &&
+        dreamRunPayload.entry?.status === "light-only",
+      JSON.stringify(dreamRunPayload).slice(0, 400),
+    );
+    const dreamDiary = await mcp.callTool({ name: "dream", arguments: { action: "diary" } });
+    const dreamDiaryPayload = JSON.parse(dreamDiary.content.find((c) => c.type === "text").text);
+    step(
+      "dream diary lists the run",
+      dreamOutputSchema.safeParse(dreamDiaryPayload).success &&
+        dreamDiaryPayload.entries[0]?.id === dreamRunPayload.id,
+      JSON.stringify(dreamDiaryPayload).slice(0, 300),
     );
 
     // 9c. task tools: create → list → take (+ context bundle) → reject → complete

@@ -796,6 +796,78 @@ export function buildProgram(ctx: Ctx): Command {
       },
     );
 
+  // ---- dream -------------------------------------------------------------
+  withGlobals(
+    program
+      .command("dream [action] [id]")
+      .description(
+        "dreaming — consolidate the vault: `status` (default), `run` a sweep now, " +
+          "`diary` of past dreams, `revert <id>` to undo one. Locally there is no LLM " +
+          "provider yet, so a run does the light phase and writes a diary entry.",
+      ),
+  )
+    .option("--limit <n>", "with diary: how many entries", (v) => Number.parseInt(v, 10), 10)
+    .action(
+      async (
+        action: string | undefined,
+        id: string | undefined,
+        opts: { limit: number },
+        cmd: Command,
+      ) => {
+        const g = getGlobals(cmd);
+        const act = action ?? "status";
+        if (!["status", "run", "diary", "revert"].includes(act)) {
+          throw new CliError(`unknown dream action "${act}" — use status, run, diary, or revert <id>`);
+        }
+        await withVault(g.vaultDir, async (vault) => {
+          if (act === "run") {
+            const res = await vault.dream({ trigger: "manual" });
+            if (g.json) return printJson(ctx, res);
+            ctx.out(
+              res.entry
+                ? res.entry.markdown
+                : `${pc.dim("nothing changed since the last dream — nothing to do")}\n`,
+            );
+            return;
+          }
+          if (act === "diary") {
+            const entries = await vault.dreamDiary(opts.limit);
+            if (g.json) return printJson(ctx, { count: entries.length, entries });
+            if (entries.length === 0) ctx.out(`${pc.dim("no dreams yet — run `brainz dream run`")}\n`);
+            for (const e of entries) ctx.out(`${e.markdown}\n`);
+            return;
+          }
+          if (act === "revert") {
+            if (!id) throw new CliError("dream revert requires the dream id (see `brainz dream diary`)");
+            const res = await vault.revertDream(id);
+            if (g.json) return printJson(ctx, res);
+            if (!res.reverted) {
+              throw new CliError(
+                `refusing to revert ${id}: changed since the dream — ${res.conflicts.join(", ")}`,
+              );
+            }
+            ctx.out(`${pc.green("✓")} reverted ${pc.cyan(id)} — ${res.restored} concept(s) restored\n`);
+            return;
+          }
+          const [lastEntry] = await vault.dreamDiary(1);
+          const status = {
+            ...vault.dreamConfig(),
+            lastDreamAt: vault.lastDreamAt,
+            nextDreamAt: null,
+            inFlight: null,
+            llm: null,
+            ...(lastEntry ? { lastEntry } : {}),
+          };
+          if (g.json) return printJson(ctx, status);
+          ctx.out(
+            `dreaming ${status.enabled ? pc.green("on") : pc.yellow("off")} — last dream ` +
+              `${status.lastDreamAt ?? "never"}; no LLM provider locally (light phase only)\n`,
+          );
+          if (lastEntry) ctx.out(`\n${lastEntry.markdown}`);
+        });
+      },
+    );
+
   // ---- hook --------------------------------------------------------------
   // No vault needed: the hook lives in the CODE repo the agents work in.
   withGlobals(

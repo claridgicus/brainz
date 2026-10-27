@@ -1,9 +1,18 @@
 import type DatabaseType from "better-sqlite3";
 import {
+  advanceSweep,
   assembleContext,
   bfsRelated,
+  clampCadenceHours,
   cosineSim,
+  DREAM_DEFAULT_CADENCE_HOURS,
+  diaryEntry,
+  dreamId,
+  isEmptySweep,
   ONBOARDING_SUMMARY_ID,
+  planDeep,
+  renderDiaryEntry,
+  startSweep,
   packVector,
   parseNote,
   readFrontmatter,
@@ -18,6 +27,12 @@ import type {
   ConceptType,
   ContextBundle,
   ContextOptions,
+  DreamConcept,
+  DreamDiaryEntry,
+  DreamLlm,
+  DreamOptions,
+  DreamSnapshot,
+  DreamTrigger,
   Edge,
   RelatedNode,
   RelatedOptions,
@@ -32,6 +47,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { openDb } from "./db.js";
+import { serializeDreamConcept, type LocalDreamOp, type LocalDreamRecord } from "./dream.js";
 import { createEmbedder, type Embedder, type EmbeddingConfig } from "./embeddings.js";
 
 interface VaultConfig {
@@ -41,6 +57,10 @@ interface VaultConfig {
   onboardedAt?: string;
   /** ISO timestamp of the last sync (or initial onboarding); absent → never synced. */
   lastSyncedAt?: string;
+  /** Start of the last completed dream sweep; absent → never dreamed. */
+  lastDreamAt?: string;
+  /** Dreaming settings (on by default, 24h cadence). */
+  dreaming?: { enabled?: boolean; cadenceHours?: number };
   [key: string]: unknown;
 }
 
@@ -752,6 +772,217 @@ export class Vault {
     });
     await this.setLastSyncedAt(stamp);
     return saved;
+  }
+
+  // ---------------------------------------------------------------- dreaming
+
+  /** Start of the last completed dream sweep (brainz.config.json), or null. */
+  get lastDreamAt(): string | null {
+    return typeof this.#config.lastDreamAt === "string" && this.#config.lastDreamAt
+      ? this.#config.lastDreamAt
+      : null;
+  }
+
+  /** Dreaming settings: on by default, 24h cadence. */
+  dreamConfig(): { enabled: boolean; cadenceHours: number } {
+    const d = this.#config.dreaming ?? {};
+    return {
+      enabled: d.enabled !== false,
+      cadenceHours: clampCadenceHours(d.cadenceHours ?? DREAM_DEFAULT_CADENCE_HOURS),
+    };
+  }
+
+  /** Update dreaming settings in brainz.config.json. */
+  async configureDreaming(input: { enabled?: boolean; cadenceHours?: number }): Promise<void> {
+    const current = this.dreamConfig();
+    this.#config.dreaming = {
+      enabled: input.enabled ?? current.enabled,
+      cadenceHours: clampCadenceHours(input.cadenceHours ?? current.cadenceHours),
+    };
+    await this.#writeConfig();
+  }
+
+  async #writeConfig(): Promise<void> {
+    const configPath = path.join(this.dir, "brainz.config.json");
+    await fsp.writeFile(configPath, `${JSON.stringify(this.#config, null, 2)}\n`);
+  }
+
+  #dreamsDir(): string {
+    return path.join(this.dir, ".dreams");
+  }
+
+  /** Every note as dreaming sees it, plus the raw file behind each id. */
+  async #dreamSnapshot(): Promise<{
+    snapshot: DreamSnapshot;
+    files: Map<string, { filePath: string; raw: string }>;
+  }> {
+    const files = new Map<string, { filePath: string; raw: string }>();
+    const concepts: DreamConcept[] = [];
+    for (const meta of this.listConcepts()) {
+      let raw: string;
+      let mtime: string;
+      try {
+        raw = await fsp.readFile(meta.filePath, "utf8");
+        mtime = (await fsp.stat(meta.filePath)).mtime.toISOString();
+      } catch {
+        continue;
+      }
+      const parsed = parseNote(raw, { fallbackId: path.basename(meta.filePath, ".md") });
+      files.set(meta.id, { filePath: meta.filePath, raw });
+      concepts.push({
+        id: meta.id,
+        title: meta.title,
+        type: meta.type,
+        status: meta.status,
+        ...(meta.product !== undefined ? { product: meta.product } : {}),
+        tags: meta.tags,
+        codeAreas: meta.codeAreas ?? [],
+        ...(meta.taskStatus !== undefined ? { taskStatus: meta.taskStatus } : {}),
+        ...(meta.takenBy !== undefined ? { takenBy: meta.takenBy } : {}),
+        ...(meta.takenAt !== undefined ? { takenAt: meta.takenAt } : {}),
+        ...(meta.doneAt !== undefined ? { doneAt: meta.doneAt } : {}),
+        relations: parsed.relations,
+        body: parsed.body,
+        ...(meta.createdAt !== undefined ? { createdAt: meta.createdAt } : {}),
+        // Local notes rarely carry updatedAt; the file mtime marks recent change.
+        updatedAt: meta.updatedAt ?? mtime,
+      });
+    }
+    const vectors = new Map<string, Float32Array>();
+    const rows = this.#db.prepare("SELECT id, vector FROM embeddings").all() as {
+      id: string;
+      vector: Buffer;
+    }[];
+    for (const row of rows) vectors.set(row.id, unpackVector(row.vector));
+    return { snapshot: { concepts, vector: (id) => vectors.get(id) ?? null }, files };
+  }
+
+  /**
+   * Run one dream sweep to completion (light → REM → deep) with the engine.
+   * Without an `llm` only light runs and the diary records REM/deep skipped.
+   * An empty sweep (nothing changed since the last dream) writes no entry.
+   */
+  async dream(
+    opts: { llm?: DreamLlm | null; trigger?: DreamTrigger; options?: Partial<DreamOptions> } = {},
+  ): Promise<{ status: "done" | "idle"; id: string | null; entry?: DreamDiaryEntry }> {
+    const now = new Date().toISOString();
+    const { snapshot, files } = await this.#dreamSnapshot();
+    let id = dreamId(now);
+    for (let n = 2; fs.existsSync(path.join(this.#dreamsDir(), `${id}.json`)); n++) {
+      id = `${dreamId(now)}-${n}`;
+    }
+    let state = startSweep({ id, trigger: opts.trigger ?? "manual", now, since: this.lastDreamAt, snapshot });
+    if (isEmptySweep(state)) {
+      this.#config.lastDreamAt = now;
+      await this.#writeConfig();
+      return { status: "idle", id: null };
+    }
+    const llm = opts.llm ?? null;
+    while (state.phase !== "deep") {
+      state = await advanceSweep(state, snapshot, { llm, options: opts.options });
+    }
+    const plan = state.rem.status === "ok" ? planDeep(state, snapshot, { now, options: opts.options }) : null;
+
+    const ops: LocalDreamOp[] = [];
+    if (plan?.status === "apply") {
+      for (const op of plan.ops) {
+        const prior = files.get(op.id);
+        const filePath = prior?.filePath ?? path.join(this.dir, "concepts", `${op.id}.md`);
+        const beforeRaw = prior?.raw ?? null;
+        const afterRaw = op.after ? serializeDreamConcept(op.after, beforeRaw) : null;
+        ops.push({ id: op.id, filePath, beforeRaw, afterRaw });
+      }
+      await this.#writeDreamFiles(ops.map((o) => ({ filePath: o.filePath, raw: o.afterRaw })));
+    }
+
+    const entry = diaryEntry(state, plan, new Date().toISOString());
+    const record: LocalDreamRecord = { entry, ops };
+    await fsp.mkdir(this.#dreamsDir(), { recursive: true });
+    await fsp.writeFile(
+      path.join(this.#dreamsDir(), `${id}.json`),
+      `${JSON.stringify(record, null, 2)}\n`,
+    );
+    // The sweep's START is the next baseline, so edits made during it are seen next time.
+    this.#config.lastDreamAt = now;
+    await this.#writeConfig();
+    return { status: "done", id, entry };
+  }
+
+  async #writeDreamFiles(writes: { filePath: string; raw: string | null }[]): Promise<void> {
+    for (const w of writes) {
+      if (w.raw === null) await fsp.rm(w.filePath, { force: true });
+      else {
+        await fsp.mkdir(path.dirname(w.filePath), { recursive: true });
+        await fsp.writeFile(w.filePath, w.raw);
+      }
+    }
+    for (const w of writes) await this.#reindexFile(w.filePath);
+  }
+
+  async #readDream(id: string): Promise<LocalDreamRecord | null> {
+    if (!/^[a-z0-9-]+$/.test(id)) return null;
+    try {
+      return JSON.parse(
+        await fsp.readFile(path.join(this.#dreamsDir(), `${id}.json`), "utf8"),
+      ) as LocalDreamRecord;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Dream Diary entries, newest first. */
+  async dreamDiary(limit = 10): Promise<DreamDiaryEntry[]> {
+    let names: string[];
+    try {
+      names = (await fsp.readdir(this.#dreamsDir())).filter((n) => n.endsWith(".json"));
+    } catch {
+      return [];
+    }
+    const entries: DreamDiaryEntry[] = [];
+    for (const name of names) {
+      const record = await this.#readDream(name.slice(0, -5));
+      if (record) entries.push(record.entry);
+    }
+    entries.sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id));
+    return entries.slice(0, limit);
+  }
+
+  /**
+   * Undo one dream byte-for-byte from its preimages. Refuses (listing the
+   * conflicts) when any file it wrote has changed since, so later work is
+   * never clobbered.
+   */
+  async revertDream(
+    id: string,
+  ): Promise<{ id: string; reverted: boolean; restored: number; conflicts: string[] }> {
+    const record = await this.#readDream(id);
+    if (!record) throw new Error(`no dream with id "${id}"`);
+    if (record.entry.revertedAt) throw new Error(`dream "${id}" was already reverted`);
+    const conflicts: string[] = [];
+    for (const op of record.ops) {
+      let current: string | null = null;
+      try {
+        current = await fsp.readFile(op.filePath, "utf8");
+      } catch {
+        current = null;
+      }
+      if (current !== op.afterRaw) conflicts.push(op.id);
+    }
+    if (conflicts.length > 0) return { id, reverted: false, restored: 0, conflicts };
+    await this.#writeDreamFiles(
+      [...record.ops].reverse().map((op) => ({ filePath: op.filePath, raw: op.beforeRaw })),
+    );
+    const entry: DreamDiaryEntry = {
+      ...record.entry,
+      status: "reverted",
+      revertedAt: new Date().toISOString(),
+    };
+    entry.markdown = renderDiaryEntry(entry);
+    await fsp.writeFile(
+      path.join(this.#dreamsDir(), `${id}.json`),
+      `${JSON.stringify({ ...record, entry }, null, 2)}\n`,
+    );
+    return { id, reverted: true, restored: record.ops.length, conflicts: [] };
   }
 
   close(): void {

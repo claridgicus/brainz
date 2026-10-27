@@ -280,10 +280,20 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
 
     vault_stats: async () =>
       guarded(async () => {
-        const { concepts, edges, products, tags, byType, onboarded, openTasks, embeddings } =
+        const { concepts, edges, products, tags, byType, onboarded, openTasks, embeddings, lastDreamAt } =
           await vault.stats();
         // keywordIndex is intentionally dropped: vault_stats' contract shape is strict.
-        return ok({ concepts, edges, products, tags, byType, onboarded, openTasks, embeddings });
+        return ok({
+          concepts,
+          edges,
+          products,
+          tags,
+          byType,
+          onboarded,
+          openTasks,
+          embeddings,
+          ...(lastDreamAt !== undefined ? { lastDreamAt } : {}),
+        });
       }),
 
     onboard: async ({ action, productName, repoHint, summary, areaList }) =>
@@ -527,6 +537,20 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
       guarded(async () => ({
         content: [{ type: "text", text: sessionHookPlaybook({ client, serverName }) }],
       })),
+
+    // Dreaming: the VaultDO runs the sweep (alarm-driven nightly, or now via
+    // "run"); the tool only routes the action.
+    dream: async ({ action, id, limit, enabled, cadenceHours }) =>
+      guarded(async () => {
+        if (action === "run") return ok(await vault.dreamRun());
+        if (action === "diary") return ok(await vault.dreamDiary(limit ?? 10));
+        if (action === "revert") {
+          if (!id) return fail('dream {action: "revert"} requires the dream `id`');
+          return ok(await vault.dreamRevert(id));
+        }
+        if (action === "configure") return ok(await vault.dreamConfigure({ enabled, cadenceHours }));
+        return ok(await vault.dreamStatus());
+      }),
 
     list_tasks: async ({ taskStatus, domain }) =>
       guarded(async () => {

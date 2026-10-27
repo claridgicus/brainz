@@ -23,13 +23,22 @@
  */
 import type { DurableObjectState, SqlStorage } from "@cloudflare/workers-types";
 import {
+  advanceSweep,
   assembleContext,
   bfsRelated,
+  clampCadenceHours,
   cosineSim,
+  DREAM_DEFAULT_CADENCE_HOURS,
+  diaryEntry,
+  dreamId,
   extractWikiLinks,
+  isEmptySweep,
   packVector,
+  planDeep,
+  renderDiaryEntry,
   rrfFuse,
   slugify,
+  startSweep,
   unpackVector,
 } from "@brainz/engine";
 import type {
@@ -38,6 +47,14 @@ import type {
   ConceptMeta,
   ConceptStatus,
   ConceptType,
+  DreamConcept,
+  DreamDiaryEntry,
+  DreamLlm,
+  DreamOptions,
+  DreamPhase,
+  DreamSnapshot,
+  DreamSweepState,
+  DreamTrigger,
   Edge,
   TaskStatus,
   UpsertInput,
@@ -55,8 +72,9 @@ import {
   syntheticFilePath,
   tokenize,
 } from "./do-helpers";
+import { workersAiDreamLlm } from "./dream-llm";
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
 
 /**
@@ -80,6 +98,11 @@ type EmbeddingsMeta = "ready" | "unavailable" | "rate-limited";
  */
 const CLAIM_TTL_MS = 30 * 60 * 1000;
 
+/** Dream Diary retention: newest N entries (older rows pruned with their preimages). */
+const DREAM_RETENTION = 50;
+/** Delay before the alarm continues an in-flight (chunked) sweep. */
+const DREAM_CONTINUE_MS = 1000;
+
 /** Minimal Workers AI surface (avoids model-name generics from workers-types). */
 interface AiBinding {
   run(model: string, inputs: Record<string, unknown>): Promise<unknown>;
@@ -87,6 +110,48 @@ interface AiBinding {
 
 interface VaultDOEnv {
   AI?: AiBinding;
+}
+
+/** Preimage of one concept a dream wrote: the full prior row (null ⇒ created) + the after-state fingerprint. */
+interface DreamPreimage {
+  id: string;
+  before: ConceptRow | null;
+  /** updated_at + hash the dream left behind; both null ⇒ the dream removed the concept. */
+  afterUpdatedAt: string | null;
+  afterHash: string | null;
+}
+
+interface DreamRow {
+  [column: string]: string | number | null;
+  id: string;
+  started_at: string;
+  diary_json: string;
+  preimage_json: string;
+  reverted_at: string | null;
+}
+
+export interface DreamStatusResult {
+  enabled: boolean;
+  cadenceHours: number;
+  lastDreamAt: string | null;
+  nextDreamAt: string | null;
+  inFlight: { id: string; phase: DreamPhase; startedAt: string } | null;
+  llm: string | null;
+  lastEntry?: DreamDiaryEntry;
+}
+
+export interface DreamRunResult {
+  status: "done" | "idle" | "in-progress";
+  id: string | null;
+  phase?: DreamPhase;
+  entry?: DreamDiaryEntry;
+}
+
+export interface DreamRevertResult {
+  id: string;
+  reverted: boolean;
+  restored: number;
+  conflicts: string[];
 }
 
 interface ConceptRow {
@@ -133,7 +198,13 @@ export class VaultDO {
     this.#state = state;
     this.#env = (env ?? {}) as VaultDOEnv;
     this.#sql = state.storage.sql;
-    state.blockConcurrencyWhile(async () => this.#initSchema());
+    state.blockConcurrencyWhile(async () => {
+      this.#initSchema();
+      // Dreaming is unattended: make sure an enabled vault always has its alarm.
+      if (this.#dreamEnabled() && (await state.storage.getAlarm()) === null) {
+        await this.#scheduleDream();
+      }
+    });
   }
 
   // ------------------------------------------------------------------ schema
@@ -182,6 +253,7 @@ export class VaultDO {
       // Per-vault concept-type registry (Wave TR): types are data, seeded with
       // the 11 built-ins so a fresh vault behaves identically to today.
       this.#createConceptTypeTable();
+      this.#createDreamTable();
       if (this.#metaGet("embeddings") === null) this.#metaSet("embeddings", "ready");
     } else {
       // Gated additive migrations for pre-existing vaults. Never edit past
@@ -222,6 +294,11 @@ export class VaultDO {
         // gated branch exists to record the version bump; the `meta` table
         // already holds the key with no DDL.
       }
+      if (version < 7) {
+        // v6 → v7: dreaming — the Dream Diary + preimage table (additive). The
+        // dream_* settings are meta KV entries with defaults (on, 24h).
+        this.#createDreamTable();
+      }
     }
     // Idempotent seed: if the registry table exists but is empty (fresh vault or
     // just-backfilled), populate the built-ins. Safe to run every init.
@@ -244,6 +321,23 @@ export class VaultDO {
       this.#fts = false;
       this.#metaSet("keyword_index", "like");
     }
+  }
+
+  #createDreamTable(): void {
+    this.#sql.exec(`CREATE TABLE IF NOT EXISTS dream (
+      id TEXT PRIMARY KEY,
+      started_at TEXT NOT NULL,
+      finished_at TEXT NOT NULL,
+      trigger TEXT NOT NULL,
+      status TEXT NOT NULL,
+      diary_json TEXT NOT NULL,
+      preimage_json TEXT NOT NULL,
+      reverted_at TEXT
+    )`);
+  }
+
+  #metaDelete(key: string): void {
+    this.#sql.exec(`DELETE FROM meta WHERE key = ?`, key);
   }
 
   #metaGet(key: string): string | null {
@@ -535,6 +629,18 @@ export class VaultDO {
           return json(this.setLastSyncedAt(String(args.lastSyncedAt ?? "")));
         case "link":
           return json(await this.link(args as { from: string; to: string; relation?: string }));
+        case "dreamStatus":
+          return json(await this.dreamStatus());
+        case "dreamRun":
+          return json(await this.dreamRun());
+        case "dreamDiary":
+          return json(this.dreamDiary(Number(args.limit ?? 10)));
+        case "dreamRevert":
+          return json(await this.dreamRevert(String(args.id ?? "")));
+        case "dreamConfigure":
+          return json(
+            await this.dreamConfigure(args as { enabled?: boolean; cadenceHours?: number }),
+          );
         case "destroy":
           return json(await this.destroy());
         default:
@@ -637,10 +743,11 @@ export class VaultDO {
   deleteConcept(id: string): { ok: true; deleted: boolean } {
     const existing = this.#getRow(id);
     if (!existing) return { ok: true, deleted: false };
+    // FTS first: its rowid is the concept row's, which is gone after the DELETE.
+    if (this.#fts) this.#sql.exec(`DELETE FROM concept_fts WHERE rowid = ?`, this.#rowidOf(id));
     this.#sql.exec(`DELETE FROM concept WHERE id = ?`, id);
     this.#sql.exec(`DELETE FROM edge WHERE from_id = ?`, id);
     this.#sql.exec(`DELETE FROM embedding WHERE concept_id = ?`, id);
-    if (this.#fts) this.#sql.exec(`DELETE FROM concept_fts WHERE rowid = ?`, this.#rowidOf(id));
     return { ok: true, deleted: true };
   }
 
@@ -668,6 +775,7 @@ export class VaultDO {
   }
 
   async destroy(): Promise<{ ok: true }> {
+    await this.#state.storage.deleteAlarm();
     await this.#state.storage.deleteAll();
     return { ok: true };
   }
@@ -1295,6 +1403,7 @@ export class VaultDO {
     openTasks: number;
     embeddings: EmbeddingsMeta;
     keywordIndex: "fts5" | "like";
+    lastDreamAt: string | null;
   } {
     const concepts = Number(
       this.#sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM concept`).one().n,
@@ -1335,7 +1444,350 @@ export class VaultDO {
       openTasks,
       embeddings: this.#embeddingsMeta(),
       keywordIndex: this.#fts ? "fts5" : "like",
+      lastDreamAt: this.#metaGet("last_dream_at"),
     };
+  }
+
+  // ----------------------------------------------------------------- dreaming
+
+  /** Test seam: override engine dream options (thresholds, batch sizes). */
+  dreamOptions: Partial<DreamOptions> = {};
+
+  #dreamEnabled(): boolean {
+    return this.#metaGet("dream_enabled") !== "false";
+  }
+
+  #dreamCadenceHours(): number {
+    const raw = this.#metaGet("dream_cadence_hours");
+    return clampCadenceHours(raw === null ? DREAM_DEFAULT_CADENCE_HOURS : Number(raw));
+  }
+
+  /** The REM provider: Workers AI when the binding exists, else none (light only). */
+  #dreamLlm(): DreamLlm | null {
+    return this.#env.AI ? workersAiDreamLlm(this.#env.AI) : null;
+  }
+
+  #dreamCheckpoint(): DreamSweepState | null {
+    const raw = this.#metaGet("dream_checkpoint");
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as DreamSweepState;
+    } catch {
+      this.#metaDelete("dream_checkpoint");
+      return null;
+    }
+  }
+
+  /** Arm the alarm: soon while a sweep is in flight, else one cadence after the last dream. */
+  async #scheduleDream(): Promise<void> {
+    if (!this.#dreamEnabled()) {
+      await this.#state.storage.deleteAlarm();
+      return;
+    }
+    const now = Date.now();
+    if (this.#dreamCheckpoint()) {
+      await this.#state.storage.setAlarm(now + DREAM_CONTINUE_MS);
+      return;
+    }
+    const last = this.#metaGet("last_dream_at");
+    const base = last ? Date.parse(last) : now;
+    const due = (Number.isFinite(base) ? base : now) + this.#dreamCadenceHours() * 3_600_000;
+    await this.#state.storage.setAlarm(Math.max(due, now + 60_000));
+  }
+
+  /** DO alarm: advance the nightly dream by one bounded step, then re-arm. */
+  async alarm(): Promise<void> {
+    if (!this.#dreamEnabled()) return;
+    try {
+      await this.#dreamStep("alarm");
+    } catch {
+      // A broken sweep must not loop: drop the checkpoint, try again next cadence.
+      this.#metaDelete("dream_checkpoint");
+    }
+    // An empty vault stops waking up; its next access re-arms the alarm.
+    const concepts = Number(this.#sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM concept`).one().n);
+    if (concepts > 0 || this.#dreamCheckpoint()) await this.#scheduleDream();
+  }
+
+  #dreamSnapshot(): DreamSnapshot {
+    const concepts: DreamConcept[] = this.#sql
+      .exec<ConceptRow>(`SELECT * FROM concept ORDER BY id`)
+      .toArray()
+      .map((row) => {
+        const meta = this.#rowToMeta(row);
+        return {
+          id: meta.id,
+          title: meta.title,
+          type: meta.type,
+          status: meta.status,
+          ...(meta.product !== undefined ? { product: meta.product } : {}),
+          tags: meta.tags,
+          codeAreas: meta.codeAreas ?? [],
+          ...(meta.taskStatus !== undefined ? { taskStatus: meta.taskStatus } : {}),
+          ...(meta.takenBy !== undefined ? { takenBy: meta.takenBy } : {}),
+          ...(meta.takenAt !== undefined ? { takenAt: meta.takenAt } : {}),
+          ...(meta.doneAt !== undefined ? { doneAt: meta.doneAt } : {}),
+          relations: JSON.parse(row.relations_json) as Record<string, string[]>,
+          body: row.body,
+          ...(meta.createdAt !== undefined ? { createdAt: meta.createdAt } : {}),
+          ...(meta.updatedAt !== undefined ? { updatedAt: meta.updatedAt } : {}),
+        };
+      });
+    const vectors = new Map<string, Float32Array>();
+    for (const row of this.#sql
+      .exec<{ concept_id: string; vector: ArrayBuffer }>(`SELECT concept_id, vector FROM embedding`)
+      .toArray()) {
+      vectors.set(row.concept_id, unpackVector(row.vector));
+    }
+    return { concepts, vector: (id) => vectors.get(id) ?? null };
+  }
+
+  /**
+   * One bounded step of a sweep (DO storage is single-threaded, so a manual
+   * run and the alarm never interleave mid-step). Starts a sweep when none is
+   * in flight; finishes it (deep + diary) once light and REM are done.
+   */
+  async #dreamStep(trigger: DreamTrigger): Promise<DreamRunResult> {
+    const snapshot = this.#dreamSnapshot();
+    let state = this.#dreamCheckpoint();
+    if (!state) {
+      const now = new Date().toISOString();
+      let id = dreamId(now);
+      for (let n = 2; this.#sql.exec(`SELECT 1 FROM dream WHERE id = ?`, id).toArray().length > 0; n++) {
+        id = `${dreamId(now)}-${n}`;
+      }
+      state = startSweep({ id, trigger, now, since: this.#metaGet("last_dream_at"), snapshot });
+      if (isEmptySweep(state)) {
+        this.#metaSet("last_dream_at", now);
+        return { status: "idle", id: null };
+      }
+    }
+    const llm = this.#dreamLlm();
+    // One light batch, or one bounded round of REM calls, per step.
+    if (state.phase !== "deep") {
+      state = await advanceSweep(state, snapshot, { llm, options: this.dreamOptions });
+    }
+    // Light finishing hands straight to REM within the same step when cheap.
+    if (state.phase === "rem") {
+      state = await advanceSweep(state, snapshot, { llm, options: this.dreamOptions });
+    }
+    if (state.phase !== "deep") {
+      this.#metaSet("dream_checkpoint", JSON.stringify(state));
+      return { status: "in-progress", id: state.id, phase: state.phase };
+    }
+    return { status: "done", id: state.id, entry: await this.#finishDream(state, snapshot) };
+  }
+
+  async #finishDream(state: DreamSweepState, snapshot: DreamSnapshot): Promise<DreamDiaryEntry> {
+    const now = new Date().toISOString();
+    const plan =
+      state.rem.status === "ok" ? planDeep(state, snapshot, { now, options: this.dreamOptions }) : null;
+    const preimages: DreamPreimage[] = [];
+    if (plan?.status === "apply") {
+      for (const op of plan.ops) {
+        const before = this.#getRow(op.id);
+        if (op.after) await this.#writeDreamConcept(op.after);
+        else this.deleteConcept(op.id);
+        const after = this.#getRow(op.id);
+        preimages.push({
+          id: op.id,
+          before,
+          afterUpdatedAt: after?.updated_at ?? null,
+          afterHash: after?.hash ?? null,
+        });
+      }
+    }
+    const entry = diaryEntry(state, plan, new Date().toISOString());
+    this.#sql.exec(
+      `INSERT INTO dream (id, started_at, finished_at, trigger, status, diary_json, preimage_json, reverted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+      entry.id,
+      entry.startedAt,
+      entry.finishedAt,
+      entry.trigger,
+      entry.status,
+      JSON.stringify(entry),
+      JSON.stringify(preimages),
+    );
+    this.#sql.exec(
+      `DELETE FROM dream WHERE id NOT IN (SELECT id FROM dream ORDER BY started_at DESC, id DESC LIMIT ?)`,
+      DREAM_RETENTION,
+    );
+    // The sweep's START is the next baseline, so edits made during it are seen next time.
+    this.#metaSet("last_dream_at", state.startedAt);
+    this.#metaDelete("dream_checkpoint");
+    return entry;
+  }
+
+  /** Write a planned concept exactly as given (dream-owned timestamps), rebuilding edges/FTS/embedding. */
+  async #writeDreamConcept(c: DreamConcept): Promise<void> {
+    const body = c.body.endsWith("\n") ? c.body : `${c.body}\n`;
+    const hash = await sha256Hex(`${c.title}\n\n${body}`);
+    this.#putRow({
+      id: c.id,
+      title: c.title,
+      type: this.#resolveType(c.type),
+      status: c.status,
+      product: c.product ?? null,
+      tags_json: JSON.stringify(c.tags),
+      code_areas_json: JSON.stringify(c.codeAreas),
+      task_status: c.taskStatus ?? null,
+      taken_by: c.takenBy ?? null,
+      taken_at: c.takenAt ?? null,
+      done_at: c.doneAt ?? null,
+      relations_json: JSON.stringify(c.relations),
+      body,
+      hash,
+      created_at: c.createdAt ?? null,
+      updated_at: c.updatedAt ?? null,
+    });
+    await this.#reembedIfStale(c.id);
+  }
+
+  /** Upsert a full concept row verbatim and rebuild its derived state (edges, FTS). */
+  #putRow(row: ConceptRow): void {
+    this.#sql.exec(
+      `INSERT INTO concept (id, title, type, status, product, tags_json, code_areas_json, task_status, taken_by, taken_at, done_at, relations_json, body, hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         title = excluded.title, type = excluded.type, status = excluded.status,
+         product = excluded.product, tags_json = excluded.tags_json,
+         code_areas_json = excluded.code_areas_json,
+         task_status = excluded.task_status, taken_by = excluded.taken_by,
+         taken_at = excluded.taken_at, done_at = excluded.done_at,
+         relations_json = excluded.relations_json, body = excluded.body,
+         hash = excluded.hash, created_at = excluded.created_at, updated_at = excluded.updated_at`,
+      row.id,
+      row.title,
+      row.type,
+      row.status,
+      row.product,
+      row.tags_json,
+      row.code_areas_json,
+      row.task_status,
+      row.taken_by,
+      row.taken_at,
+      row.done_at,
+      row.relations_json,
+      row.body,
+      row.hash,
+      row.created_at,
+      row.updated_at,
+    );
+    this.#rebuildEdges(
+      row.id,
+      JSON.parse(row.relations_json) as Record<string, string[]>,
+      row.body,
+    );
+    this.#updateFts(row.id, row.title, row.body, JSON.parse(row.tags_json) as string[]);
+  }
+
+  async #reembedIfStale(id: string): Promise<void> {
+    const row = this.#getRow(id);
+    if (!row) return;
+    const prev = this.#sql
+      .exec<{ hash: string }>(`SELECT hash FROM embedding WHERE concept_id = ?`, id)
+      .toArray();
+    if (prev.length === 0 || prev[0].hash !== row.hash) {
+      await this.#tryEmbed(id, `${row.title}\n\n${row.body}`, row.hash);
+    }
+  }
+
+  #latestEntry(): DreamDiaryEntry | undefined {
+    const rows = this.#sql
+      .exec<DreamRow>(`SELECT * FROM dream ORDER BY started_at DESC, id DESC LIMIT 1`)
+      .toArray();
+    return rows.length > 0 ? (JSON.parse(rows[0].diary_json) as DreamDiaryEntry) : undefined;
+  }
+
+  async dreamStatus(): Promise<DreamStatusResult> {
+    const enabled = this.#dreamEnabled();
+    const alarm = enabled ? await this.#state.storage.getAlarm() : null;
+    const flight = this.#dreamCheckpoint();
+    const lastEntry = this.#latestEntry();
+    return {
+      enabled,
+      cadenceHours: this.#dreamCadenceHours(),
+      lastDreamAt: this.#metaGet("last_dream_at"),
+      nextDreamAt: alarm === null ? null : new Date(alarm).toISOString(),
+      inFlight: flight ? { id: flight.id, phase: flight.phase, startedAt: flight.startedAt } : null,
+      llm: this.#dreamLlm()?.name ?? null,
+      ...(lastEntry ? { lastEntry } : {}),
+    };
+  }
+
+  /**
+   * Dream now: start (or continue) a sweep and advance it as far as one request
+   * allows. An unfinished sweep continues on the alarm shortly after.
+   */
+  async dreamRun(): Promise<DreamRunResult> {
+    let result = await this.#dreamStep("manual");
+    // A small vault finishes in a few steps; bound the request regardless.
+    for (let i = 0; i < 4 && result.status === "in-progress"; i++) {
+      result = await this.#dreamStep("manual");
+    }
+    if (result.status === "in-progress") await this.#state.storage.setAlarm(Date.now() + DREAM_CONTINUE_MS);
+    else await this.#scheduleDream();
+    return result;
+  }
+
+  dreamDiary(limit = 10): { count: number; entries: DreamDiaryEntry[] } {
+    const n = Math.min(50, Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 10));
+    const entries = this.#sql
+      .exec<DreamRow>(`SELECT * FROM dream ORDER BY started_at DESC, id DESC LIMIT ?`, n)
+      .toArray()
+      .map((r) => JSON.parse(r.diary_json) as DreamDiaryEntry);
+    return { count: entries.length, entries };
+  }
+
+  /**
+   * Undo one dream from its preimages. Refuses (listing conflicts) when a
+   * concept it wrote changed since, so later agent work is never clobbered.
+   */
+  async dreamRevert(id: string): Promise<DreamRevertResult> {
+    const rows = this.#sql.exec<DreamRow>(`SELECT * FROM dream WHERE id = ?`, id).toArray();
+    if (rows.length === 0) throw new NotFoundError(`no dream with id "${id}"`);
+    const row = rows[0];
+    if (row.reverted_at) throw new Error(`dream "${id}" was already reverted`);
+    const preimages = JSON.parse(row.preimage_json) as DreamPreimage[];
+    const conflicts: string[] = [];
+    for (const p of preimages) {
+      const current = this.#getRow(p.id);
+      const unchanged =
+        p.afterHash === null
+          ? current === null
+          : current !== null && current.hash === p.afterHash && current.updated_at === p.afterUpdatedAt;
+      if (!unchanged) conflicts.push(p.id);
+    }
+    if (conflicts.length > 0) return { id, reverted: false, restored: 0, conflicts };
+    for (const p of [...preimages].reverse()) {
+      if (p.before === null) this.deleteConcept(p.id);
+      else {
+        this.#putRow(p.before);
+        await this.#reembedIfStale(p.id);
+      }
+    }
+    const revertedAt = new Date().toISOString();
+    const entry = { ...(JSON.parse(row.diary_json) as DreamDiaryEntry), status: "reverted" as const, revertedAt };
+    entry.markdown = renderDiaryEntry(entry);
+    this.#sql.exec(
+      `UPDATE dream SET status = 'reverted', reverted_at = ?, diary_json = ? WHERE id = ?`,
+      revertedAt,
+      JSON.stringify(entry),
+      id,
+    );
+    return { id, reverted: true, restored: preimages.length, conflicts: [] };
+  }
+
+  async dreamConfigure(args: { enabled?: boolean; cadenceHours?: number }): Promise<DreamStatusResult> {
+    if (args.enabled !== undefined) this.#metaSet("dream_enabled", args.enabled ? "true" : "false");
+    if (args.cadenceHours !== undefined) {
+      this.#metaSet("dream_cadence_hours", String(clampCadenceHours(Number(args.cadenceHours))));
+    }
+    // Turning dreaming off also abandons any sweep in flight.
+    if (!this.#dreamEnabled()) this.#metaDelete("dream_checkpoint");
+    await this.#scheduleDream();
+    return this.dreamStatus();
   }
 
   // ----------------------------------------------------------------- helpers

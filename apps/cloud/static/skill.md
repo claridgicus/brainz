@@ -160,6 +160,15 @@ Make it the default (do this once per repository):
   already knowing to use Brainz. Brainz can't write to the repo — you apply the
   edits, then tell your human to commit them.
 
+Dreaming (runs by itself — nothing to install):
+
+- Every vault dreams nightly: Brainz merges near-duplicate concepts, promotes
+  knowledge buried in finished tasks' `## Outcome` sections into concepts, adds
+  missing links, and files a task for each contradiction it finds. Changes are
+  threshold-gated and revertible. `dream {action: "diary"}` shows what changed;
+  `dream {action: "revert", id}` undoes a dream; `dream {action: "configure",
+  enabled: false}` turns it off.
+
 Cadence:
 
 - Before ANY coding task: `get_context` (or `take_task`, which includes it).

@@ -4,9 +4,12 @@
  * code talks to vault content.
  */
 import type { DurableObjectNamespace } from "@cloudflare/workers-types";
-import type { ConceptType, TaskStatus, UpsertInput } from "@brainz/engine";
+import type { ConceptType, DreamDiaryEntry, TaskStatus, UpsertInput } from "@brainz/engine";
 import type {
   ContextArgs,
+  DreamRevertResult,
+  DreamRunResult,
+  DreamStatusResult,
   RelatedArgs,
   SearchArgs,
   WireConcept,
@@ -40,6 +43,8 @@ export interface VaultStatsResult {
   openTasks: number;
   embeddings: "ready" | "unavailable" | "rate-limited";
   keywordIndex: "fts5" | "like";
+  /** Start of the last completed dream sweep (null if never). */
+  lastDreamAt?: string | null;
 }
 
 export interface TakeTaskResult {
@@ -100,6 +105,11 @@ export interface VaultClient {
     relation: string;
   }>;
   destroy(): Promise<{ ok: true }>;
+  dreamStatus(): Promise<DreamStatusResult>;
+  dreamRun(): Promise<DreamRunResult>;
+  dreamDiary(limit?: number): Promise<{ count: number; entries: DreamDiaryEntry[] }>;
+  dreamRevert(id: string): Promise<DreamRevertResult>;
+  dreamConfigure(args: { enabled?: boolean; cadenceHours?: number }): Promise<DreamStatusResult>;
 }
 
 /** Get the typed client for a vault's DO. `vaultId` is the DO name. */
@@ -141,5 +151,10 @@ export function vaultClient(ns: DurableObjectNamespace, vaultId: string): VaultC
     setLastSyncedAt: (lastSyncedAt) => call("setLastSyncedAt", { lastSyncedAt }),
     link: (args) => call("link", args),
     destroy: () => call("destroy"),
+    dreamStatus: () => call("dreamStatus"),
+    dreamRun: () => call("dreamRun"),
+    dreamDiary: (limit) => call("dreamDiary", limit === undefined ? {} : { limit }),
+    dreamRevert: (id) => call("dreamRevert", { id }),
+    dreamConfigure: (args) => call("dreamConfigure", args),
   };
 }
