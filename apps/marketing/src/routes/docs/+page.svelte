@@ -19,6 +19,10 @@
 	const claudeMcpAdd = `claude mcp add --transport http brainz ${MCP_URL} \\
   --header "Authorization: Bearer bz_..."`;
 
+	const claudeCodeOauth = `claude mcp add --transport http brainz ${MCP_URL}
+# then, inside Claude Code:
+/mcp    # pick brainz → Authenticate`;
+
 	const agentSignupSnippet = `# 1. connect UNAUTHENTICATED to ${AGENT_MCP_URL} — no Authorization header
 #    initialize → tools/list shows two public tools: signup and sign_in
 
@@ -261,6 +265,98 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		</p>
 	</header>
 
+	<h2 id="connect">Connect from Claude or ChatGPT</h2>
+	<p>
+		Claude and ChatGPT connect to Brainz with OAuth: you add one URL, sign in to Brainz in your
+		browser and pick a vault. There's no API key to copy. You need a free
+		<a href={SIGNUP_URL}>Brainz account</a> with at least one vault. The server URL is the same for
+		everyone:
+	</p>
+	<pre><code>{MCP_URL}</code></pre>
+
+	<h3 id="connect-claude">Connect from Claude</h3>
+	<p>In claude.ai or Claude Desktop:</p>
+	<ol>
+		<li>
+			Open <strong>Customize &rsaquo; Connectors</strong> and choose
+			<strong>Add custom connector</strong>.
+		</li>
+		<li>
+			Name it <code>Brainz</code>, paste <code>{MCP_URL}</code> as the URL, and click
+			<strong>Add</strong>.
+		</li>
+		<li>
+			Click <strong>Connect</strong>. Claude opens brainz.brownmatter.ai: sign in with a magic link
+			or GitHub if you aren't signed in already.
+		</li>
+		<li>
+			The consent screen names the client and what it is granted. Pick <strong>one vault</strong>
+			and click <strong>Approve</strong>. You're returned to Claude, connected.
+		</li>
+	</ol>
+	<p>
+		Once Brainz is listed in the Claude connectors directory you can find it by name there instead
+		of adding the URL by hand.
+	</p>
+	<p>In Claude Code, add the server without a header and sign in from the <code>/mcp</code> menu:</p>
+	<pre><code>{claudeCodeOauth}</code></pre>
+	<p>
+		Your browser opens the same sign-in and consent screen, and the token is stored by Claude Code.
+		(Prefer a vault API key? See <a href="#hosted">Hosted</a> below.)
+	</p>
+
+	<h3 id="connect-chatgpt">Connect from ChatGPT</h3>
+	<ol>
+		<li>
+			Open <strong>Settings &rsaquo; Apps &amp; Connectors</strong>. While Brainz isn't listed in
+			the ChatGPT directory, turn on <strong>Developer mode</strong> under
+			<strong>Advanced settings</strong> so you can add your own connector.
+		</li>
+		<li>
+			Create a connector named <code>Brainz</code> with the URL <code>{MCP_URL}</code> and
+			authentication set to <strong>OAuth</strong>.
+		</li>
+		<li>
+			Click <strong>Connect</strong>, sign in to Brainz, pick <strong>one vault</strong> on the
+			consent screen and click <strong>Approve</strong>.
+		</li>
+		<li>Start a new chat, turn Brainz on for it, and ask about your vault.</li>
+	</ol>
+
+	<h3 id="connect-scope">What a connection can do</h3>
+	<ul>
+		<li>
+			<strong>One connection, one vault.</strong> The vault you pick on the consent screen is the
+			only one the client can reach. To use a second vault, add Brainz again (a second connector or
+			MCP server entry) and pick the other vault.
+		</li>
+		<li>
+			<strong>Your role decides the tools, on every call.</strong> Owners and editors get sixteen
+			tools: every vault tool in <a href="#tools">the table below</a> except
+			<code>session_hook</code>. Viewers get six read tools (<code>search_concepts</code>,
+			<code>get_concept</code>, <code>get_related</code>, <code>get_context</code>,
+			<code>list_concepts</code>, <code>vault_stats</code>), so a viewer's connection is
+			read-only. If an owner changes your role or removes you from the vault,
+			the connection follows straight away.
+		</li>
+		<li>
+			<strong>Reads and writes are labelled.</strong> Read tools change nothing. Tools that can
+			overwrite or delete are marked destructive, so the client asks before running them.
+		</li>
+		<li>
+			<strong>Brainz sees tool calls, not your chat.</strong> It receives each tool call's arguments,
+			never the conversation, and it can't read your repository or files.
+		</li>
+	</ul>
+
+	<h3 id="disconnect">Disconnect</h3>
+	<p>
+		Remove the Brainz connector in Claude or ChatGPT (in Claude Code, <code>claude mcp remove
+		brainz</code>). The client discards its tokens; access tokens expire within an hour and unused
+		refresh tokens after 30 days. Removing a member from a vault cuts off every connection they
+		made to it.
+	</p>
+
 	<h2 id="hosted">Hosted: remote MCP in two minutes</h2>
 	<ol>
 		<li><a href={SIGNUP_URL}>Sign up</a> — it's free — and create a vault.</li>
@@ -286,7 +382,8 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		<em>without</em> an <code>Authorization</code> header and it gets a public MCP server exposing
 		two tools — <code>signup</code> and <code>sign_in</code> (the vault tools stay behind
 		authentication). The key it gets works on <code>{MCP_URL}</code> too. <code>{MCP_URL}</code>
-		itself never hands out keys: there, clients such as Claude and ChatGPT sign in with OAuth.
+		itself never hands out keys: there, clients such as Claude and ChatGPT sign in with OAuth
+		(<a href="#connect">Connect from Claude or ChatGPT</a>).
 	</p>
 	<pre><code>{agentSignupSnippet}</code></pre>
 	<p>

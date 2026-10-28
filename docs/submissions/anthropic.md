@@ -77,7 +77,7 @@ These tools are on other surfaces but **not** on `/mcp` for OAuth connections: `
 instructions), `signup` and `sign_in` (they handle API keys and sign-in links), and `claim`
 (an OAuth user is already a signed-in human).
 
-A viewer-role member who connects gets only the seven read tools.
+A viewer-role member who connects gets only the six public read tools (`PUBLIC_VAULT_READ_TOOL_NAMES`: every read tool above except `list_tasks`).
 
 ## Step 3 — Listing
 
