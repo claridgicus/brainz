@@ -66,6 +66,11 @@ export function sessionInstructions(opts: SessionInstructionsOptions = {}): stri
 export interface ServerInstructionsOptions {
   /** Viewer-scoped connection: name the read tools only. */
   readOnly?: boolean;
+  /**
+   * Multi-vault OAuth connection: the server covers several vaults, every vault
+   * tool takes a required `vault` argument, and `list_vaults` names them.
+   */
+  multiVault?: boolean;
 }
 
 /**
@@ -80,8 +85,15 @@ export function serverInstructions(opts: ServerInstructionsOptions = {}): string
   const lines = [
     "# Brainz — shared product knowledge graph",
     "",
-    "This server is one Brainz vault: a product's features, specs, decisions, constraints and tasks, stored as linked markdown concepts.",
+    opts.multiVault
+      ? "This connection covers several Brainz vaults. Each vault holds a product's features, specs, decisions, constraints and tasks, stored as linked markdown concepts."
+      : "This server is one Brainz vault: a product's features, specs, decisions, constraints and tasks, stored as linked markdown concepts.",
     "",
+    ...(opts.multiVault
+      ? [
+          "- `list_vaults` lists the connected vaults and your role in each. Every other tool takes a required `vault` argument (a slug or id from `list_vaults`); viewer vaults accept the read tools only.",
+        ]
+      : []),
     "- `search_concepts`, `list_concepts`, `get_concept` and `get_related` find and read concepts; `get_context` assembles a token-budgeted briefing on a topic; `vault_stats` summarizes the vault.",
   ];
   if (opts.readOnly) {

@@ -6,6 +6,7 @@ import {
   claimInputSchema,
   claimOutputSchema,
   CLOUD_MCP_TOOLS,
+  MULTI_VAULT_MCP_TOOLS,
   CLOUD_MCP_TOOL_NAMES,
   CONCEPT_TYPES,
   conceptTypeCreateRequestSchema,
@@ -41,7 +42,11 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "19"', () => {
+  it('is "20"', () => {
+    // 20: multi-vault OAuth grants — MULTI_VAULT_MCP_TOOLS (`list_vaults`) and
+    //     the required `vault` routing arg (vaultRoutingArgSchema,
+    //     withVaultRoutingArg) on multi-vault connections. Additive: every
+    //     single-vault surface is unchanged.
     // 19: directory policy — /mcp hands out no API keys (signup/sign_in move to
     //     AGENT_MCP_PATH), DIRECTORY_HIDDEN_TOOL_NAMES / DIRECTORY_MCP_TOOL_NAMES
     //     (session_hook off OAuth + the unauthenticated listing), and tool
@@ -77,7 +82,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("19");
+    expect(CONTRACTS_VERSION).toBe("20");
   });
 });
 
@@ -765,7 +770,7 @@ describe("directory surfaces", () => {
       /\bUse this first\b/i,
       /\bCall (this )?once\b/i,
     ];
-    for (const tool of [...MCP_TOOLS, ...CLOUD_MCP_TOOLS]) {
+    for (const tool of [...MCP_TOOLS, ...CLOUD_MCP_TOOLS, ...MULTI_VAULT_MCP_TOOLS]) {
       for (const re of steering) {
         expect(`${tool.name}: ${tool.description}`).not.toMatch(re);
       }

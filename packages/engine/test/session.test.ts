@@ -67,7 +67,11 @@ describe("sessionHookPlaybook", () => {
 
 describe("serverInstructions (neutral, Brainz Cloud)", () => {
   it("describes the tools without directing when or how often to use them", () => {
-    for (const text of [serverInstructions(), serverInstructions({ readOnly: true })]) {
+    for (const text of [
+      serverInstructions(),
+      serverInstructions({ readOnly: true }),
+      serverInstructions({ multiVault: true }),
+    ]) {
       expect(text).toContain("get_context");
       expect(text).not.toMatch(/every session|don't wait|by default|before planning|skip brainz/i);
     }
@@ -80,5 +84,14 @@ describe("serverInstructions (neutral, Brainz Cloud)", () => {
       expect(text).not.toContain(tool);
     }
     expect(serverInstructions()).not.toContain("session_hook");
+  });
+
+  it("explains vault routing on a multi-vault connection only", () => {
+    const multi = serverInstructions({ multiVault: true });
+    expect(multi).toContain("several Brainz vaults");
+    expect(multi).toContain("`list_vaults`");
+    expect(multi).toContain("`vault` argument");
+    expect(serverInstructions()).not.toContain("list_vaults");
+    expect(serverInstructions({ multiVault: true, readOnly: true })).toContain("read-only");
   });
 });

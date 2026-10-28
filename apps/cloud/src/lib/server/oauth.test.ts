@@ -31,16 +31,19 @@ import {
   redirectUriMatches,
   redirectUriProblem,
   registerClient,
+  reanchorGrantsBeforeVaultDelete,
   resolveAccessToken,
   s256,
   validateAuthorizeRequest,
   wwwAuthenticate,
   type FetchLike,
+  type VaultSelection,
 } from "./oauth";
 
 const ISSUER = "https://brainz.example";
 const CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback";
 const VERIFIER = "v".repeat(20) + "-._~" + "A1".repeat(10);
+const SINGLE_V1 = { selection: { all: false, vaultIds: ["v1"] }, anchorVaultId: "v1" } as const;
 const noFetch: FetchLike = async () => {
   throw new Error("unexpected fetch");
 };
@@ -73,7 +76,11 @@ async function authorizeParams(clientId: string, overrides: Record<string, strin
 }
 
 /** Register a public client and walk authorize → code → token. */
-async function connect(d1: ReturnType<typeof fakeD1>, now = new Date()) {
+async function connect(
+  d1: ReturnType<typeof fakeD1>,
+  now = new Date(),
+  vaults: { selection: VaultSelection; anchorVaultId: string } = SINGLE_V1,
+) {
   const client = await registerClient(
     d1,
     { redirect_uris: [CLAUDE_CALLBACK, "http://localhost/callback"], token_endpoint_auth_method: "none", client_name: "Claude" },
@@ -81,7 +88,7 @@ async function connect(d1: ReturnType<typeof fakeD1>, now = new Date()) {
   );
   const v = await validateAuthorizeRequest(d1, await authorizeParams(client.client_id), ISSUER, noFetch);
   if (!v.ok) throw new Error("authorize failed");
-  const code = await createAuthorizationCode(d1, { request: v.request, userId: "u1", vaultId: "v1", now });
+  const code = await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...vaults, now });
   const res = await handleTokenRequest(
     { db: d1, now, fetchImpl: noFetch },
     { grant_type: "authorization_code", code, code_verifier: VERIFIER, redirect_uri: CLAUDE_CALLBACK, client_id: client.client_id },
@@ -437,7 +444,12 @@ describe("token endpoint", () => {
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(oauthTokenResponseSchema.safeParse(tokens).success).toBe(true);
     const access = await resolveAccessToken(d1, tokens.access_token, new Date());
-    expect(access).toMatchObject({ ok: true, userId: "u1", vaultId: "v1", role: "owner", ownerId: "u1" });
+    expect(access).toMatchObject({
+      ok: true,
+      userId: "u1",
+      vaultScope: "single",
+      vaults: [{ id: "v1", slug: "v1", role: "owner", ownerId: "u1" }],
+    });
     // Hashed at rest: no plaintext token anywhere in the table.
     const rows = d1.db.prepare(`SELECT token_hash FROM oauth_token`).all() as { token_hash: string }[];
     expect(rows.some((r) => r.token_hash === tokens.access_token)).toBe(false);
@@ -463,7 +475,7 @@ describe("token endpoint", () => {
     const other = await registerClient(d1, { redirect_uris: [CLAUDE_CALLBACK], token_endpoint_auth_method: "none" }, now);
     const v = await validateAuthorizeRequest(d1, await authorizeParams(client.client_id), ISSUER, noFetch);
     if (!v.ok) throw new Error("authorize failed");
-    const freshCode = () => createAuthorizationCode(d1, { request: v.request, userId: "u1", vaultId: "v1", now });
+    const freshCode = () => createAuthorizationCode(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
     const deps = { db: d1, now, fetchImpl: noFetch };
     const base = {
       grant_type: "authorization_code",
@@ -505,7 +517,7 @@ describe("token endpoint", () => {
     params.delete("redirect_uri");
     const v = await validateAuthorizeRequest(d1, params, ISSUER, noFetch);
     if (!v.ok) throw new Error("authorize failed");
-    const code = await createAuthorizationCode(d1, { request: v.request, userId: "u1", vaultId: "v1", now });
+    const code = await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
     const res = await handleTokenRequest(
       { db: d1, now, fetchImpl: noFetch },
       { grant_type: "authorization_code", code, code_verifier: VERIFIER, client_id: client.client_id },
@@ -724,7 +736,7 @@ describe("token endpoint", () => {
     const v = await validateAuthorizeRequest(d1, await authorizeParams(client.client_id), ISSUER, noFetch);
     if (!v.ok) throw new Error("authorize failed");
     const deps = { db: d1, now, fetchImpl: noFetch };
-    const code = await createAuthorizationCode(d1, { request: v.request, userId: "u1", vaultId: "v1", now });
+    const code = await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
     const form = {
       grant_type: "authorization_code",
       code,
@@ -746,7 +758,7 @@ describe("token endpoint", () => {
       `Basic ${btoa(`${client.client_id}:${client.client_secret}`)}`,
     );
     expect(basic.status).toBe(200);
-    const code2 = await createAuthorizationCode(d1, { request: v.request, userId: "u1", vaultId: "v1", now });
+    const code2 = await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
     const post = await handleTokenRequest(deps, { ...form, code: code2, client_secret: client.client_secret! }, null);
     expect(post.status).toBe(200);
   });
@@ -768,7 +780,10 @@ describe("access resolution", () => {
     const d1 = setup();
     const { client, tokens } = await connect(d1);
     d1.db.prepare(`UPDATE vault_member SET role = 'viewer' WHERE user_id = 'u1'`).run();
-    expect(await resolveAccessToken(d1, tokens.access_token, new Date())).toMatchObject({ ok: true, role: "viewer" });
+    expect(await resolveAccessToken(d1, tokens.access_token, new Date())).toMatchObject({
+      ok: true,
+      vaults: [{ id: "v1", role: "viewer" }],
+    });
     d1.db.prepare(`DELETE FROM vault_member WHERE user_id = 'u1'`).run();
     expect(await resolveAccessToken(d1, tokens.access_token, new Date())).toEqual({ ok: false, reason: "invalid" });
     const refresh = await handleTokenRequest(
@@ -864,5 +879,153 @@ describe("readOAuthForm", () => {
       }),
     );
     expect(json).toEqual({ grant_type: "refresh_token" });
+  });
+});
+
+describe("multi-vault grants", () => {
+  /** v1 (u1 owns, "Alpha"), v2 (u2 owns, u1 viewer, "Beta"), v3 (u1 owns, "Gamma"). */
+  function multiSetup() {
+    const d1 = setup();
+    seedOwner(d1, "u2", "v2");
+    addMember(d1, "v2", "u2", "owner");
+    addMember(d1, "v2", "u1", "viewer");
+    d1.db
+      .prepare(`INSERT INTO vault (id, owner_id, slug, name, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run("v3", "u1", "gamma", "Gamma", Date.now());
+    addMember(d1, "v3", "u1", "owner");
+    d1.db.prepare(`UPDATE vault SET name = 'Alpha' WHERE id = 'v1'`).run();
+    d1.db.prepare(`UPDATE vault SET name = 'Beta' WHERE id = 'v2'`).run();
+    return d1;
+  }
+  const pick = (...vaultIds: string[]) => ({ selection: { all: false, vaultIds }, anchorVaultId: vaultIds[0] });
+  const ALL = { selection: { all: true, vaultIds: [] }, anchorVaultId: "v1" };
+  const ids = async (d1: ReturnType<typeof fakeD1>, token: string, now = new Date()) => {
+    const a = await resolveAccessToken(d1, token, now);
+    return a.ok ? a.vaults.map((v) => `${v.id}:${v.role}`) : a.reason;
+  };
+  const removeMember = (d1: ReturnType<typeof fakeD1>, vaultId: string, userId: string) => {
+    d1.db.prepare(`DELETE FROM vault_member WHERE vault_id = ? AND user_id = ?`).run(vaultId, userId);
+    // members.ts deleteMember does this too (drizzle); mirrored here in SQL.
+    d1.db
+      .prepare(
+        `DELETE FROM oauth_grant_vault WHERE vault_id = ? AND grant_id IN (SELECT id FROM oauth_grant WHERE user_id = ?)`,
+      )
+      .run(vaultId, userId);
+  };
+  const deleteVault = async (d1: ReturnType<typeof fakeD1>, vaultId: string) => {
+    d1.db.pragma("foreign_keys = ON");
+    await reanchorGrantsBeforeVaultDelete(d1, vaultId);
+    d1.db.prepare(`DELETE FROM vault WHERE id = ?`).run(vaultId);
+  };
+
+  it("a grant over two ticked vaults covers both, by name, with each current role", async () => {
+    const d1 = multiSetup();
+    const { tokens } = await connect(d1, new Date(), pick("v2", "v1"));
+    const access = await resolveAccessToken(d1, tokens.access_token, new Date());
+    expect(access).toMatchObject({ ok: true, vaultScope: "selected" });
+    expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner", "v2:viewer"]);
+    const grant = d1.db.prepare(`SELECT vault_id, vault_scope FROM oauth_grant`).get();
+    expect(grant).toEqual({ vault_id: "v2", vault_scope: "selected" });
+  });
+
+  it("one ticked vault is a single grant: the unchanged Wave OA surface", async () => {
+    const d1 = multiSetup();
+    const { tokens } = await connect(d1, new Date(), pick("v3"));
+    expect(await resolveAccessToken(d1, tokens.access_token, new Date())).toMatchObject({
+      ok: true,
+      vaultScope: "single",
+    });
+    expect(await ids(d1, tokens.access_token)).toEqual(["v3:owner"]);
+  });
+
+  it("removing the member drops that vault, and re-adding them does not restore it", async () => {
+    const d1 = multiSetup();
+    const { tokens } = await connect(d1, new Date(), pick("v1", "v2"));
+    removeMember(d1, "v2", "u1");
+    expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner"]);
+    addMember(d1, "v2", "u1", "editor");
+    expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner"]);
+  });
+
+  it("losing every covered vault kills the token and the refresh revokes the grant", async () => {
+    const d1 = multiSetup();
+    const { client, tokens } = await connect(d1, new Date(), pick("v1", "v2"));
+    // Membership is checked on every call even before the join rows go.
+    d1.db.prepare(`DELETE FROM vault_member WHERE user_id = 'u1'`).run();
+    expect(await ids(d1, tokens.access_token)).toBe("invalid");
+    const res = await handleTokenRequest(
+      { db: d1, now: new Date(), fetchImpl: noFetch },
+      { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: client.client_id },
+      null,
+    );
+    expect(res.body).toMatchObject({ error: "invalid_grant" });
+    expect(d1.db.prepare(`SELECT revoked_at FROM oauth_grant`).get()).not.toEqual({ revoked_at: null });
+  });
+
+  it("an all-vaults grant follows membership, including vaults joined later", async () => {
+    const d1 = multiSetup();
+    const { tokens } = await connect(d1, new Date(), ALL);
+    expect(await resolveAccessToken(d1, tokens.access_token, new Date())).toMatchObject({ vaultScope: "all" });
+    expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner", "v2:viewer", "v3:owner"]);
+    removeMember(d1, "v2", "u1");
+    expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner", "v3:owner"]);
+    seedOwner(d1, "u3", "v4");
+    addMember(d1, "v4", "u1", "editor");
+    expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner", "v3:owner", "v4:editor"]);
+    expect(d1.db.prepare(`SELECT COUNT(*) AS n FROM oauth_grant_vault`).get()).toEqual({ n: 0 });
+  });
+
+  it("deleting the anchor vault re-anchors a multi-vault grant instead of cascading it", async () => {
+    const d1 = multiSetup();
+    const selected = await connect(d1, new Date(), pick("v1", "v3"));
+    const all = await connect(d1, new Date(), ALL);
+    await deleteVault(d1, "v1");
+    expect(await ids(d1, selected.tokens.access_token)).toEqual(["v3:owner"]);
+    expect(await ids(d1, all.tokens.access_token)).toEqual(["v2:viewer", "v3:owner"]);
+  });
+
+  it("deleting a single grant's vault still cascades the grant away", async () => {
+    const d1 = multiSetup();
+    const { tokens } = await connect(d1, new Date(), pick("v3"));
+    await deleteVault(d1, "v3");
+    expect(await ids(d1, tokens.access_token)).toBe("invalid");
+    expect(d1.db.prepare(`SELECT COUNT(*) AS n FROM oauth_grant`).get()).toEqual({ n: 0 });
+  });
+
+  it("the exchange keeps only vaults the user still belongs to, and refuses an empty set", async () => {
+    const d1 = multiSetup();
+    const now = new Date();
+    const client = await registerClient(d1, { redirect_uris: [CLAUDE_CALLBACK], token_endpoint_auth_method: "none" }, now);
+    const v = await validateAuthorizeRequest(d1, await authorizeParams(client.client_id), ISSUER, noFetch);
+    if (!v.ok) throw new Error("authorize failed");
+    const exchange = async (vaults: ReturnType<typeof pick>) => {
+      const code = await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...vaults, now });
+      return handleTokenRequest(
+        { db: d1, now, fetchImpl: noFetch },
+        { grant_type: "authorization_code", code, code_verifier: VERIFIER, redirect_uri: CLAUDE_CALLBACK, client_id: client.client_id },
+        null,
+      );
+    };
+    const twoCode = await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...pick("v2", "v3"), now });
+    d1.db.prepare(`DELETE FROM vault_member WHERE vault_id = 'v2' AND user_id = 'u1'`).run();
+    const ok = await handleTokenRequest(
+      { db: d1, now, fetchImpl: noFetch },
+      { grant_type: "authorization_code", code: twoCode, code_verifier: VERIFIER, redirect_uri: CLAUDE_CALLBACK, client_id: client.client_id },
+      null,
+    );
+    expect(await ids(d1, (ok.body as OAuthTokenResponse).access_token)).toEqual(["v3:owner"]);
+    // The anchor moved to the surviving vault.
+    expect(d1.db.prepare(`SELECT vault_id FROM oauth_grant`).get()).toEqual({ vault_id: "v3" });
+    expect((await exchange(pick("v2"))).body).toMatchObject({ error: "invalid_grant" });
+  });
+
+  it("drops vaults of an expired provisional owner; all expired reads as owner_expired", async () => {
+    const d1 = multiSetup();
+    const { tokens } = await connect(d1, new Date(), pick("v1", "v2"));
+    const past = Date.now() - 1000;
+    d1.db.prepare(`UPDATE user SET expires_at = ? WHERE id = 'u2'`).run(past);
+    expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner"]);
+    d1.db.prepare(`UPDATE user SET expires_at = ? WHERE id = 'u1'`).run(past);
+    expect(await ids(d1, tokens.access_token)).toBe("owner_expired");
   });
 });

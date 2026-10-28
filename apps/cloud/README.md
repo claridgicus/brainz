@@ -274,7 +274,10 @@ lives in `src/lib/server/oauth.ts`, `src/routes/oauth/**` and
   port) or ChatGPT (DCR).
 - Try it from Claude Code: `claude mcp add --transport http brainz
   https://brainz.brownmatter.ai/mcp` (no header), then `/mcp` → authenticate.
-  The browser opens the consent page and you pick a vault.
+  The browser opens the consent page and you tick one vault, several, or
+  "All my vaults". A multi-vault connection adds `list_vaults`, and every
+  vault tool then takes a required `vault` (slug or id). See SPEC-CLOUD.md
+  "Multi-vault grants".
 - **Reviewer accounts** (password login with no email step, for directory
   reviewers). The script writes the user and credential rows and can seed
   a "Brainz demo" vault from `examples/demo-vault`:

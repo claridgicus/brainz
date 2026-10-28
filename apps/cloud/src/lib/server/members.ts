@@ -13,7 +13,7 @@
  *   (self-leave). Both blocked when the target is the last owner.
  */
 import type { VaultRole } from "@brainz/contracts";
-import { and, count, eq } from "drizzle-orm";
+import { and, count, eq, inArray } from "drizzle-orm";
 import type { Db } from "./db";
 import { schema } from "./db";
 
@@ -86,6 +86,20 @@ export function membersDbFrom(db: Db): MembersDb {
       await db
         .delete(schema.vaultMember)
         .where(and(eq(schema.vaultMember.vaultId, vaultId), eq(schema.vaultMember.userId, userId)));
+      // Multi-vault OAuth: drop the vault from the user's ticked grants, so
+      // being re-added later never silently restores a connection's access
+      // (SPEC-CLOUD.md "Multi-vault grants"). "all" grants follow membership.
+      await db
+        .delete(schema.oauthGrantVault)
+        .where(
+          and(
+            eq(schema.oauthGrantVault.vaultId, vaultId),
+            inArray(
+              schema.oauthGrantVault.grantId,
+              db.select({ id: schema.oauthGrant.id }).from(schema.oauthGrant).where(eq(schema.oauthGrant.userId, userId)),
+            ),
+          ),
+        );
     },
   };
 }

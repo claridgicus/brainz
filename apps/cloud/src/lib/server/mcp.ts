@@ -10,11 +10,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   MCP_TOOLS,
+  MULTI_VAULT_MCP_TOOLS,
+  MULTI_VAULT_ROUTING_ARG,
   PUBLIC_VAULT_READ_TOOL_NAMES,
+  withVaultRoutingArg,
   type CloudMcpToolDef,
+  type ConnectedVault,
+  type ListVaultsOutput,
   type McpToolDef,
   type McpToolInput,
   type McpToolName,
+  type VaultRole,
 } from "@brainz/contracts";
 import {
   ONBOARDING_NUDGE,
@@ -108,20 +114,12 @@ export interface McpServerHooks {
   exclude?: readonly McpToolName[];
 }
 
-/** Build the MCP server for one vault (stateless: one per request). */
-export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): McpServer {
-  // `instructions` ride the initialize response. Brainz Cloud sends the
-  // NEUTRAL description (serverInstructions), never the directive session
-  // primer: directory review rejects server text that steers the model. A
-  // viewer-scoped connection gets the read-only variant.
-  const server = new McpServer(
-    {
-      name: hooks.only ? `${SERVER_NAME}-public-read` : SERVER_NAME,
-      version: SERVER_VERSION,
-    },
-    { instructions: serverInstructions({ readOnly: hooks.only !== undefined }) },
-  );
-
+/**
+ * The vault-tool handlers over one vault's DO (every MCP_TOOLS entry). Shared
+ * by the single-vault server and the multi-vault server, which builds one set
+ * per vault a call routes to.
+ */
+function vaultToolHandlers(vault: VaultClient, hooks: McpServerHooks): ToolHandlers {
   const isOnboarded = async (): Promise<boolean> =>
     (await vault.onboarding()).onboardedAt !== null;
 
@@ -618,6 +616,25 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
       }),
   };
 
+  return handlers;
+}
+
+/** Build the MCP server for one vault (stateless: one per request). */
+export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): McpServer {
+  // `instructions` ride the initialize response. Brainz Cloud sends the
+  // NEUTRAL description (serverInstructions), never the directive session
+  // primer: directory review rejects server text that steers the model. A
+  // viewer-scoped connection gets the read-only variant.
+  const server = new McpServer(
+    {
+      name: hooks.only ? `${SERVER_NAME}-public-read` : SERVER_NAME,
+      version: SERVER_VERSION,
+    },
+    { instructions: serverInstructions({ readOnly: hooks.only !== undefined }) },
+  );
+
+  const handlers = vaultToolHandlers(vault, hooks);
+
   // Public (viewer) connections register ONLY the read allow-list; the write
   // tools never enter the server, so viewer scope is enforced by absence.
   const allow = hooks.only ? new Set<McpToolName>(hooks.only) : null;
@@ -665,4 +682,132 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
  */
 export function buildPublicVaultMcpServer(vault: VaultClient): McpServer {
   return buildMcpServer(vault, { only: PUBLIC_VAULT_READ_TOOL_NAMES });
+}
+
+/** One vault a multi-vault connection may route to. */
+export interface MultiVaultTarget {
+  id: string;
+  slug: string;
+  name: string;
+  /** The user's CURRENT role: a viewer vault accepts the read tools only. */
+  role: VaultRole;
+}
+
+export interface MultiVaultServerOptions {
+  /** The vaults the grant covers right now (never empty), in list order. */
+  vaults: readonly MultiVaultTarget[];
+  /** True for an "all my vaults" grant (reported by list_vaults). */
+  includesFutureVaults: boolean;
+  /** The DO client + D1 mirror hooks for a vault, built only when a call routes there. */
+  open(vaultId: string): { client: VaultClient; hooks?: Pick<McpServerHooks, "onOnboarded" | "onSynced"> };
+  /** Vault tools to leave unregistered (DIRECTORY_HIDDEN_TOOL_NAMES on OAuth). */
+  exclude?: readonly McpToolName[];
+}
+
+const READ_TOOLS: ReadonlySet<McpToolName> = new Set(PUBLIC_VAULT_READ_TOOL_NAMES);
+
+/**
+ * Resolve a `vault` argument against the connected vaults: an exact id first,
+ * then a slug (slugs are unique per OWNER, so two connected vaults can share
+ * one — then the id is required).
+ */
+export function resolveVaultArg(
+  vaults: readonly MultiVaultTarget[],
+  arg: unknown,
+): { ok: true; vault: MultiVaultTarget } | { ok: false; message: string } {
+  if (typeof arg !== "string" || arg === "") {
+    return { ok: false, message: "`vault` is required: name one of the vaults from list_vaults" };
+  }
+  const byId = vaults.find((v) => v.id === arg);
+  if (byId) return { ok: true, vault: byId };
+  const bySlug = vaults.filter((v) => v.slug === arg);
+  if (bySlug.length === 1) return { ok: true, vault: bySlug[0] };
+  if (bySlug.length > 1) {
+    return {
+      ok: false,
+      message: `more than one connected vault has the slug "${arg}"; pass its id instead (see list_vaults)`,
+    };
+  }
+  return {
+    ok: false,
+    message: `this connection does not cover a vault "${arg}"; list_vaults lists the vaults it covers`,
+  };
+}
+
+/**
+ * Build the MULTI-VAULT MCP server for an OAuth grant covering several vaults
+ * (SPEC-CLOUD.md "Multi-vault grants"). Every vault tool gains the REQUIRED
+ * `vault` argument and routes to that vault's DO, and `list_vaults` names the
+ * vaults. The role is checked per call: a write tool on a viewer vault is an
+ * isError result. When every vault is viewer-only, only the read tools are
+ * registered (as on a single viewer connection). Stateless: one per request.
+ */
+export function buildMultiVaultMcpServer(opts: MultiVaultServerOptions): McpServer {
+  const readOnly = opts.vaults.every((v) => v.role === "viewer");
+  const server = new McpServer(
+    { name: readOnly ? `${SERVER_NAME}-multi-vault-read` : `${SERVER_NAME}-multi-vault`, version: SERVER_VERSION },
+    { instructions: serverInstructions({ readOnly, multiVault: true }) },
+  );
+
+  const listVaults: ListVaultsOutput = {
+    vaults: opts.vaults.map(
+      (v): ConnectedVault => ({ id: v.id, slug: v.slug, name: v.name, role: v.role, readOnly: v.role === "viewer" }),
+    ),
+    includesFutureVaults: opts.includesFutureVaults,
+  };
+  const [listDef] = MULTI_VAULT_MCP_TOOLS;
+  server.registerTool(
+    listDef.name,
+    {
+      title: listDef.title,
+      description: listDef.description,
+      inputSchema: listDef.inputSchema.shape,
+      annotations: { title: listDef.title, ...listDef.annotations },
+    },
+    async () => ok(listVaults),
+  );
+
+  // Handlers per vault, built on first use: a request touches one vault.
+  const handlerCache = new Map<string, ToolHandlers>();
+  const handlersFor = (vaultId: string): ToolHandlers => {
+    let h = handlerCache.get(vaultId);
+    if (!h) {
+      const { client, hooks } = opts.open(vaultId);
+      h = vaultToolHandlers(client, hooks ?? {});
+      handlerCache.set(vaultId, h);
+    }
+    return h;
+  };
+
+  const exclude = new Set<McpToolName>(opts.exclude ?? []);
+  for (const tool of MCP_TOOLS as readonly McpToolDef[]) {
+    if (exclude.has(tool.name)) continue;
+    if (readOnly && !READ_TOOLS.has(tool.name)) continue;
+    server.registerTool(
+      tool.name,
+      {
+        title: tool.title,
+        description: tool.description,
+        inputSchema: withVaultRoutingArg(tool.inputSchema).shape,
+        annotations: { title: tool.title, ...tool.annotations },
+      },
+      async (args: Record<string, unknown>) =>
+        guarded(async () => {
+          const { [MULTI_VAULT_ROUTING_ARG]: vaultArg, ...rest } = args ?? {};
+          const target = resolveVaultArg(opts.vaults, vaultArg);
+          if (!target.ok) return fail(target.message);
+          if (target.vault.role === "viewer" && !READ_TOOLS.has(tool.name)) {
+            return fail(
+              `vault "${target.vault.slug}" is read-only for you (viewer); ${tool.name} needs editor access`,
+            );
+          }
+          const handler = handlersFor(target.vault.id)[tool.name] as (
+            a: Record<string, unknown>,
+          ) => Promise<ToolResult>;
+          return handler(rest);
+        }),
+    );
+  }
+
+  return server;
 }

@@ -26,6 +26,7 @@ import {
   CLOUD_MCP_TOOL_NAMES,
   DIRECTORY_MCP_TOOL_NAMES,
   MCP_TOOL_NAMES,
+  MULTI_VAULT_MCP_TOOL_NAMES,
   PUBLIC_MCP_TOOL_NAMES,
 } from "@brainz/contracts";
 import { PRODUCTION_ORIGIN } from "./auth";
@@ -81,11 +82,13 @@ describe("MCP discovery documents", () => {
   it("tool lists in _meta match the contracts registries exactly", () => {
     const meta = (wellKnown._meta as Record<string, unknown>)["ai.brownmatter/brainz"] as {
       oauthTools: string[];
+      oauthMultiVaultExtraTools: string[];
       apiKeyTools: string[];
       agentEndpoint: string;
       agentEndpointUnauthenticatedTools: string[];
     };
     expect(meta.oauthTools).toEqual([...DIRECTORY_MCP_TOOL_NAMES]);
+    expect(meta.oauthMultiVaultExtraTools).toEqual([...MULTI_VAULT_MCP_TOOL_NAMES]);
     expect(meta.apiKeyTools).toEqual([...MCP_TOOL_NAMES, ...CLOUD_MCP_TOOL_NAMES]);
     // Agent self-signup (the in-chat API key) lives on /mcp/agent, never /mcp.
     expect(meta.agentEndpoint).toBe(`${PRODUCTION_ORIGIN}${AGENT_MCP_PATH}`);

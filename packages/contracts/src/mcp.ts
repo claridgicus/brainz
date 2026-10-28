@@ -1097,6 +1097,84 @@ export const CLOUD_MCP_TOOL_NAMES = CLOUD_MCP_TOOLS.map(
   (t) => t.name,
 ) as readonly CloudMcpToolName[];
 
+// ------------------------------------------------ multi-vault OAuth (cloud)
+
+/**
+ * The routing argument every vault tool gains on a MULTI-VAULT OAuth
+ * connection (an OAuth grant covering several vaults, or "all my vaults"; see
+ * SPEC-CLOUD.md "Multi-vault grants"). Required there, so a call can never
+ * land on a vault by omission. Single-vault connections, `bz_` keys, public
+ * tokens and the local stdio server never see it.
+ */
+export const MULTI_VAULT_ROUTING_ARG = "vault" as const;
+
+export const vaultRoutingArgSchema = z
+  .string()
+  .min(1)
+  .describe(
+    "The vault to act on: its slug or id, as returned by list_vaults. This connection covers " +
+      "several vaults, so every call names one.",
+  );
+
+/** A vault tool's input schema on a multi-vault connection: the original shape plus `vault`. */
+export function withVaultRoutingArg<S extends z.AnyZodObject>(
+  schema: S,
+): z.ZodObject<S["shape"] & { vault: typeof vaultRoutingArgSchema }> {
+  return schema.extend({ [MULTI_VAULT_ROUTING_ARG]: vaultRoutingArgSchema }) as never;
+}
+
+export const listVaultsInputSchema = z.object({});
+
+export const connectedVaultSchema = z
+  .object({
+    /** Vault id: always unique, accepted as `vault`. */
+    id: z.string(),
+    /** Vault slug: accepted as `vault` when no other connected vault shares it. */
+    slug: z.string(),
+    name: z.string(),
+    // Same values as api.ts vaultRoleSchema (api.ts imports this module, so no cycle back).
+    role: z.enum(["owner", "editor", "viewer"]),
+    /** True for a viewer: only the read tools work on this vault. */
+    readOnly: z.boolean(),
+  })
+  .strict();
+
+export const listVaultsOutputSchema = z
+  .object({
+    vaults: z.array(connectedVaultSchema),
+    /** True when the connection also covers vaults the user creates or joins later. */
+    includesFutureVaults: z.boolean(),
+  })
+  .strict();
+
+/**
+ * MULTI_VAULT_MCP_TOOLS — registered ONLY on a multi-vault OAuth connection,
+ * alongside the vault tools (which each gain the required `vault` argument).
+ * Deliberately NOT part of MCP_TOOLS: single-vault surfaces have nothing to list.
+ */
+export const MULTI_VAULT_MCP_TOOLS = [
+  {
+    name: "list_vaults",
+    title: "List connected vaults",
+    description:
+      "List the vaults this connection can use: id, slug, name, your role, and whether the vault is " +
+      "read-only for you. Every other tool takes one of these as its `vault` argument. Viewer vaults " +
+      "accept the read tools only.",
+    inputSchema: listVaultsInputSchema,
+    outputSchema: listVaultsOutputSchema,
+    annotations: READ_ONLY_TOOL,
+  },
+] as const;
+
+export type MultiVaultMcpTool = (typeof MULTI_VAULT_MCP_TOOLS)[number];
+export type MultiVaultMcpToolName = MultiVaultMcpTool["name"];
+export type ListVaultsOutput = z.infer<typeof listVaultsOutputSchema>;
+export type ConnectedVault = z.infer<typeof connectedVaultSchema>;
+
+export const MULTI_VAULT_MCP_TOOL_NAMES = MULTI_VAULT_MCP_TOOLS.map(
+  (t) => t.name,
+) as readonly MultiVaultMcpToolName[];
+
 export const PUBLIC_MCP_TOOL_NAMES = PUBLIC_MCP_TOOLS.map(
   (t) => t.name,
 ) as readonly PublicMcpToolName[];
@@ -1206,3 +1284,16 @@ export interface CloudMcpToolDef {
 
 const _cloudMcpToolDefs: readonly CloudMcpToolDef[] = CLOUD_MCP_TOOLS;
 void _cloudMcpToolDefs;
+
+/** Widened view of a multi-vault registry entry (same shape, multi-vault tool names). */
+export interface MultiVaultMcpToolDef {
+  readonly name: MultiVaultMcpToolName;
+  readonly title: string;
+  readonly description: string;
+  readonly inputSchema: z.AnyZodObject;
+  readonly outputSchema: z.ZodTypeAny;
+  readonly annotations: ToolAnnotations;
+}
+
+const _multiVaultMcpToolDefs: readonly MultiVaultMcpToolDef[] = MULTI_VAULT_MCP_TOOLS;
+void _multiVaultMcpToolDefs;

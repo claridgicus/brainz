@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from "svelte";
 	import AuthCard from "$lib/components/AuthCard.svelte";
 
 	/**
@@ -6,12 +7,28 @@
 	 *   load → { status: "consent", client: {name, selfAsserted}, redirectHost,
 	 *            loopback, userEmail, vaults: [{id, name, role}], params }
 	 *        | { status: "error", message }
-	 *   ?/approve (vault_id + params) → 303 to the client with a code
+	 *   ?/approve (vault_id, repeatable, or all_vaults=on + params) → 303 to the
+	 *            client with a code (multi-vault grants: one connection can
+	 *            cover several vaults, or all of them including later ones)
 	 *   ?/deny (params) → 303 to the client with error=access_denied
 	 * Plain (non-enhanced) forms: the browser follows the 303 to the client's
 	 * redirect URI itself, which may be another origin or a loopback port.
 	 */
 	let { data, form } = $props();
+
+	/** "All my vaults, including ones I create or join later". */
+	let allVaults = $state(false);
+	/** Ticked vault ids; the first vault starts ticked (only the initial data matters). */
+	let picked = $state<string[]>(
+		untrack(() => (data.status === "consent" && data.vaults.length > 0 ? [data.vaults[0].id] : [])),
+	);
+	const scopeText = $derived(
+		allVaults
+			? "all your vaults, including ones you create or join later"
+			: picked.length === 1
+				? "the vault you pick"
+				: `the ${picked.length} vaults you pick`,
+	);
 </script>
 
 <svelte:head><title>Connect an app — Brainz</title></svelte:head>
@@ -32,11 +49,16 @@
 		<dl class="details">
 			<div>
 				<dt>It will be able to</dt>
-				<dd>Search, read and write the concepts and tasks in the vault you pick</dd>
+				<dd>
+					Search, read and write the concepts and tasks in {scopeText} (read only where you're a
+					viewer)
+				</dd>
 			</div>
 			<div>
 				<dt>It can't</dt>
-				<dd>See your other vaults, manage keys or members, or delete the vault</dd>
+				<dd>
+					{allVaults ? "Manage" : "See vaults you don't pick, manage"} keys or members, or delete a vault
+				</dd>
 			</div>
 			<div>
 				<dt>Sends you back to</dt>
@@ -60,17 +82,27 @@
 					<input type="hidden" {name} {value} />
 				{/each}
 				<fieldset class="vaults">
-					<legend>Vault</legend>
-					{#each data.vaults as vault, i (vault.id)}
-						<label class="vault">
-							<input type="radio" name="vault_id" value={vault.id} checked={i === 0} required />
+					<legend>Vaults</legend>
+					{#each data.vaults as vault (vault.id)}
+						<label class="vault" class:dim={allVaults}>
+							{#if allVaults}
+								<input type="checkbox" checked disabled />
+							{:else}
+								<input type="checkbox" name="vault_id" value={vault.id} bind:group={picked} />
+							{/if}
 							<span class="name">{vault.name}</span>
 							<span class="role muted">{vault.role === "viewer" ? "read-only" : vault.role}</span>
 						</label>
 					{/each}
+					<label class="vault all">
+						<input type="checkbox" name="all_vaults" bind:checked={allVaults} />
+						<span class="name">All my vaults, including ones I create or join later</span>
+					</label>
 				</fieldset>
 				{#if form?.error}<p class="error-text" role="alert">{form.error}</p>{/if}
-				<button type="submit" class="btn btn-primary wide">Allow access</button>
+				<button type="submit" class="btn btn-primary wide" disabled={!allVaults && picked.length === 0}>
+					Allow access
+				</button>
 			</form>
 		{/if}
 		<form method="POST" action="?/deny">
@@ -80,8 +112,8 @@
 			<button type="submit" class="btn btn-ghost wide">Cancel</button>
 		</form>
 		<p class="fineprint muted">
-			You can disconnect at any time from the app. Each connection covers one vault; connect again
-			to add another.
+			You can disconnect at any time from the app. To change which vaults it covers, connect
+			again.
 		</p>
 	</AuthCard>
 {/if}
@@ -163,6 +195,12 @@
 	}
 	.vault .role {
 		font-size: 12px;
+	}
+	.vault.dim {
+		opacity: 0.6;
+	}
+	.vault.all {
+		border-style: dashed;
 	}
 	.wide {
 		width: 100%;

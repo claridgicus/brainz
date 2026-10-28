@@ -10,11 +10,14 @@
  *   the client from the consent actions, after the user signed in and acted.
  * - no session → 303 to /login?next=<this URL>; every login method returns here.
  * - else `{status: "consent", client, redirectHost, loopback, vaults, params}`:
- *   the vault picker lists the user's member vaults with their role.
+ *   the vault picker lists the user's member vaults with their role, as
+ *   checkboxes plus "All my vaults, including ones I create or join later"
+ *   (multi-vault grants, SPEC-CLOUD.md "Multi-vault grants").
  *
  * actions (same-origin form POSTs; the request params ride hidden inputs):
- * - approve: re-validate, check membership on the picked vault, mint a
- *   single-use code, 303 to `redirect_uri?code&state&iss`.
+ * - approve: re-validate, check membership on every ticked vault (`vault_id`,
+ *   repeatable) or take `all_vaults=on`, mint a single-use code, 303 to
+ *   `redirect_uri?code&state&iss`.
  * - deny: 303 to `redirect_uri?error=access_denied&state&iss`.
  */
 import { fail, redirect } from "@sveltejs/kit";
@@ -32,7 +35,6 @@ import {
   validateAuthorizeRequest,
   type AuthorizeValidation,
 } from "$lib/server/oauth";
-import { memberRole } from "$lib/server/vault-access";
 
 /** The authorization-request params carried through the consent form. */
 const PARAM_NAMES = [
@@ -56,6 +58,17 @@ async function validate(event: RequestEvent, params: URLSearchParams): Promise<A
   );
 }
 
+/** The user's member vaults with their role, by name (the consent picker's rows). */
+async function memberVaultsOf(d1: App.Platform["env"]["DB"], userId: string) {
+  const rows = await createDb(d1)
+    .select({ id: schema.vault.id, name: schema.vault.name, role: schema.vaultMember.role })
+    .from(schema.vaultMember)
+    .innerJoin(schema.vault, eq(schema.vaultMember.vaultId, schema.vault.id))
+    .where(eq(schema.vaultMember.userId, userId))
+    .orderBy(asc(schema.vault.name));
+  return rows.map((v) => ({ id: v.id, name: v.name, role: v.role as VaultRole }));
+}
+
 export const load: PageServerLoad = async (event) => {
   const result = await validate(event, event.url.searchParams);
   if (!result.ok) {
@@ -75,13 +88,7 @@ export const load: PageServerLoad = async (event) => {
   if (request.client.kind === "dcr") {
     platform.context.waitUntil(touchClient(platform.env.DB, request.client.clientId, new Date()).catch(() => {}));
   }
-  const db = createDb(platform.env.DB);
-  const vaults = await db
-    .select({ id: schema.vault.id, name: schema.vault.name, role: schema.vaultMember.role })
-    .from(schema.vaultMember)
-    .innerJoin(schema.vault, eq(schema.vaultMember.vaultId, schema.vault.id))
-    .where(eq(schema.vaultMember.userId, event.locals.user.id))
-    .orderBy(asc(schema.vault.name));
+  const vaults = await memberVaultsOf(platform.env.DB, event.locals.user.id);
 
   const params: Record<string, string> = {};
   for (const name of PARAM_NAMES) {
@@ -98,7 +105,7 @@ export const load: PageServerLoad = async (event) => {
     redirectHost: redirect_.host,
     loopback: isLoopbackHttp(redirect_),
     userEmail: event.locals.user.email,
-    vaults: vaults.map((v) => ({ id: v.id, name: v.name, role: v.role as VaultRole })),
+    vaults,
     params,
   };
 };
@@ -128,16 +135,25 @@ export const actions: Actions = {
     const user = event.locals.user;
     if (!user) return fail(401, { error: "Your session ended. Sign in again and retry." });
 
-    const vaultId = form.get("vault_id");
+    // Multi-vault grants: the ticked vaults (each re-checked for membership),
+    // or "all my vaults, including ones I create or join later".
     const platform = requirePlatform(event);
-    if (typeof vaultId !== "string" || !(await memberRole(createDb(platform.env.DB), vaultId, user.id))) {
-      return fail(400, { error: "Pick one of your vaults." });
+    const all = form.get("all_vaults") === "on";
+    const ticked = [...new Set(form.getAll("vault_id").filter((v): v is string => typeof v === "string"))];
+    const memberVaults = await memberVaultsOf(platform.env.DB, user.id);
+    const memberIds = new Set(memberVaults.map((v) => v.id));
+    if (ticked.some((id) => !memberIds.has(id))) {
+      return fail(400, { error: "Pick from your own vaults." });
     }
+    // "All" still anchors on a ticked vault when there is one.
+    const anchorVaultId = ticked[0] ?? (all ? memberVaults[0]?.id : undefined);
+    if (!anchorVaultId) return fail(400, { error: "Pick at least one vault." });
     const { request } = result;
     const code = await createAuthorizationCode(platform.env.DB, {
       request,
       userId: user.id,
-      vaultId,
+      selection: { all, vaultIds: all ? [] : ticked },
+      anchorVaultId,
       now: new Date(),
     });
     redirect(

@@ -58,6 +58,7 @@ import {
   MCP_TOOL_NAMES,
   AGENT_MCP_PATH,
   DIRECTORY_MCP_TOOL_NAMES,
+  listVaultsOutputSchema,
   memberListResponseSchema,
   onboardCompleteOutputSchema,
   onboardStatusOutputSchema,
@@ -2710,6 +2711,62 @@ async function main() {
     step("reusing it after the grace window → invalid_grant", reused.status === 400 && reused.json?.error === "invalid_grant", `status ${reused.status}`);
     const afterTheft = await rpc({ jsonrpc: "2.0", id: 5, method: "tools/list" }, { authorization: `Bearer ${rotated.json?.access_token}` });
     step("…and the whole grant is revoked (newest access token 401s)", afterTheft.status === 401, `status ${afterTheft.status}`);
+
+    // Multi-vault grant: tick two vaults at consent → every vault tool takes a
+    // required `vault` arg, list_vaults names both, calls route per vault.
+    const secondVault = await api("POST", "/api/vaults", {
+      body: { name: "Reviewer second", slug: "reviewer-second" },
+      jar: reviewerJar,
+    });
+    step("reviewer creates a second vault → 201", secondVault.status === 201, `status ${secondVault.status}`);
+    const multiForm = new URLSearchParams(authorizeQs);
+    multiForm.append("vault_id", reviewerVaultId);
+    multiForm.append("vault_id", secondVault.json?.id);
+    const multiApprove = await fetch(`${BASE}/oauth/authorize?/approve`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", origin: BASE, cookie: cookieHeader(reviewerJar) },
+      body: multiForm.toString(),
+    });
+    const multiCode = new URL(multiApprove.headers.get("location") ?? "http://x.invalid/").searchParams.get("code");
+    const multiTokens = await tokenCall({ grant_type: "authorization_code", code: multiCode, code_verifier: verifier, redirect_uri: redirectUri, client_id: clientId });
+    step("consent with two ticked vaults → tokens", multiTokens.status === 200 && Boolean(multiTokens.json?.access_token), `status ${multiTokens.status}`);
+    const multiMcp = new Client({ name: "brainz-e2e-oauth-multi", version: "0.0.0" });
+    await multiMcp.connect(
+      new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), {
+        requestInit: { headers: { authorization: `Bearer ${multiTokens.json?.access_token}` } },
+      }),
+    );
+    const multiTools = (await multiMcp.listTools()).tools;
+    step(
+      "multi-vault MCP: list_vaults + the directory tools, each with a required vault arg",
+      JSON.stringify(multiTools.map((t) => t.name)) === JSON.stringify(["list_vaults", ...DIRECTORY_MCP_TOOL_NAMES]) &&
+        multiTools.filter((t) => t.name !== "list_vaults").every((t) => t.inputSchema.required?.includes("vault")),
+      multiTools.length + " tools",
+    );
+    const listed = await multiMcp.callTool({ name: "list_vaults", arguments: {} });
+    const listedJson = JSON.parse(listed.content[0].text);
+    assertParse(listVaultsOutputSchema, listedJson, "list_vaults parses");
+    const listedVaults = listedJson;
+    step(
+      "list_vaults names both ticked vaults",
+      JSON.stringify(listedVaults?.vaults.map((v) => v.slug).sort()) === JSON.stringify(["reviewer-demo", "reviewer-second"]) &&
+        listedVaults?.includesFutureVaults === false,
+    );
+    const routedWrite = await multiMcp.callTool({
+      name: "upsert_concept",
+      arguments: { vault: "reviewer-second", id: "multi-probe", title: "Multi probe", body: "Routed to the second vault." },
+    });
+    const routedReadOther = await multiMcp.callTool({ name: "get_concept", arguments: { vault: "reviewer-demo", id: "multi-probe" } });
+    const routedReadSame = await multiMcp.callTool({ name: "get_concept", arguments: { vault: secondVault.json?.id, id: "multi-probe" } });
+    step(
+      "a routed write lands only in the named vault (by slug), readable there by id",
+      !routedWrite.isError && routedReadOther.isError === true && !routedReadSame.isError,
+      JSON.stringify(routedWrite.content).slice(0, 80),
+    );
+    const noVault = await multiMcp.callTool({ name: "get_concept", arguments: { id: "oauth-probe" } });
+    step("a vault tool without `vault` is refused on a multi-vault connection", noVault.isError === true);
+    await multiMcp.close();
     const crossSiteRegister = await fetch(`${BASE}/oauth/register`, {
       method: "POST",
       headers: { "content-type": "text/plain" },

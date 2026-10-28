@@ -377,9 +377,22 @@ export const oauthCode = sqliteTable("oauth_code", {
   expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
   usedAt: integer("used_at", { mode: "timestamp_ms" }),
   grantId: text("grant_id"),
+  /** The grant's vault scope: "single" | "selected" | "all" (see oauthGrant.vaultScope). */
+  vaultScope: text("vault_scope").notNull().default("single"),
+  /** JSON array of the ticked vault ids ("single"/"selected"); null for "all". `vault_id` is the first. */
+  vaultIds: text("vault_ids"),
 });
 
-/** One consented grant = one user × one vault × one client. Revoking it kills every token. */
+/**
+ * One consented grant = one user × one client × a vault set. Revoking it kills
+ * every token. Which vaults it covers is `vault_scope`:
+ * - "single": the one `oauth_grant_vault` row (the original Wave OA shape);
+ * - "selected": the `oauth_grant_vault` rows (several ticked vaults);
+ * - "all": every vault the user is a member of, now or later.
+ * `vault_id` is only the ANCHOR row the cascade hangs on: deleting a vault
+ * first re-anchors multi-vault grants onto another covered vault
+ * (reanchorGrantsBeforeVaultDelete), so only a grant left with nothing dies.
+ */
 export const oauthGrant = sqliteTable(
   "oauth_grant",
   {
@@ -394,8 +407,27 @@ export const oauthGrant = sqliteTable(
     scope: text("scope").notNull(),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     revokedAt: integer("revoked_at", { mode: "timestamp_ms" }),
+    vaultScope: text("vault_scope").notNull().default("single"),
   },
   (t) => [index("oauth_grant_user_id").on(t.userId)],
+);
+
+/**
+ * The vaults a "single" or "selected" grant covers. Removing the user from a
+ * vault deletes that vault's rows for their grants (members.ts), and a vault
+ * delete cascades its rows, so a re-added member does not silently regain it.
+ */
+export const oauthGrantVault = sqliteTable(
+  "oauth_grant_vault",
+  {
+    grantId: text("grant_id")
+      .notNull()
+      .references(() => oauthGrant.id, { onDelete: "cascade" }),
+    vaultId: text("vault_id")
+      .notNull()
+      .references(() => vault.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.grantId, t.vaultId] }), index("oauth_grant_vault_vault_id").on(t.vaultId)],
 );
 
 /**

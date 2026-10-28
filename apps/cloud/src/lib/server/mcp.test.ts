@@ -12,6 +12,7 @@ import {
   DIRECTORY_HIDDEN_TOOL_NAMES,
   DIRECTORY_MCP_TOOL_NAMES,
   getMcpTool,
+  listVaultsOutputSchema,
   MCP_TOOL_NAMES,
   PUBLIC_VAULT_READ_TOOL_NAMES,
   onboardCompleteOutputSchema,
@@ -28,7 +29,14 @@ import {
   SYNC_STALENESS_NUDGE,
 } from "@brainz/engine";
 import { beforeEach, describe, expect, it } from "vitest";
-import { buildMcpServer, ok, type McpServerHooks } from "./mcp";
+import {
+  buildMcpServer,
+  buildMultiVaultMcpServer,
+  ok,
+  resolveVaultArg,
+  type McpServerHooks,
+  type MultiVaultServerOptions,
+} from "./mcp";
 import { VaultDoError, type VaultClient } from "./vault-client";
 
 interface FakeTask {
@@ -1104,5 +1112,108 @@ describe("dream tool", () => {
     const missing = await dreamCall(client, { action: "revert", id: "nope" });
     expect(missing.isError).toBe(true);
     expect(missing.content[0].text).toContain("no dream");
+  });
+});
+
+describe("multi-vault OAuth connections", () => {
+  const VAULTS = [
+    { id: "id-alpha", slug: "alpha", name: "Alpha", role: "owner" as const },
+    { id: "id-beta", slug: "beta", name: "Beta", role: "viewer" as const },
+  ];
+
+  async function connectMulti(opts: Partial<MultiVaultServerOptions> = {}) {
+    const fakes = new Map<string, FakeVault>();
+    const opened: string[] = [];
+    const server = buildMultiVaultMcpServer({
+      vaults: VAULTS,
+      includesFutureVaults: false,
+      open: (vaultId) => {
+        opened.push(vaultId);
+        if (!fakes.has(vaultId)) fakes.set(vaultId, fakeVault());
+        return { client: fakes.get(vaultId)! };
+      },
+      exclude: DIRECTORY_HIDDEN_TOOL_NAMES,
+      ...opts,
+    });
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    return { client, fakes, opened };
+  }
+
+  it("lists list_vaults + the directory tools, each vault tool with a REQUIRED vault arg", async () => {
+    const { client } = await connectMulti();
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toEqual(["list_vaults", ...DIRECTORY_MCP_TOOL_NAMES]);
+    for (const tool of tools.filter((t) => t.name !== "list_vaults")) {
+      expect(tool.inputSchema.required, tool.name).toContain("vault");
+      const contract = getMcpTool(tool.name as McpToolName);
+      expect(tool.annotations).toEqual({ title: contract.title, ...contract.annotations });
+    }
+    const instructions = client.getInstructions() ?? "";
+    expect(instructions).toContain("several Brainz vaults");
+    expect(instructions).toContain("`upsert_concept`");
+  });
+
+  it("list_vaults reports each vault, its role and read-only flag (contract shape)", async () => {
+    const { client } = await connectMulti({ includesFutureVaults: true });
+    const result = await client.callTool({ name: "list_vaults", arguments: {} });
+    const parsed = listVaultsOutputSchema.parse(JSON.parse(textBlocks(result)[0]));
+    expect(parsed).toEqual({
+      vaults: [
+        { id: "id-alpha", slug: "alpha", name: "Alpha", role: "owner", readOnly: false },
+        { id: "id-beta", slug: "beta", name: "Beta", role: "viewer", readOnly: true },
+      ],
+      includesFutureVaults: true,
+    });
+  });
+
+  it("routes a call to the named vault by slug or id, opening only that vault", async () => {
+    const { client, fakes, opened } = await connectMulti();
+    const write = await client.callTool({
+      name: "upsert_concept",
+      arguments: { vault: "alpha", title: "New note", body: "hello" },
+    });
+    expect(write.isError).toBeFalsy();
+    expect(upsertConceptOutputSchema.strict().safeParse(JSON.parse(textBlocks(write)[0])).success).toBe(true);
+    expect(fakes.get("id-alpha")!.state.upserts).toHaveLength(1);
+    const read = await client.callTool({ name: "vault_stats", arguments: { vault: "id-beta" } });
+    expect(read.isError).toBeFalsy();
+    expect(opened).toEqual(["id-alpha", "id-beta"]);
+  });
+
+  it("refuses a write on a viewer vault, an unknown vault and a missing vault arg", async () => {
+    const { client, fakes } = await connectMulti();
+    const viewerWrite = await client.callTool({
+      name: "upsert_concept",
+      arguments: { vault: "beta", title: "Nope", body: "x" },
+    });
+    expect(viewerWrite.isError).toBe(true);
+    expect(textBlocks(viewerWrite)[0]).toContain("read-only");
+    expect(fakes.get("id-beta")?.state.upserts ?? []).toHaveLength(0);
+    const unknown = await client.callTool({ name: "vault_stats", arguments: { vault: "gamma" } });
+    expect(unknown.isError).toBe(true);
+    expect(textBlocks(unknown)[0]).toContain("list_vaults");
+    const missing = await client.callTool({ name: "vault_stats", arguments: {} });
+    expect(missing.isError).toBe(true);
+  });
+
+  it("registers only the read tools when every vault is viewer-only", async () => {
+    const { client } = await connectMulti({ vaults: [VAULTS[1], { ...VAULTS[0], role: "viewer" }] });
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).toEqual(["list_vaults", ...PUBLIC_VAULT_READ_TOOL_NAMES]);
+    expect(client.getInstructions()).toContain("read-only");
+  });
+
+  it("resolveVaultArg: id beats slug, and a slug shared by two vaults needs the id", () => {
+    const twins = [
+      { id: "a1", slug: "product", name: "Product", role: "owner" as const },
+      { id: "b2", slug: "product", name: "Product", role: "editor" as const },
+    ];
+    expect(resolveVaultArg(twins, "b2")).toMatchObject({ ok: true, vault: { id: "b2" } });
+    const shared = resolveVaultArg(twins, "product");
+    expect(shared.ok).toBe(false);
+    expect(!shared.ok && shared.message).toContain("pass its id");
   });
 });

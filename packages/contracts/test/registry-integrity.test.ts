@@ -22,6 +22,9 @@ import {
   contextResponseSchema,
   MCP_TOOLS,
   MCP_TOOL_NAMES,
+  MULTI_VAULT_MCP_TOOLS,
+  MULTI_VAULT_MCP_TOOL_NAMES,
+  withVaultRoutingArg,
   PUBLIC_MCP_TOOLS,
   PUBLIC_MCP_TOOL_NAMES,
   PUBLIC_VAULT_READ_TOOL_NAMES,
@@ -42,12 +45,13 @@ import {
   type ToolAnnotations,
   type CloudMcpToolName,
   type McpToolName,
+  type MultiVaultMcpToolName,
   type PublicMcpToolName,
 } from "../src/index.js";
 
 // ------------------------------------------------------- registry integrity
 
-type AnyToolName = McpToolName | PublicMcpToolName | CloudMcpToolName;
+type AnyToolName = McpToolName | PublicMcpToolName | CloudMcpToolName | MultiVaultMcpToolName;
 
 /** A realistic, minimal INPUT sample for every tool (authed + public + cloud). */
 const INPUT_SAMPLES: Record<AnyToolName, unknown> = {
@@ -77,6 +81,7 @@ const INPUT_SAMPLES: Record<AnyToolName, unknown> = {
   signup: { vaultName: "Acme Brain" },
   sign_in: { email: "human@example.com" },
   claim: { email: "human@example.com" },
+  list_vaults: {},
 };
 
 const META = {
@@ -176,16 +181,26 @@ const OUTPUT_SAMPLES: Record<AnyToolName, unknown> = {
   },
   sign_in: { status: "sent" },
   claim: { status: "sent", expiresAt: "2026-07-12T00:00:00.000Z" },
+  list_vaults: {
+    vaults: [
+      { id: "v-1", slug: "brainz", name: "Brainz", role: "owner", readOnly: false },
+      { id: "v-2", slug: "shared", name: "Shared", role: "viewer", readOnly: true },
+    ],
+    includesFutureVaults: false,
+  },
 };
 
-describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOLS)", () => {
-  const allTools = [...MCP_TOOLS, ...PUBLIC_MCP_TOOLS, ...CLOUD_MCP_TOOLS];
+describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOLS + MULTI_VAULT_MCP_TOOLS)", () => {
+  const allTools = [...MCP_TOOLS, ...PUBLIC_MCP_TOOLS, ...CLOUD_MCP_TOOLS, ...MULTI_VAULT_MCP_TOOLS];
 
   it("names are unique across ALL registries combined", () => {
     const names = allTools.map((t) => t.name);
     expect(new Set(names).size).toBe(names.length);
     expect(names).toHaveLength(
-      MCP_TOOL_NAMES.length + PUBLIC_MCP_TOOL_NAMES.length + CLOUD_MCP_TOOL_NAMES.length,
+      MCP_TOOL_NAMES.length +
+        PUBLIC_MCP_TOOL_NAMES.length +
+        CLOUD_MCP_TOOL_NAMES.length +
+        MULTI_VAULT_MCP_TOOL_NAMES.length,
     );
   });
 
@@ -313,10 +328,21 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOL
       signup: [false, false, true],
       sign_in: [false, false, true],
       claim: [false, false, true],
+      list_vaults: [true, false, false],
     };
     for (const tool of allTools) expect(flags(tool.name), tool.name).toEqual(EXPECTED[tool.name]);
     // Every public-vault (viewer) tool is read-only.
     for (const n of PUBLIC_VAULT_READ_TOOL_NAMES) expect(hints[n].readOnlyHint, n).toBe(true);
+  });
+
+  it("multi-vault routing: every vault tool's input + a required `vault` parses, and omitting it fails", () => {
+    for (const tool of MCP_TOOLS) {
+      const routed = withVaultRoutingArg(tool.inputSchema as z.AnyZodObject);
+      const sample = INPUT_SAMPLES[tool.name] as Record<string, unknown>;
+      expect(routed.safeParse({ ...sample, vault: "brainz" }).success, tool.name).toBe(true);
+      expect(routed.safeParse(sample).success, `${tool.name} without vault`).toBe(false);
+      expect(routed.safeParse({ ...sample, vault: "" }).success, `${tool.name} empty vault`).toBe(false);
+    }
   });
 });
 

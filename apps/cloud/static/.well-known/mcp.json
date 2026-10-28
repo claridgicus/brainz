@@ -39,6 +39,9 @@
         "complete_task",
         "create_task"
       ],
+      "oauthMultiVaultExtraTools": [
+        "list_vaults"
+      ],
       "apiKeyTools": [
         "search_concepts",
         "get_concept",
@@ -65,7 +68,7 @@
         "sign_in"
       ],
       "signupFlow": "Agents connect to https://brainz.brownmatter.ai/mcp/agent without Authorization and call signup {vaultName?, email?}; it returns {apiKey, vaultSlug, expiresAt, claimEmailSent}. The key works on /mcp and /mcp/agent. The workspace is provisional (7 days); persist it with the authenticated claim {email} tool, which emails your human an approval link. /mcp itself never hands out API keys.",
-      "oauth": "OAuth 2.1 (PKCE S256, dynamic client registration, client ID metadata documents). Protected-resource metadata: https://brainz.brownmatter.ai/.well-known/oauth-protected-resource/mcp; one grant = one vault, picked at consent.",
+      "oauth": "OAuth 2.1 (PKCE S256, dynamic client registration, client ID metadata documents). Protected-resource metadata: https://brainz.brownmatter.ai/.well-known/oauth-protected-resource/mcp; one grant covers the vaults ticked at consent (one, several, or all including later ones); a multi-vault grant adds list_vaults and a required vault argument on every vault tool.",
       "agentSetupPrompt": "https://brainz.brownmatter.ai/skill.md",
       "docs": "https://brownmatter.ai/docs",
       "privacyPolicy": "https://brownmatter.ai/privacy",

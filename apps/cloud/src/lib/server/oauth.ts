@@ -690,29 +690,63 @@ export async function validateAuthorizeRequest(
   };
 }
 
-/** Mint a single-use authorization code bound to client, redirect, PKCE, user, vault. */
+/**
+ * Which vaults a grant covers (SPEC-CLOUD.md "Multi-vault grants"):
+ * - "single": one ticked vault — the original Wave OA surface, unchanged;
+ * - "selected": several ticked vaults — vault tools take a required `vault` arg;
+ * - "all": every vault the user is a member of, now or later — same surface.
+ */
+export type VaultScope = "single" | "selected" | "all";
+
+/** The consent page's choice: the ticked vaults, or "all my vaults". */
+export interface VaultSelection {
+  /** "All my vaults, including ones I create or join later". */
+  all: boolean;
+  /** The ticked vault ids (non-empty unless `all`); the first is the grant's anchor. */
+  vaultIds: readonly string[];
+}
+
+export function vaultScopeOf(selection: VaultSelection): VaultScope {
+  if (selection.all) return "all";
+  return selection.vaultIds.length > 1 ? "selected" : "single";
+}
+
+/**
+ * Mint a single-use authorization code bound to client, redirect, PKCE, user
+ * and the vault selection. `anchorVaultId` fills the NOT NULL `vault_id`
+ * column: the first ticked vault, or for "all" any vault the user is in.
+ */
 export async function createAuthorizationCode(
   db: OAuthDb,
-  args: { request: AuthorizeRequest; userId: string; vaultId: string; now: Date },
+  args: {
+    request: AuthorizeRequest;
+    userId: string;
+    selection: VaultSelection;
+    anchorVaultId: string;
+    now: Date;
+  },
 ): Promise<string> {
   const code = randomToken("", 43);
-  const { request, now } = args;
+  const { request, now, selection } = args;
+  const scope = vaultScopeOf(selection);
   await db
     .prepare(
-      `INSERT INTO oauth_code (code_hash, client_id, user_id, vault_id, redirect_uri, redirect_uri_explicit, code_challenge, scope, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO oauth_code (code_hash, client_id, user_id, vault_id, redirect_uri, redirect_uri_explicit, code_challenge, scope, created_at, expires_at, vault_scope, vault_ids)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       await sha256Hex(code),
       request.client.clientId,
       args.userId,
-      args.vaultId,
+      args.anchorVaultId,
       request.redirectUri,
       request.redirectUriExplicit ? 1 : 0,
       request.codeChallenge,
       request.scope,
       now.getTime(),
       now.getTime() + AUTHORIZATION_CODE_TTL_SECONDS * 1000,
+      scope,
+      scope === "all" ? null : JSON.stringify(selection.vaultIds),
     )
     .run();
   return code;
@@ -817,12 +851,83 @@ export async function authenticateClient(
   return client;
 }
 
-async function memberRoleOf(db: OAuthDb, vaultId: string, userId: string): Promise<VaultRole | null> {
+/** One vault a grant currently covers, with the user's CURRENT role in it. */
+export interface GrantVault {
+  id: string;
+  slug: string;
+  name: string;
+  role: VaultRole;
+  ownerId: string;
+  /** The owner's provisional-account deadline (Wave G), if any. */
+  ownerExpiresAt: Date | null;
+}
+
+/**
+ * The vaults a grant covers right now: its `oauth_grant_vault` rows ("single" /
+ * "selected") or every membership ("all"), always intersected with the user's
+ * CURRENT memberships, so a removed member never reaches a vault. Ordered by
+ * name. One row out (json_group_array) because the D1 port only has first().
+ */
+export async function coveredVaults(
+  db: OAuthDb,
+  grant: { id: string; userId: string; vaultScope: VaultScope },
+): Promise<GrantVault[]> {
   const row = await db
-    .prepare(`SELECT role FROM vault_member WHERE vault_id = ? AND user_id = ?`)
-    .bind(vaultId, userId)
-    .first<{ role: VaultRole }>();
-  return row?.role ?? null;
+    .prepare(
+      `SELECT json_group_array(json_object(
+                'id', id, 'slug', slug, 'name', name, 'role', role,
+                'owner_id', owner_id, 'owner_expires_at', owner_expires_at)) AS vaults
+       FROM (
+         SELECT v.id, v.slug, v.name, m.role, v.owner_id, o.expires_at AS owner_expires_at
+         FROM vault v
+         JOIN vault_member m ON m.vault_id = v.id AND m.user_id = ?
+         JOIN user o ON o.id = v.owner_id
+         WHERE ? = 'all' OR v.id IN (SELECT vault_id FROM oauth_grant_vault WHERE grant_id = ?)
+         ORDER BY v.name, v.id
+       )`,
+    )
+    .bind(grant.userId, grant.vaultScope, grant.id)
+    .first<{ vaults: string }>();
+  const parsed = JSON.parse(row?.vaults ?? "[]") as {
+    id: string;
+    slug: string;
+    name: string;
+    role: VaultRole;
+    owner_id: string;
+    owner_expires_at: number | null;
+  }[];
+  return parsed.map((v) => ({
+    id: v.id,
+    slug: v.slug,
+    name: v.name,
+    role: v.role,
+    ownerId: v.owner_id,
+    ownerExpiresAt: v.owner_expires_at === null ? null : new Date(v.owner_expires_at),
+  }));
+}
+
+/** Does the user (still) belong to at least one of these vaults? Returns those they do. */
+async function memberVaultsAmong(db: OAuthDb, userId: string, vaultIds: readonly string[]): Promise<string[]> {
+  if (vaultIds.length === 0) return [];
+  const row = await db
+    .prepare(
+      `SELECT json_group_array(vault_id) AS ids FROM vault_member
+       WHERE user_id = ? AND vault_id IN (SELECT value FROM json_each(?))`,
+    )
+    .bind(userId, JSON.stringify(vaultIds))
+    .first<{ ids: string }>();
+  const member = new Set(JSON.parse(row?.ids ?? "[]") as string[]);
+  // Keep the consent order (the first is the anchor).
+  return vaultIds.filter((id) => member.has(id));
+}
+
+/** Any vault the user belongs to (the anchor of an "all" grant), or null. */
+async function anyMemberVault(db: OAuthDb, userId: string): Promise<string | null> {
+  const row = await db
+    .prepare(`SELECT vault_id FROM vault_member WHERE user_id = ? ORDER BY created_at, vault_id LIMIT 1`)
+    .bind(userId)
+    .first<{ vault_id: string }>();
+  return row?.vault_id ?? null;
 }
 
 async function revokeGrant(db: OAuthDb, grantId: string, now: Date): Promise<void> {
@@ -908,6 +1013,8 @@ interface CodeRow {
   expires_at: number;
   used_at: number | null;
   grant_id: string | null;
+  vault_scope: VaultScope;
+  vault_ids: string | null;
 }
 
 async function exchangeCode(deps: TokenDeps, client: ResolvedClient, form: Record<string, string>) {
@@ -948,16 +1055,35 @@ async function exchangeCode(deps: TokenDeps, client: ResolvedClient, form: Recor
   if ((await s256(verifier)) !== row.code_challenge) {
     throw new OAuthError("invalid_grant", "PKCE verification failed");
   }
-  if (!(await memberRoleOf(db, row.vault_id, row.user_id))) {
+  // Membership is re-checked at exchange: only vaults the user still belongs to
+  // enter the grant, and a grant that would cover nothing is refused.
+  const vaultScope: VaultScope = row.vault_scope ?? "single";
+  let vaultIds: string[];
+  if (vaultScope === "all") {
+    const anchor = (await memberVaultsAmong(db, row.user_id, [row.vault_id]))[0] ?? (await anyMemberVault(db, row.user_id));
+    vaultIds = anchor ? [anchor] : [];
+  } else {
+    const ticked = row.vault_ids ? (JSON.parse(row.vault_ids) as string[]) : [row.vault_id];
+    vaultIds = await memberVaultsAmong(db, row.user_id, ticked);
+  }
+  if (vaultIds.length === 0) {
     throw new OAuthError("invalid_grant", "you no longer have access to that vault");
   }
   const grantId = crypto.randomUUID();
   await db
     .prepare(
-      `INSERT INTO oauth_grant (id, client_id, user_id, vault_id, scope, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO oauth_grant (id, client_id, user_id, vault_id, scope, created_at, vault_scope) VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .bind(grantId, client.clientId, row.user_id, row.vault_id, row.scope, now.getTime())
+    .bind(grantId, client.clientId, row.user_id, vaultIds[0], row.scope, now.getTime(), vaultScope)
     .run();
+  if (vaultScope !== "all") {
+    for (const vaultId of vaultIds) {
+      await db
+        .prepare(`INSERT INTO oauth_grant_vault (grant_id, vault_id) VALUES (?, ?)`)
+        .bind(grantId, vaultId)
+        .run();
+    }
+  }
   await db.prepare(`UPDATE oauth_code SET grant_id = ? WHERE code_hash = ?`).bind(grantId, codeHash).run();
   return issueTokenPair(db, grantId, row.scope, now);
 }
@@ -984,7 +1110,7 @@ async function rotateRefresh(deps: TokenDeps, client: ResolvedClient, form: Reco
   const row = await db
     .prepare(
       `SELECT t.expires_at, t.used_at, t.revoked_at AS token_revoked_at,
-              g.id AS grant_id, g.client_id, g.user_id, g.vault_id, g.scope, g.revoked_at
+              g.id AS grant_id, g.client_id, g.user_id, g.scope, g.revoked_at, g.vault_scope
        FROM oauth_token t JOIN oauth_grant g ON g.id = t.grant_id
        WHERE t.token_hash = ? AND t.kind = 'refresh'`,
     )
@@ -996,9 +1122,9 @@ async function rotateRefresh(deps: TokenDeps, client: ResolvedClient, form: Reco
       grant_id: string;
       client_id: string;
       user_id: string;
-      vault_id: string;
       scope: string;
       revoked_at: number | null;
+      vault_scope: VaultScope;
     }>();
   // Check the client BEFORE touching anything, so a token presented by the
   // wrong client cannot burn the legitimate client's grant.
@@ -1013,7 +1139,9 @@ async function rotateRefresh(deps: TokenDeps, client: ResolvedClient, form: Reco
   // A sibling superseded by a grace re-issue: its chain was displaced.
   if (row.token_revoked_at !== null) return reuse();
   if (row.expires_at < now.getTime()) throw new OAuthError("invalid_grant", "refresh token expired");
-  if (!(await memberRoleOf(db, row.vault_id, row.user_id))) {
+  // A grant whose every vault is gone (membership lost, vault deleted) is dead.
+  const covered = await coveredVaults(db, { id: row.grant_id, userId: row.user_id, vaultScope: row.vault_scope });
+  if (covered.length === 0) {
     await revokeGrant(db, row.grant_id, now);
     throw new OAuthError("invalid_grant", "you no longer have access to that vault");
   }
@@ -1103,59 +1231,81 @@ export function isAccessTokenFormat(token: string): boolean {
 }
 
 export type AccessResolution =
-  | { ok: true; userId: string; vaultId: string; ownerId: string; role: VaultRole; grantId: string }
+  | {
+      ok: true;
+      userId: string;
+      grantId: string;
+      vaultScope: VaultScope;
+      /**
+       * The vaults this call may use, with the CURRENT role in each. Never
+       * empty. "single" grants have exactly one; multi-vault grants drop
+       * vaults whose provisional owner has expired.
+       */
+      vaults: GrantVault[];
+    }
   | { ok: false; reason: "invalid" | "owner_expired" };
 
 /**
- * Resolve an access token for /mcp. The user's CURRENT membership decides the
- * role (and so the surface); a removed member, a revoked grant, an expired
- * token or an expired provisional owner all fail.
+ * Resolve an access token for /mcp. The user's CURRENT memberships decide
+ * which vaults (and roles, so which surface) the call gets; a grant left with
+ * no vault, a revoked grant, an expired token or (single-vault) an expired
+ * provisional owner all fail.
  */
 export async function resolveAccessToken(db: OAuthDb, token: string, now: Date): Promise<AccessResolution> {
   if (!isAccessTokenFormat(token)) return { ok: false, reason: "invalid" };
   const row = await db
     .prepare(
-      `SELECT g.id AS grant_id, g.user_id, g.vault_id, g.revoked_at, t.expires_at, t.revoked_at AS token_revoked_at,
-              v.owner_id, o.expires_at AS owner_expires_at, m.role
+      `SELECT g.id AS grant_id, g.user_id, g.vault_scope, g.revoked_at, t.expires_at, t.revoked_at AS token_revoked_at
        FROM oauth_token t
        JOIN oauth_grant g ON g.id = t.grant_id
-       JOIN vault v ON v.id = g.vault_id
-       JOIN user o ON o.id = v.owner_id
-       LEFT JOIN vault_member m ON m.vault_id = g.vault_id AND m.user_id = g.user_id
        WHERE t.token_hash = ? AND t.kind = 'access'`,
     )
     .bind(await sha256Hex(token))
     .first<{
       grant_id: string;
       user_id: string;
-      vault_id: string;
+      vault_scope: VaultScope;
       revoked_at: number | null;
       expires_at: number;
       token_revoked_at: number | null;
-      owner_id: string;
-      owner_expires_at: number | null;
-      role: VaultRole | null;
     }>();
-  if (
-    !row ||
-    row.revoked_at !== null ||
-    row.token_revoked_at !== null ||
-    row.expires_at < now.getTime() ||
-    !row.role
-  ) {
+  if (!row || row.revoked_at !== null || row.token_revoked_at !== null || row.expires_at < now.getTime()) {
     return { ok: false, reason: "invalid" };
   }
-  if (isOwnerExpired(row.owner_expires_at === null ? null : new Date(row.owner_expires_at), now)) {
-    return { ok: false, reason: "owner_expired" };
-  }
-  return {
-    ok: true,
-    userId: row.user_id,
-    vaultId: row.vault_id,
-    ownerId: row.owner_id,
-    role: row.role,
-    grantId: row.grant_id,
-  };
+  const covered = await coveredVaults(db, { id: row.grant_id, userId: row.user_id, vaultScope: row.vault_scope });
+  if (covered.length === 0) return { ok: false, reason: "invalid" };
+  const live = covered.filter((v) => !isOwnerExpired(v.ownerExpiresAt, now));
+  // Every covered vault belongs to an expired provisional owner: the
+  // actionable workspace-expired message, as before multi-vault grants.
+  if (live.length === 0) return { ok: false, reason: "owner_expired" };
+  return { ok: true, userId: row.user_id, grantId: row.grant_id, vaultScope: row.vault_scope, vaults: live };
+}
+
+// ------------------------------------------------- multi-vault upkeep
+
+/**
+ * Before a vault row is deleted: move every grant ANCHORED on it (oauth_grant
+ * .vault_id, whose FK cascades) onto another vault it still covers, so a
+ * multi-vault grant survives losing one vault. "selected" grants move to
+ * another ticked vault, "all" grants to any other vault the user belongs to.
+ * A grant with nowhere to go (a "single" grant, or one covering only this
+ * vault) keeps the anchor and cascades away with the vault.
+ */
+export async function reanchorGrantsBeforeVaultDelete(db: OAuthDb, vaultId: string): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE oauth_grant SET vault_id = COALESCE(
+         (SELECT gv.vault_id FROM oauth_grant_vault gv
+           WHERE gv.grant_id = oauth_grant.id AND gv.vault_id <> ? LIMIT 1),
+         CASE WHEN oauth_grant.vault_scope = 'all' THEN
+           (SELECT m.vault_id FROM vault_member m
+             WHERE m.user_id = oauth_grant.user_id AND m.vault_id <> ? LIMIT 1)
+         END,
+         vault_id)
+       WHERE vault_id = ? AND vault_scope <> 'single'`,
+    )
+    .bind(vaultId, vaultId, vaultId)
+    .run();
 }
 
 // ------------------------------------------------------ lazy-auth gate

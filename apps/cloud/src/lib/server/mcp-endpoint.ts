@@ -30,11 +30,13 @@
  *   context/list/stats — buildPublicVaultMcpServer), NO write/onboard/task/claim
  *   tools, per-IP rate-limited. Rotated/revoked/disabled token → generic 401.
  * - `Authorization: Bearer bzat_...` (Wave OA, `/mcp` only) → an OAuth 2.1
- *   access token ($lib/server/oauth): token → grant → one vault, acting as the
- *   signed-in user. The user's CURRENT membership role picks the surface:
+ *   access token ($lib/server/oauth): token → grant → its vault(s), acting as
+ *   the signed-in user. The user's CURRENT membership role picks the surface:
  *   owner/editor get the directory vault tools, a viewer gets the read tools
- *   only. No `claim` (an OAuth user is already a signed-in human) and no
- *   `session_hook`.
+ *   only. A multi-vault grant gets buildMultiVaultMcpServer instead: a
+ *   required `vault` arg on every vault tool, `list_vaults`, and the role
+ *   checked per call. No `claim` (an OAuth user is already a signed-in human)
+ *   and no `session_hook`.
  * - Authorization header present but invalid/revoked/expired → 401. On `/mcp`
  *   every bearer 401 carries `WWW-Authenticate: Bearer ... resource_metadata=...`
  *   so OAuth clients refresh or re-authorize; `/mcp/agent` is not an OAuth
@@ -64,7 +66,7 @@ import { guardDepsFromDb, guardMagicLinkRequest } from "./magic-link-guard";
 import { magicLinkSender } from "./magic-link";
 import { parseBearer } from "./api-keys";
 import { resolveApiKey, WORKSPACE_EXPIRED_MESSAGE } from "./vault-access";
-import { buildMcpServer, buildPublicVaultMcpServer } from "./mcp";
+import { buildMcpServer, buildMultiVaultMcpServer, buildPublicVaultMcpServer } from "./mcp";
 import {
   callsGatedTool,
   isAccessTokenFormat,
@@ -212,8 +214,9 @@ export async function handleMcpRequest(event: RequestEvent, surface: McpSurface)
       }),
     );
   } else if (bearerToken !== null && isAccessTokenFormat(bearerToken)) {
-    // OAuth 2.1 access token (Wave OA): one grant = one user × one vault. The
-    // token's resource is `/mcp`; the agent endpoint is not that resource.
+    // OAuth 2.1 access token (Wave OA): one grant = one user × one client ×
+    // one vault, several vaults, or all of them. The token's resource is
+    // `/mcp`; the agent endpoint is not that resource.
     if (surface === "agent") {
       return unauthorized(issuer, surface, "OAuth access tokens are accepted on /mcp only", {
         tokenPresented: true,
@@ -228,15 +231,30 @@ export async function handleMcpRequest(event: RequestEvent, surface: McpSurface)
         { tokenPresented: true },
       );
     }
-    const vault = vaultClient(platform.env.VAULT_DO, access.vaultId);
-    server =
-      access.role === "viewer"
-        ? buildPublicVaultMcpServer(vault)
-        : buildMcpServer(vault, {
-            ...mirrorHooks(platform.env.DB, access.vaultId),
-            // Directory surface: no session_hook (and no claim) for OAuth.
-            exclude: DIRECTORY_HIDDEN_TOOL_NAMES,
-          });
+    if (access.vaultScope === "single") {
+      const [only] = access.vaults;
+      const vault = vaultClient(platform.env.VAULT_DO, only.id);
+      server =
+        only.role === "viewer"
+          ? buildPublicVaultMcpServer(vault)
+          : buildMcpServer(vault, {
+              ...mirrorHooks(platform.env.DB, only.id),
+              // Directory surface: no session_hook (and no claim) for OAuth.
+              exclude: DIRECTORY_HIDDEN_TOOL_NAMES,
+            });
+    } else {
+      // Multi-vault grant: every vault tool takes a required `vault` arg, the
+      // role is checked per call, and list_vaults names the vaults.
+      server = buildMultiVaultMcpServer({
+        vaults: access.vaults,
+        includesFutureVaults: access.vaultScope === "all",
+        open: (vaultId) => ({
+          client: vaultClient(platform.env.VAULT_DO, vaultId),
+          hooks: mirrorHooks(platform.env.DB, vaultId),
+        }),
+        exclude: DIRECTORY_HIDDEN_TOOL_NAMES,
+      });
+    }
   } else {
     let resolved: Awaited<ReturnType<typeof resolveApiKey>>;
     try {

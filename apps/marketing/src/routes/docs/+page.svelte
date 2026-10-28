@@ -290,8 +290,9 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 			or GitHub if you aren't signed in already.
 		</li>
 		<li>
-			The consent screen names the client and what it is granted. Pick <strong>one vault</strong>
-			and click <strong>Approve</strong>. You're returned to Claude, connected.
+			The consent screen names the client and what it is granted. Tick the vaults it may use (or
+			<strong>All my vaults</strong>) and click <strong>Approve</strong>. You're returned to Claude,
+			connected.
 		</li>
 	</ol>
 	<p>
@@ -317,7 +318,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 			authentication set to <strong>OAuth</strong>.
 		</li>
 		<li>
-			Click <strong>Connect</strong>, sign in to Brainz, pick <strong>one vault</strong> on the
+			Click <strong>Connect</strong>, sign in to Brainz, tick the vaults ChatGPT may use on the
 			consent screen and click <strong>Approve</strong>.
 		</li>
 		<li>Start a new chat, turn Brainz on for it, and ask about your vault.</li>
@@ -326,9 +327,11 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 	<h3 id="connect-scope">What a connection can do</h3>
 	<ul>
 		<li>
-			<strong>One connection, one vault.</strong> The vault you pick on the consent screen is the
-			only one the client can reach. To use a second vault, add Brainz again (a second connector or
-			MCP server entry) and pick the other vault.
+			<strong>One connection, the vaults you tick.</strong> The client reaches only the vaults you
+			tick on the consent screen, or every vault you belong to if you choose
+			<strong>All my vaults, including ones I create or join later</strong>. With more than one
+			vault, every tool takes a <code>vault</code> argument (a slug or id) and
+			<code>list_vaults</code> lists them. To change the set, connect again.
 		</li>
 		<li>
 			<strong>Your role decides the tools, on every call.</strong> Owners and editors get sixteen
