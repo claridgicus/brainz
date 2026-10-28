@@ -623,6 +623,7 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
         title: tool.title,
         description: tool.description,
         inputSchema: tool.inputSchema.shape,
+        annotations: { title: tool.title, ...tool.annotations },
       },
       async (args: Record<string, unknown>) => handler(args),
     );
@@ -637,6 +638,7 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
         title: extra.def.title,
         description: extra.def.description,
         inputSchema: extra.def.inputSchema.shape,
+        annotations: { title: extra.def.title, ...extra.def.annotations },
       },
       async (args: Record<string, unknown>) => extra.handler(args ?? {}),
     );

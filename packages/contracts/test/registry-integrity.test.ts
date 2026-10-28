@@ -38,6 +38,8 @@ import {
   vaultRoleSchema,
   vaultSchema,
   vaultUpdateRequestSchema,
+  toolAnnotationsSchema,
+  type ToolAnnotations,
   type CloudMcpToolName,
   type McpToolName,
   type PublicMcpToolName,
@@ -269,6 +271,52 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOL
     }
     // No duplicates.
     expect(new Set(PUBLIC_VAULT_READ_TOOL_NAMES).size).toBe(PUBLIC_VAULT_READ_TOOL_NAMES.length);
+  });
+
+  it("every tool has a title and a complete, explicit annotation set", () => {
+    for (const tool of allTools) {
+      expect(tool.title.trim(), `${tool.name} title`).not.toBe("");
+      const parsed = toolAnnotationsSchema.safeParse(tool.annotations);
+      expect(parsed.success, `${tool.name} annotations must be complete`).toBe(true);
+      // A read-only tool can't also be destructive.
+      if (tool.annotations.readOnlyHint) expect(tool.annotations.destructiveHint, tool.name).toBe(false);
+    }
+  });
+
+  it("annotations match each handler's behavior (directory submissions)", () => {
+    const hints = Object.fromEntries(
+      allTools.map((t) => [t.name, t.annotations]),
+    ) as Record<AnyToolName, ToolAnnotations>;
+    const flags = (n: AnyToolName) => {
+      const a = hints[n];
+      return [a.readOnlyHint, a.destructiveHint, a.openWorldHint];
+    };
+    // [readOnly, destructive, openWorld]
+    const EXPECTED: Record<AnyToolName, [boolean, boolean, boolean]> = {
+      search_concepts: [true, false, false],
+      get_concept: [true, false, false],
+      get_related: [true, false, false],
+      get_context: [true, false, false],
+      list_concepts: [true, false, false],
+      vault_stats: [true, false, false],
+      session_hook: [true, false, false],
+      list_tasks: [true, false, false],
+      upsert_concept: [false, true, false],
+      delete_concept: [false, true, false],
+      dream: [false, true, true],
+      link_concepts: [false, false, false],
+      onboard: [false, false, false],
+      sync: [false, false, false],
+      take_task: [false, false, false],
+      complete_task: [false, false, false],
+      create_task: [false, false, false],
+      signup: [false, false, true],
+      sign_in: [false, false, true],
+      claim: [false, false, true],
+    };
+    for (const tool of allTools) expect(flags(tool.name), tool.name).toEqual(EXPECTED[tool.name]);
+    // Every public-vault (viewer) tool is read-only.
+    for (const n of PUBLIC_VAULT_READ_TOOL_NAMES) expect(hints[n].readOnlyHint, n).toBe(true);
   });
 });
 

@@ -140,6 +140,25 @@ Env/arg: vault dir via `--vault <dir>` or `BRAINZ_VAULT` (default cwd). Binary: 
 
 Tool descriptions must tell an orchestrator **when** to call them (e.g. get_context: "Call before delegating a coding task; inject result into the subagent prompt."). All responses are JSON text content; get_context returns the markdown directly.
 
+### MCP tool annotations
+
+Every tool in every registry (`MCP_TOOLS`, `PUBLIC_MCP_TOOLS`, `CLOUD_MCP_TOOLS` in `@brainz/contracts`) declares a `title` and an explicit, complete `annotations` set — `readOnlyHint`, `destructiveHint`, `openWorldHint`, all true/false, none omitted (`toolAnnotationsSchema`). The stdio server and both cloud `/mcp` surfaces register them verbatim as MCP `ToolAnnotations` (plus `title`), so `tools/list` carries them. Meanings: **readOnly** = never changes vault/account state; **destructive** = may delete or overwrite existing data (false = additive writes or task-state transitions only); **openWorld** = reaches outside Brainz (sends email, calls an external LLM). These are the justifications submitted to the Anthropic/OpenAI directories; a change to a handler's side effects must update its row here and in `registry-integrity.test.ts`.
+
+| tool | readOnly | destructive | openWorld | why |
+|---|---|---|---|---|
+| `search_concepts`, `get_concept`, `get_related`, `get_context`, `list_concepts`, `vault_stats`, `list_tasks` | ✓ | — | — | pure reads of this vault's index |
+| `session_hook` | ✓ | — | — | returns a playbook text; the caller applies any edits itself |
+| `upsert_concept` | — | ✓ | — | overwrites an existing note's title/body/fields when the id exists |
+| `delete_concept` | — | ✓ | — | permanently removes a concept and its outgoing edges |
+| `dream` | — | ✓ | ✓ | `run` merges/tombstones duplicates (`revert` restores preimages); REM calls an LLM provider (Workers AI or the account's BYOK key) |
+| `link_concepts` | — | — | — | adds an edge to frontmatter |
+| `create_task` | — | — | — | creates a new task concept |
+| `take_task`, `complete_task` | — | — | — | task lifecycle transitions; `complete_task` appends an Outcome section |
+| `onboard`, `sync` | — | — | — | `start`/`status` read; `complete` stamps onboarding/sync time and writes or appends the vault's own onboarding-summary note |
+| `signup` | — | — | ✓ | provisions a new workspace; with `email` it sends a claim email |
+| `sign_in` | — | — | ✓ | emails a magic sign-in link |
+| `claim` (cloud) | — | — | ✓ | emails a claim-approval link |
+
 ## `@brainz/cli` — `brainz` binary (commander)
 
 ```

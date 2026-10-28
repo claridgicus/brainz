@@ -681,6 +681,52 @@ export const createTaskOutputSchema = taskMetaSchema.extend({
   filePath: z.string(),
 });
 
+// -------------------------------------------------------------- annotations
+
+/**
+ * MCP tool annotations (spec 2025-06-18 `ToolAnnotations`), declared on every
+ * registry entry and passed through by both servers. All three hints are
+ * REQUIRED and explicit (directory reviewers reject omitted/implicit ones);
+ * servers add `title` from the entry itself. Per-tool justifications are in
+ * SPEC.md ("MCP tool annotations").
+ *
+ * - readOnlyHint: the tool never changes vault/account state.
+ * - destructiveHint: the tool may delete or overwrite existing data
+ *   (false = additive/state-transition writes only).
+ * - openWorldHint: the tool reaches outside Brainz (sends email, calls an
+ *   external LLM); false = it only touches this vault/account.
+ */
+export const toolAnnotationsSchema = z
+  .object({
+    readOnlyHint: z.boolean(),
+    destructiveHint: z.boolean(),
+    openWorldHint: z.boolean(),
+  })
+  .strict();
+
+export type ToolAnnotations = z.infer<typeof toolAnnotationsSchema>;
+
+/** Reads only this vault. */
+const READ_ONLY_TOOL = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  openWorldHint: false,
+} as const satisfies ToolAnnotations;
+
+/** Writes this vault additively (creates, links, task state transitions). */
+const ADDITIVE_WRITE_TOOL = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  openWorldHint: false,
+} as const satisfies ToolAnnotations;
+
+/** Account write that emails a human (signup with email, sign_in, claim). */
+const EMAILING_WRITE_TOOL = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  openWorldHint: true,
+} as const satisfies ToolAnnotations;
+
 // ----------------------------------------------------------------- registry
 
 export const MCP_TOOLS = [
@@ -695,6 +741,7 @@ export const MCP_TOOLS = [
       "Never errors on odd queries — an empty hit list just means nothing matched.",
     inputSchema: searchConceptsInputSchema,
     outputSchema: searchConceptsOutputSchema,
+    annotations: READ_ONLY_TOOL,
   },
   {
     name: "get_concept",
@@ -706,6 +753,7 @@ export const MCP_TOOLS = [
       "If you don't know the id, use search_concepts instead.",
     inputSchema: getConceptInputSchema,
     outputSchema: getConceptOutputSchema,
+    annotations: READ_ONLY_TOOL,
   },
   {
     name: "get_related",
@@ -717,6 +765,7 @@ export const MCP_TOOLS = [
       "keyword search misses. Filter by relation names (e.g. depends_on) to follow only one kind of edge.",
     inputSchema: getRelatedInputSchema,
     outputSchema: getRelatedOutputSchema,
+    annotations: READ_ONLY_TOOL,
   },
   {
     name: "get_context",
@@ -730,6 +779,7 @@ export const MCP_TOOLS = [
       "token count. Provide at least one of `query` or `ids`.",
     inputSchema: getContextInputSchema,
     outputSchema: getContextOutputSchema,
+    annotations: READ_ONLY_TOOL,
   },
   {
     name: "upsert_concept",
@@ -742,6 +792,7 @@ export const MCP_TOOLS = [
       "graph edges. Returns the saved concept's metadata.",
     inputSchema: upsertConceptInputSchema,
     outputSchema: upsertConceptOutputSchema,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
   },
   {
     name: "delete_concept",
@@ -753,6 +804,7 @@ export const MCP_TOOLS = [
       "prefer upsert_concept to correct a note you want to keep. Returns { deleted, id }.",
     inputSchema: deleteConceptInputSchema,
     outputSchema: deleteConceptOutputSchema,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
   },
   {
     name: "link_concepts",
@@ -763,6 +815,7 @@ export const MCP_TOOLS = [
       "missing. Both concepts should already exist; use upsert_concept first if not.",
     inputSchema: linkConceptsInputSchema,
     outputSchema: linkConceptsOutputSchema,
+    annotations: ADDITIVE_WRITE_TOOL,
   },
   {
     name: "list_concepts",
@@ -774,6 +827,7 @@ export const MCP_TOOLS = [
       "or get_context.",
     inputSchema: listConceptsInputSchema,
     outputSchema: listConceptsOutputSchema,
+    annotations: READ_ONLY_TOOL,
   },
   {
     name: "vault_stats",
@@ -784,6 +838,7 @@ export const MCP_TOOLS = [
       "unfamiliar vault to calibrate how much knowledge is here and which product/tag filters exist.",
     inputSchema: vaultStatsInputSchema,
     outputSchema: vaultStatsOutputSchema,
+    annotations: READ_ONLY_TOOL,
   },
   {
     name: "onboard",
@@ -804,6 +859,7 @@ export const MCP_TOOLS = [
       "get_context results carry a reminder to run it.",
     inputSchema: onboardInputSchema,
     outputSchema: onboardOutputSchema,
+    annotations: ADDITIVE_WRITE_TOOL,
   },
   {
     name: "sync",
@@ -822,6 +878,7 @@ export const MCP_TOOLS = [
       "without a sync, get_context and search results carry a staleness reminder to run it.",
     inputSchema: syncInputSchema,
     outputSchema: syncOutputSchema,
+    annotations: ADDITIVE_WRITE_TOOL,
   },
   {
     name: "session_hook",
@@ -836,6 +893,7 @@ export const MCP_TOOLS = [
       "idempotent, so re-running refreshes the primer instead of duplicating it.",
     inputSchema: sessionHookInputSchema,
     outputSchema: sessionHookOutputSchema,
+    annotations: READ_ONLY_TOOL,
   },
   {
     name: "dream",
@@ -852,6 +910,7 @@ export const MCP_TOOLS = [
       "{action: \"configure\", enabled?, cadenceHours?} sets it up. Without an LLM only light runs.",
     inputSchema: dreamInputSchema,
     outputSchema: dreamOutputSchema,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   },
   {
     name: "list_tasks",
@@ -863,6 +922,7 @@ export const MCP_TOOLS = [
       "or by the domain the tasks are part_of. To actually pick up work, use take_task — don't just read.",
     inputSchema: listTasksInputSchema,
     outputSchema: listTasksOutputSchema,
+    annotations: READ_ONLY_TOOL,
   },
   {
     name: "take_task",
@@ -878,6 +938,7 @@ export const MCP_TOOLS = [
       "new/changed knowledge via upsert_concept and call complete_task.",
     inputSchema: takeTaskInputSchema,
     outputSchema: takeTaskOutputSchema,
+    annotations: ADDITIVE_WRITE_TOOL,
   },
   {
     name: "complete_task",
@@ -888,6 +949,7 @@ export const MCP_TOOLS = [
       "upsert_concept so the knowledge graph stays true to the codebase — do that before moving on.",
     inputSchema: completeTaskInputSchema,
     outputSchema: completeTaskOutputSchema,
+    annotations: ADDITIVE_WRITE_TOOL,
   },
   {
     name: "create_task",
@@ -900,6 +962,7 @@ export const MCP_TOOLS = [
       "and on the Kanban board.",
     inputSchema: createTaskInputSchema,
     outputSchema: createTaskOutputSchema,
+    annotations: ADDITIVE_WRITE_TOOL,
   },
 ] as const;
 
@@ -973,6 +1036,7 @@ export const PUBLIC_MCP_TOOLS = [
       "one call.",
     inputSchema: signupInputSchema,
     outputSchema: signupOutputSchema,
+    annotations: EMAILING_WRITE_TOOL,
   },
   {
     name: "sign_in",
@@ -986,6 +1050,7 @@ export const PUBLIC_MCP_TOOLS = [
       "to 5 sign-in emails per hour per address.",
     inputSchema: signInInputSchema,
     outputSchema: signInOutputSchema,
+    annotations: EMAILING_WRITE_TOOL,
   },
 ] as const;
 
@@ -1034,6 +1099,7 @@ export const CLOUD_MCP_TOOLS = [
       "expires on its 7-day signup schedule. Errors if the workspace is already claimed.",
     inputSchema: claimInputSchema,
     outputSchema: claimOutputSchema,
+    annotations: EMAILING_WRITE_TOOL,
   },
 ] as const;
 
@@ -1097,6 +1163,7 @@ export interface McpToolDef {
   readonly description: string;
   readonly inputSchema: z.AnyZodObject;
   readonly outputSchema: z.ZodTypeAny;
+  readonly annotations: ToolAnnotations;
 }
 
 // Compile-time guard: every registry entry satisfies the widened shape.
@@ -1110,6 +1177,7 @@ export interface PublicMcpToolDef {
   readonly description: string;
   readonly inputSchema: z.AnyZodObject;
   readonly outputSchema: z.ZodTypeAny;
+  readonly annotations: ToolAnnotations;
 }
 
 const _publicMcpToolDefs: readonly PublicMcpToolDef[] = PUBLIC_MCP_TOOLS;
@@ -1122,6 +1190,7 @@ export interface CloudMcpToolDef {
   readonly description: string;
   readonly inputSchema: z.AnyZodObject;
   readonly outputSchema: z.ZodTypeAny;
+  readonly annotations: ToolAnnotations;
 }
 
 const _cloudMcpToolDefs: readonly CloudMcpToolDef[] = CLOUD_MCP_TOOLS;

@@ -18,6 +18,7 @@ import {
   syncStatusOutputSchema,
   upsertConceptOutputSchema,
   vaultStatsOutputSchema,
+  type McpToolName,
 } from "@brainz/contracts";
 import {
   ONBOARDING_NUDGE,
@@ -343,6 +344,15 @@ describe("remote MCP server (contract registry)", () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...MCP_TOOL_NAMES].sort());
     expect(tools).toHaveLength(MCP_TOOL_NAMES.length);
+  });
+
+  it("passes every tool's title + annotations through on tools/list", async () => {
+    const { tools } = await client.listTools();
+    for (const tool of tools) {
+      const contract = getMcpTool(tool.name as McpToolName);
+      expect(tool.title).toBe(contract.title);
+      expect(tool.annotations).toEqual({ title: contract.title, ...contract.annotations });
+    }
   });
 
   it("search_concepts output parses with the contract outputSchema", async () => {
@@ -964,6 +974,11 @@ describe("extraTools hook (cloud-only registrations, e.g. claim)", () => {
     expect(tools.map((t) => t.name).sort()).toEqual(
       [...MCP_TOOL_NAMES, "claim"].sort(),
     );
+    const claim = tools.find((t) => t.name === "claim")!;
+    expect(claim.annotations).toEqual({
+      title: CLOUD_MCP_TOOLS[0].title,
+      ...CLOUD_MCP_TOOLS[0].annotations,
+    });
 
     const result = await client.callTool({
       name: "claim",

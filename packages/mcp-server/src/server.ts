@@ -671,6 +671,7 @@ export function createServer(vault: Vault, options: CreateServerOptions = {}): M
         title: tool.title,
         description: tool.description,
         inputSchema: tool.inputSchema.shape,
+        annotations: { title: tool.title, ...tool.annotations },
       },
       async (args: Record<string, unknown>) => handler(args),
     );

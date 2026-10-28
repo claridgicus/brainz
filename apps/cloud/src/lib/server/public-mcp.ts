@@ -292,6 +292,7 @@ export function buildPublicMcpServer(deps: SignupDeps): McpServer {
         title: tool.title,
         description: tool.description,
         inputSchema: tool.inputSchema.shape,
+        annotations: { title: tool.title, ...tool.annotations },
       },
       async (args: Record<string, unknown>) => handler(args),
     );

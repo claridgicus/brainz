@@ -102,6 +102,7 @@ describe("tool registration", () => {
       expect(tool, contract.name).toBeDefined();
       expect(tool!.title).toBe(contract.title);
       expect(tool!.description).toBe(contract.description);
+      expect(tool!.annotations).toEqual({ title: contract.title, ...contract.annotations });
     }
   });
 });

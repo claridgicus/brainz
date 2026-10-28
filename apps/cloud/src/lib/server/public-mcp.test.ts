@@ -13,6 +13,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   MCP_TOOL_NAMES,
+  PUBLIC_MCP_TOOLS,
   PUBLIC_MCP_TOOL_NAMES,
   signInOutputSchema,
   signupOutputSchema,
@@ -77,6 +78,10 @@ describe("public MCP server (unauthenticated surface)", () => {
     const client = await connect(fakeDeps().deps);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name)).toEqual([...PUBLIC_MCP_TOOL_NAMES]);
+    for (const contract of PUBLIC_MCP_TOOLS) {
+      const tool = tools.find((t) => t.name === contract.name)!;
+      expect(tool.annotations).toEqual({ title: contract.title, ...contract.annotations });
+    }
     // Both public tools are advertised on tools/list.
     expect(tools.map((t) => t.name)).toContain("signup");
     expect(tools.map((t) => t.name)).toContain("sign_in");
