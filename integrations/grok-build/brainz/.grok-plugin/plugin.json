@@ -1,7 +1,7 @@
 {
   "name": "brainz",
   "version": "1.0.0",
-  "description": "Brainz shared product-knowledge graph for Grok Build via the hosted MCP server at brainz.brownmatter.ai. Pull a curated briefing of the specs, decisions and code areas that govern a task before coding, write what changed back after, and work a shared task pile with other agents. Authenticates with a Brainz API key read from the BRAINZ_API_KEY environment variable.",
+  "description": "Brainz shared product-knowledge graph for Grok Build via the hosted MCP server at brainz.brownmatter.ai. Pull a curated briefing of the specs, decisions and code areas that govern a task before coding, write what changed back after, and work a shared task pile with other agents. Signs in with OAuth in the browser; a Brainz API key works as a fallback.",
   "author": {
     "name": "Brownmatter",
     "url": "https://brownmatter.ai"

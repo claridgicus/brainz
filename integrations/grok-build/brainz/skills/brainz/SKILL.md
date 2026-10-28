@@ -16,21 +16,26 @@ agent fleets. A vault holds concepts (domains, features, stories, specs,
 workflows, decisions, constraints, glossary entries and tasks) linked by typed
 relations (`part_of`, `realized_by`, `governs`, `depends_on`, ...) and anchored
 to the codebase through `codeAreas` paths. The `brainz` MCP server bundled with
-this plugin acts on the one vault its API key belongs to.
+this plugin acts on the one vault the user picked when signing in.
 
 ## Authentication
 
-The server reads its key from the `BRAINZ_API_KEY` environment variable and sends
-it as `Authorization: Bearer ...`. If Brainz tools are missing or every call
-fails with 401:
+The server signs in with OAuth, and the token is scoped to one vault. Brainz
+lets clients list its tools without signing in, so the tools show up before the
+user has authenticated. If a Brainz tool call fails with `Auth required` or a
+401:
 
-- Tell the user to create an API key in their vault's settings at
-  https://brainz.brownmatter.ai, `export BRAINZ_API_KEY=...` in the shell that
-  launches Grok, and restart Grok.
-- A 401 saying "workspace expired unclaimed" means a provisional workspace was
-  never claimed. The user needs a new workspace and key.
-- Never ask the user to paste the key into chat, and never print, log or commit
-  it.
+- Tell the user to open `/mcps`, select **brainz** under **Plugin: brainz**,
+  press `i` and approve access in the browser. The tools work after that, with
+  no restart.
+- If the user has no browser (headless or CI runs), point them to the API-key
+  fallback in the plugin README: a `brainz` server in their Grok config that
+  sends `Authorization: Bearer ${BRAINZ_API_KEY}`.
+- A 401 saying "workspace expired unclaimed" means the API key belongs to a
+  provisional workspace that was never claimed. The user needs a new key, or
+  can sign in with OAuth instead.
+- Never ask the user to paste a key or token into chat, and never print, log or
+  commit one.
 
 ## Before changing code in a Brainz-tracked product
 
@@ -73,6 +78,6 @@ After implementing a taken task, check the result against every spec the task is
 - `dream {action: "status" | "diary" | "revert" | "configure"}`: the vault's
   nightly consolidation. `revert` undoes one dream. Change the configuration
   only when the user asks.
-- `session_hook {client?}`: returns steps for adding a Brainz primer to the
-  project's agent rules. It does not edit anything itself. Apply the steps only
+- `session_hook {client?}` (API-key connections only, not OAuth): returns
+  steps for adding a Brainz primer to the project's agent rules. It does not edit anything itself. Apply the steps only
   when the user asks for that.

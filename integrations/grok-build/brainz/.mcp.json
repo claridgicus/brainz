@@ -2,10 +2,7 @@
   "mcpServers": {
     "brainz": {
       "type": "http",
-      "url": "https://brainz.brownmatter.ai/mcp",
-      "headers": {
-        "Authorization": "Bearer ${BRAINZ_API_KEY}"
-      }
+      "url": "https://brainz.brownmatter.ai/mcp"
     }
   }
 }
