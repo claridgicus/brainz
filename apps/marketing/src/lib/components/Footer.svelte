@@ -25,6 +25,12 @@
 				<a href="/docs#local">Local CLI</a>
 				<a href="/docs#tools">MCP tools</a>
 			</div>
+			<div class="col">
+				<h4>Help &amp; legal</h4>
+				<a href="/support">Support</a>
+				<a href="/privacy">Privacy</a>
+				<a href="/terms">Terms</a>
+			</div>
 		</div>
 	</div>
 	<div class="container legal">

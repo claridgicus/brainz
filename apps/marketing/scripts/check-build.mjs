@@ -121,6 +121,29 @@ for (const page of ["index.html", "docs.html"]) {
 	}
 }
 
+// --- 1d. legal + support pages ----------------------------------------------
+// Connector directories (Anthropic, OpenAI) require public privacy, terms and
+// support URLs; the footer on every page links all three, and each page names
+// the operator and the support contact.
+for (const page of ["privacy.html", "terms.html", "support.html"]) {
+	const file = htmlFiles.find((f) => f.endsWith(`/${page}`) || f.endsWith(`\\${page}`));
+	if (!file) {
+		errors.push(`expected prerendered page missing: ${page}`);
+		continue;
+	}
+	const html = readFileSync(file, "utf8");
+	if (!html.includes("support@brownmatter.ai")) errors.push(`${page}: missing support@brownmatter.ai`);
+	if (page !== "support.html" && !html.includes("Plutocracy Pty Ltd")) {
+		errors.push(`${page}: missing the operator name (Plutocracy Pty Ltd)`);
+	}
+}
+for (const file of htmlFiles.filter((f) => !f.endsWith("404.html"))) {
+	const html = readFileSync(file, "utf8");
+	for (const href of ['href="/privacy"', 'href="/terms"', 'href="/support"']) {
+		if (!html.includes(href)) errors.push(`${file.slice(buildDir.length + 1)}: footer missing ${href}`);
+	}
+}
+
 // --- 2. no external assets --------------------------------------------------
 // HTML: any resource-loading tag whose src/href/srcset points off-origin.
 const RESOURCE_TAG =

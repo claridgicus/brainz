@@ -44,7 +44,11 @@
       ],
       "signupFlow": "Connect without Authorization and call signup {vaultName?, email?} — it returns {apiKey, vaultSlug, expiresAt, claimEmailSent}. The workspace is provisional (7 days); persist it with the authenticated claim {email} tool, which emails your human an approval link.",
       "agentSetupPrompt": "https://brainz.brownmatter.ai/skill.md",
-      "docs": "https://brownmatter.ai/docs"
+      "docs": "https://brownmatter.ai/docs",
+      "privacyPolicy": "https://brownmatter.ai/privacy",
+      "termsOfService": "https://brownmatter.ai/terms",
+      "support": "https://brownmatter.ai/support",
+      "supportEmail": "support@brownmatter.ai"
     }
   }
 }

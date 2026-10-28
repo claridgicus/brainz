@@ -16,6 +16,7 @@
 	<header>
 		<a href="/dashboard" class="home" aria-label="Brainz dashboard"><Wordmark /></a>
 		<div class="right">
+			<a href="https://brownmatter.ai/support" class="support muted" rel="noopener">Support</a>
 			<span class="who muted" title={data.user.email}>{data.user.email}</span>
 			<button type="button" class="btn btn-ghost btn-sm" onclick={signOut} disabled={signingOut}>
 				Sign out
@@ -53,6 +54,9 @@
 		align-items: center;
 		gap: 10px;
 		min-width: 0;
+	}
+	.support {
+		font-size: 13px;
 	}
 	.who {
 		font-size: 13px;

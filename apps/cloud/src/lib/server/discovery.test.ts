@@ -84,4 +84,14 @@ describe("MCP discovery documents", () => {
     expect(meta.unauthenticatedTools).toEqual([...PUBLIC_MCP_TOOL_NAMES]);
     expect(meta.authenticatedTools).toEqual([...MCP_TOOL_NAMES, ...CLOUD_MCP_TOOL_NAMES]);
   });
+
+  it("links the public privacy, terms and support pages directories require", () => {
+    const meta = (wellKnown._meta as Record<string, unknown>)["ai.brownmatter/brainz"];
+    expect(meta).toMatchObject({
+      privacyPolicy: "https://brownmatter.ai/privacy",
+      termsOfService: "https://brownmatter.ai/terms",
+      support: "https://brownmatter.ai/support",
+      supportEmail: "support@brownmatter.ai",
+    });
+  });
 });

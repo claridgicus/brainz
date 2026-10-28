@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from "svelte";
 	import Wordmark from "$lib/components/Wordmark.svelte";
+	import LegalLinks from "$lib/components/LegalLinks.svelte";
 
 	let { heading, children }: { heading: string; children: Snippet } = $props();
 </script>
@@ -11,6 +12,12 @@
 		<h1>{heading}</h1>
 		{@render children()}
 	</div>
+	<p class="consent muted">
+		By continuing you agree to the
+		<a href="https://brownmatter.ai/terms" rel="noopener">Terms of Service</a> and
+		<a href="https://brownmatter.ai/privacy" rel="noopener">Privacy Policy</a>.
+	</p>
+	<LegalLinks />
 </main>
 
 <style>
@@ -30,6 +37,11 @@
 		width: 100%;
 		max-width: 380px;
 		padding: 26px;
+	}
+	.consent {
+		max-width: 380px;
+		text-align: center;
+		font-size: 12.5px;
 	}
 	h1 {
 		font-size: 20px;

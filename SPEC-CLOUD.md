@@ -335,6 +335,12 @@ Threat model this wave closes (from the July 2026 review): (1) `signup` required
 - The app moved from the retired `brain.brownmatter.ai` to `brainz.brownmatter.ai` — `brain.*` is replaced entirely (no redirect kept).
 - Infra names (npm `@brainz/*`, worker `brainz-cloud`/`brainz-marketing`, D1 `brainz`, CLI `brainz`, `bz_` keys, `BRAINZ_VAULT`) are unchanged — they already say "brainz", which matches the product name.
 
+### Legal & support pages (connector-directory requirement)
+
+- The marketing site serves `/privacy`, `/terms` and `/support` (prerendered, `apps/marketing/src/routes/{privacy,terms,support}`). Operator: **Plutocracy Pty Ltd**; governing law Victoria, Australia; contact `support@brownmatter.ai`. Wording approved by James 2026-10-28 — it is a legal text, so change it only with his approval.
+- The privacy policy states only what the code does: what D1 + VaultDO store, Cloudflare as the processor (Workers, D1, DOs, Email Service, Workers AI embeddings + default dreaming), GitHub only for "Continue with GitHub", BYOK dreaming providers, retention per object, and the gaps (no self-serve account deletion — by email within 30 days; unclaimed workspaces and rate-limit rows not auto-purged). **When storage, processors or retention change, update `/privacy` in the same change.**
+- Linked from: the marketing footer (every page), the app splash and auth card (`LegalLinks`, plus "By continuing you agree…" on `/login`/`/signup`), the signed-in header (Support), and the discovery cards' `_meta` (`privacyPolicy`, `termsOfService`, `support`, `supportEmail`). `check-build.mjs` and `discovery.test.ts` guard these.
+
 ### Branding
 
 Logo mark (Brainz, the product): a custom zombie half-eaten brain SVG — flat pink two-lobe brain with fold squiggles, a scalloped bite out of the right side, and sickly-green ooze crumbs (`apps/cloud/src/lib/components/Mark.svelte`) — the brand joke, played straight against a polished dark UI. Wordmark: zombie-brain mark + "Brainz". Favicon: the same SVG as an inline data-URI. The 💩 (pile of poo) emoji remains the Brownmatter *company* mark (marketing wordmark "💩 Brownmatter", site favicon/touch icon). Emails fall back to 🧠 for the product mark (inline SVG is unsupported in email clients). Marketing site lives at brownmatter.ai; the app at brainz.brownmatter.ai.

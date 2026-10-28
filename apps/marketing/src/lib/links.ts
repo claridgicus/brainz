@@ -10,3 +10,6 @@ export const SKILL_URL = `${APP_URL}/skill.md`;
 export const GITHUB_URL = "https://github.com/brownmatter-ai/brainz";
 
 export const SITE_URL = "https://brownmatter.ai";
+
+/** Support mailbox — the contact on /support, /privacy, /terms and the MCP server card. */
+export const SUPPORT_EMAIL = "support@brownmatter.ai";

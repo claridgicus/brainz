@@ -2,6 +2,7 @@
 	// Minimal splash for signed-out visitors (signed-in users are redirected
 	// to /dashboard by +page.server.ts). The full pitch lives at brownmatter.ai.
 	import Mark from "$lib/components/Mark.svelte";
+	import LegalLinks from "$lib/components/LegalLinks.svelte";
 </script>
 
 <svelte:head>
@@ -37,6 +38,7 @@
 			<a href="https://brownmatter.ai/docs" rel="noopener">docs</a>.
 		</p>
 	</section>
+	<LegalLinks class="splash-legal" />
 </main>
 
 <style>
@@ -99,6 +101,9 @@
 		overflow-x: auto;
 		font-size: 12.5px;
 		line-height: 1.5;
+	}
+	:global(.splash-legal) {
+		margin-top: 36px;
 	}
 	.mcp-note {
 		font-size: 12.5px;
