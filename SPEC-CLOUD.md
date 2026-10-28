@@ -342,10 +342,14 @@ The Claude Connectors Directory and the ChatGPT plugin directory both require OA
 **Client registration: DCR and CIMD.**
 
 - `POST /oauth/register` (RFC 7591, JSON). `redirect_uris` must be non-empty (max 5, each at most 512 chars; `client_uri`/`logo_uri` at most 512, `client_name` 200, `scope` 200). Each must be `https:` with no fragment, or `http:` on a loopback host (`localhost`, `127.0.0.1`, `[::1]`). Only the `authorization_code` and `refresh_token` grants and the `code` response type are accepted. `token_endpoint_auth_method` is `none` (public client, PKCE only) or `client_secret_post`/`client_secret_basic` (the confidential client gets a `bzcs_` secret, shown once and stored SHA-256-hashed). The response is 201 with `client_id` (`bzc_…`). Registration is unauthenticated, so it is bounded three ways:
-  - **Per-IP limit:** a durable D1 limit (`oauth_register_events`, record-then-count) allows 20 registrations per IP bucket per hour, else 429. IPv6 addresses are bucketed by /64 (`rateLimitBucket`, applied in `resolveRateLimitIp`, so the signup, public-read, magic-link and password guards get it too), because one subscriber can rotate through a whole /64.
-  - **Global cap:** 1,000 registrations per hour across all non-Anthropic traffic.
+  - **Per-bucket limit:** a durable D1 limit (`oauth_register_events`, record-then-count) allows 20 registrations per bucket per hour, else 429.
+    - The bucket is the IPv4 address or the **IPv6 /48**, so an attacker can't rotate the 65,536 /64s of one /48 to multiply the limit.
+    - The other guards (signup, public reads, magic links, password sign-in) keep `resolveRateLimitIp`'s IPv6 /64 bucketing (`rateLimitBucket`). Those limits are small per-user allowances, and a /48 often covers a whole site or organisation.
+  - **Global backstop:** 20,000 registrations per hour across all non-directory traffic. It only bounds table growth; the per-/48 limit does the work, so a few /48s can't lock ChatGPT, Claude Code or Cursor out.
   - **No growth when full:** a request against a bucket that is already full is refused without recording a row.
-  - **Anthropic exempt:** the egress range `160.79.104.0/21` skips both limits, because Claude registers from those few addresses on every fresh connection.
+  - **Directory egress exempt:** Anthropic's `160.79.104.0/21` and OpenAI's published ChatGPT-integrations egress skip both limits, because those directory clients register from shared addresses on every fresh connection.
+    - OpenAI's list is <https://openai.com/chatgpt-connectors.json>, documented at <https://developers.openai.com/api/docs/guides/ip-addresses>.
+    - It is a committed snapshot, `src/lib/server/openai-egress.ts`, regenerated with `scripts/refresh-openai-egress.mjs`. OpenAI says the ranges change, so refresh it before a submission. A stale entry just falls back to the per-bucket limit.
   - **Small rows:** the field caps above.
   - **Purge:** each registration also purges DCR clients that have no grant and no live code and have been **idle for 30 days**. Idle means no authorize-page use (`oauth_client.last_used_at`, stamped by the consent page load), or no registration if never used. It also purges registration events older than the window. The long TTL matters because native clients such as Claude Code cache their `client_id`, and a client whose only grant was cascade-deleted with its vault must still work when the user returns.
 - Client ID metadata documents: a `client_id` that is an `https://` URL with a path is fetched at authorize time (5 s timeout, JSON content-type required, no redirects, no IP-literal or localhost hosts). The body is **streamed with a byte counter and cancelled past 16 KB**, never buffered whole, because `content-length` may be absent and the fetch happens before any session check. The document's `client_id` must equal the URL, and it is treated as a public client. The consent screen names the URL's host, not the self-asserted `client_name`.
@@ -369,7 +373,7 @@ The Claude Connectors Directory and the ChatGPT plugin directory both require OA
   - **Grace window:** the same client presenting a token rotated ≤ 60 s ago is a concurrent refresh or a retry after a lost response. The window is set by `OAUTH_REFRESH_GRACE_SECONDS`, clamped to ≤ 300 s; the E2E uses 3 s.
     - It gets a fresh child pair, and every earlier child of that parent is **superseded** (`oauth_token.revoked_at`). Only hashes are stored, so the earlier pair can't be returned verbatim.
     - This is allowed only while none of those children has itself been rotated, i.e. the chain hasn't moved on.
-    - The pair is inserted first and its siblings revoked after, so the worst case for interleaved retries is no live chain (re-authorize), never two.
+    - **Every** issuance from a parent (the first-use rotation as well as a grace re-issue) inserts its pair first and then supersedes all its siblings **and their descendants**, in a recursive walk down `parent_hash`. The last insert wins, and the worst case for an interleaving is no live chain (re-authorize), never two.
   - **Reuse = theft:** any of these revokes the whole grant and fails with `invalid_grant`:
     - presenting a superseded sibling;
     - presenting a rotated token outside the window;

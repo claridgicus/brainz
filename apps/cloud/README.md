@@ -287,6 +287,9 @@ lives in `src/lib/server/oauth.ts`, `src/routes/oauth/**` and
   failed sign-ins per hour and lock the reviewer out. No inbox is needed.
   Re-run with `--email <that address>` to rotate the password. Users can't create password
   accounts (`disableSignUp`).
+- **Before submitting**, refresh the OpenAI egress snapshot (exempts ChatGPT's
+  client registrations from the DCR limit): `node scripts/refresh-openai-egress.mjs`
+  (source: https://openai.com/chatgpt-connectors.json).
 - **Before submitting**, make sure no Cloudflare WAF, bot-fight or rate-limit
   rule on the `brownmatter.ai` zone blocks Anthropic's egress range
   `160.79.104.0/21`. Anthropic fetches discovery, registration and tokens

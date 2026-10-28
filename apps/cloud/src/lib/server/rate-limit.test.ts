@@ -131,6 +131,13 @@ describe("rateLimitBucket (IPv6 by /64)", () => {
     expect(rateLimitBucket("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
   });
 
+  it("buckets by /48 on request (DCR)", () => {
+    expect(rateLimitBucket("2001:db8:1:2::99", 48)).toBe("2001:db8:1::/48");
+    expect(rateLimitBucket("2001:db8:1:ffff::1", 48)).toBe("2001:db8:1::/48");
+    expect(rateLimitBucket("203.0.113.7", 48)).toBe("203.0.113.7");
+    expect(resolveRateLimitIp("2001:db8:1:2::99", true, 48)).toEqual({ ok: true, ip: "2001:db8:1::/48" });
+  });
+
   it("is applied by resolveRateLimitIp", () => {
     expect(resolveRateLimitIp("2001:db8:1:2::99", true)).toEqual({ ok: true, ip: "2001:db8:1:2::/64" });
   });

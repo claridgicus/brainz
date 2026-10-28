@@ -15,7 +15,11 @@ import {
   fetchClientMetadataDocument,
   handleRevokeRequest,
   handleTokenRequest,
+  ipInCidr,
   isAnthropicEgress,
+  isDirectoryEgress,
+  isOpenAiEgress,
+  supersedeChildren,
   isCrossSiteFormPost,
   purgeUnusedClients,
   REGISTER_GLOBAL_LIMIT,
@@ -203,7 +207,10 @@ describe("dynamic client registration", () => {
     const d1 = fakeD1();
     const now = new Date();
     const insert = d1.db.prepare(`INSERT INTO oauth_register_events (id, ip, created_at) VALUES (?, ?, ?)`);
-    for (let i = 0; i < REGISTER_GLOBAL_LIMIT; i++) insert.run(`e${i}`, `bucket-${i}`, now.getTime());
+    d1.db.transaction(() => {
+      for (let i = 0; i < REGISTER_GLOBAL_LIMIT; i++) insert.run(`e${i}`, `bucket-${i}`, now.getTime());
+    })();
+    expect(REGISTER_GLOBAL_LIMIT).toBeGreaterThanOrEqual(20_000);
     expect(await registrationThrottled(d1, "192.0.2.200", now)).toBe(true);
     // Anthropic's egress is never subject to it.
     expect(await registrationThrottled(d1, "160.79.105.3", now)).toBe(false);
@@ -222,6 +229,45 @@ describe("dynamic client registration", () => {
     for (let i = 0; i < REGISTER_RATE_LIMIT * 3; i++) {
       expect(await registrationThrottled(d1, "160.79.104.17", now)).toBe(false);
     }
+  });
+
+  it("buckets IPv6 registrations by /48, so rotating /64s doesn't multiply the limit", async () => {
+    const d1 = fakeD1();
+    const now = new Date();
+    for (let i = 0; i < REGISTER_RATE_LIMIT; i++) {
+      // A different /64 (and address) inside 2001:db8:aa::/48 every time.
+      expect(await registrationThrottled(d1, `2001:db8:aa:${i.toString(16)}::1`, now)).toBe(false);
+    }
+    expect(await registrationThrottled(d1, "2001:db8:aa:ffff::9", now)).toBe(true);
+    // A different /48 is a different bucket.
+    expect(await registrationThrottled(d1, "2001:db8:ab::1", now)).toBe(false);
+  });
+
+  it("exempts OpenAI's published ChatGPT egress from the DCR limits", async () => {
+    const d1 = fakeD1();
+    const now = new Date();
+    // 100.31.168.162/32 is in the openai-egress snapshot.
+    expect(isOpenAiEgress("100.31.168.162")).toBe(true);
+    for (let i = 0; i < REGISTER_RATE_LIMIT * 3; i++) {
+      expect(await registrationThrottled(d1, "100.31.168.162", now)).toBe(false);
+    }
+    expect(d1.db.prepare(`SELECT COUNT(*) AS n FROM oauth_register_events`).get()).toEqual({ n: 0 });
+  });
+
+  it("matches IPv4 and IPv6 CIDRs", () => {
+    expect(ipInCidr("10.1.2.3", "10.0.0.0/8")).toBe(true);
+    expect(ipInCidr("11.1.2.3", "10.0.0.0/8")).toBe(false);
+    expect(ipInCidr("104.192.219.207", "104.192.219.204/30")).toBe(true);
+    expect(ipInCidr("104.192.219.208", "104.192.219.204/30")).toBe(false);
+    expect(ipInCidr("1.2.3.4", "0.0.0.0/0")).toBe(true);
+    expect(ipInCidr("2001:db8::1", "2001:db8::/32")).toBe(true);
+    expect(ipInCidr("2001:db9::1", "2001:db8::/32")).toBe(false);
+    expect(ipInCidr("2001:db8::1", "10.0.0.0/8")).toBe(false);
+    expect(ipInCidr("999.1.1.1", "0.0.0.0/0")).toBe(false);
+    expect(isOpenAiEgress("192.0.2.1")).toBe(false);
+    expect(isDirectoryEgress("160.79.110.1")).toBe(true);
+    expect(isDirectoryEgress("100.31.168.162")).toBe(true);
+    expect(isDirectoryEgress("192.0.2.1")).toBe(false);
   });
 
   it("recognises exactly 160.79.104.0/21 as Anthropic egress", () => {
@@ -532,6 +578,83 @@ describe("token endpoint", () => {
         .prepare(`SELECT COUNT(*) AS n FROM oauth_token WHERE kind = 'refresh' AND used_at IS NULL AND revoked_at IS NULL`)
         .get() as { n: number };
       expect(liveRefresh.n).toBe(1);
+    });
+
+    it("first-use and grace issuance interleaved: the last insert wins, never two live chains", async () => {
+      const d1 = setup();
+      const { client, tokens } = await connect(d1);
+      // X = the first-use refresh, held just before it inserts its pair.
+      let reached!: () => void;
+      const atInsert = new Promise<void>((r) => (reached = r));
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const held: typeof d1 = {
+        ...d1,
+        prepare(query: string) {
+          const stmt = d1.prepare(query);
+          return {
+            bind(...values: unknown[]) {
+              const bound = stmt.bind(...values);
+              return {
+                first: <T>() => bound.first<T>(),
+                run: async () => {
+                  if (query.trimStart().startsWith("INSERT INTO oauth_token")) {
+                    reached();
+                    await gate;
+                  }
+                  return bound.run();
+                },
+              };
+            },
+          };
+        },
+      };
+      const form = { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: client.client_id };
+      const now = new Date();
+      const x = handleTokenRequest({ db: held, now, fetchImpl: noFetch }, form, null);
+      await atInsert; // X has consumed the token and is about to insert P1.
+      // Y = a retry of the same token: grace path inserts P2 first.
+      const y = await handleTokenRequest({ db: d1, now, fetchImpl: noFetch }, form, null);
+      expect(y.status).toBe(200);
+      release();
+      expect((await x).status).toBe(200);
+      const live = (kind: string) =>
+        (
+          d1.db
+            .prepare(
+              `SELECT COUNT(*) AS n FROM oauth_token WHERE kind = ? AND parent_hash IS NOT NULL AND used_at IS NULL AND revoked_at IS NULL`,
+            )
+            .get(kind) as { n: number }
+        ).n;
+      expect(live("refresh")).toBe(1);
+      expect(live("access")).toBe(1);
+      // The survivor is X's pair (last insert wins).
+      const xPair = (await x).body as OAuthTokenResponse;
+      expect((await resolveAccessToken(d1, xPair.access_token, now)).ok).toBe(true);
+      expect((await resolveAccessToken(d1, (y.body as OAuthTokenResponse).access_token, now)).ok).toBe(false);
+    });
+
+    it("superseding a sibling also kills the chain that grew from it", async () => {
+      const d1 = setup();
+      const { tokens } = await connect(d1);
+      const grant = (d1.db.prepare(`SELECT id FROM oauth_grant`).get() as { id: string }).id;
+      const ins = d1.db.prepare(
+        `INSERT INTO oauth_token (token_hash, grant_id, kind, created_at, expires_at, parent_hash) VALUES (?, ?, 'refresh', 0, 9e15, ?)`,
+      );
+      // P → A → B → C, and P → K (the pair being kept).
+      ins.run("A", grant, "P");
+      ins.run("B", grant, "A");
+      ins.run("C", grant, "B");
+      ins.run("K", grant, "P");
+      ins.run("K-access", grant, "P");
+      await supersedeChildren(d1, "P", ["K", "K-access"], new Date());
+      const revoked = (h: string) =>
+        (d1.db.prepare(`SELECT revoked_at FROM oauth_token WHERE token_hash = ?`).get(h) as { revoked_at: number | null })
+          .revoked_at !== null;
+      expect(["A", "B", "C"].map(revoked)).toEqual([true, true, true]);
+      expect(revoked("K")).toBe(false);
+      expect(revoked("K-access")).toBe(false);
+      void tokens;
     });
 
     it("past the window, re-presenting the rotated token is theft", async () => {

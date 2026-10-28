@@ -69,12 +69,16 @@ export function expandIpv6(ip: string): string[] | null {
 
 /**
  * The bucket key for a client IP. IPv4 is the address itself; IPv6 is its /64
- * (`2001:db8:1:2::/64`), because a single subscriber typically holds a whole
- * /64 and could otherwise rotate addresses into unlimited fresh buckets.
+ * by default (`2001:db8:1:2::/64`), because a single subscriber typically holds
+ * a whole /64 and could otherwise rotate addresses into unlimited fresh
+ * buckets. `ipv6PrefixBits: 48` buckets by site (`2001:db8:1::/48`) — used for
+ * dynamic client registration, where one /48 holds 65,536 /64s.
  */
-export function rateLimitBucket(ip: string): string {
+export function rateLimitBucket(ip: string, ipv6PrefixBits: 48 | 64 = 64): string {
   const groups = expandIpv6(ip);
-  return groups ? `${groups.slice(0, 4).join(":")}::/64` : ip;
+  if (!groups) return ip;
+  const keep = ipv6PrefixBits / 16;
+  return `${groups.slice(0, keep).join(":")}::/${ipv6PrefixBits}`;
 }
 
 /**
@@ -96,8 +100,9 @@ export function rateLimitBucket(ip: string): string {
 export function resolveRateLimitIp(
   cfConnectingIp: string | null,
   isProduction: boolean,
+  ipv6PrefixBits: 48 | 64 = 64,
 ): { ok: true; ip: string } | { ok: false } {
-  if (cfConnectingIp) return { ok: true, ip: rateLimitBucket(cfConnectingIp) };
+  if (cfConnectingIp) return { ok: true, ip: rateLimitBucket(cfConnectingIp, ipv6PrefixBits) };
   if (isProduction) return { ok: false };
   return { ok: true, ip: LOCAL_IP_BUCKET };
 }

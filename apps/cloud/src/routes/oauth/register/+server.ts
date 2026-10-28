@@ -1,9 +1,10 @@
 /**
  * Dynamic client registration (RFC 7591, Wave OA). JSON in, 201 + client info
- * out. Unauthenticated, so: tight field caps (contracts), a durable per-IP
- * limit (REGISTER_RATE_LIMIT/hour; Anthropic's shared egress range exempt —
- * Claude registers on every fresh connection), and a purge of DCR clients that
- * never obtained a grant within a day, run alongside each registration.
+ * out. Unauthenticated, so: tight field caps (contracts), a durable limit
+ * (REGISTER_RATE_LIMIT/hour per IPv4 address or IPv6 /48, plus a high global
+ * backstop; Anthropic's and OpenAI's published egress exempt — they register
+ * on every fresh connection), and a purge of idle grantless DCR clients, run
+ * alongside each registration.
  */
 import type { RequestHandler } from "@sveltejs/kit";
 import { requirePlatform } from "$lib/server/api-util";
@@ -21,8 +22,12 @@ import { resolveRateLimitIp } from "$lib/server/rate-limit";
 export const POST: RequestHandler = async (event) => {
   const platform = requirePlatform(event);
   const now = new Date();
-  const ip = resolveRateLimitIp(event.request.headers.get("cf-connecting-ip"), isProductionEnv(platform.env));
-  if (!ip.ok || (await registrationThrottled(platform.env.DB, ip.ip, now))) {
+  const clientIp = event.request.headers.get("cf-connecting-ip");
+  // Fail closed without the edge header in production (shared helper); the
+  // limiter itself buckets the raw address (IPv4, or IPv6 by /48) and exempts
+  // directory egress.
+  const ip = resolveRateLimitIp(clientIp, isProductionEnv(platform.env));
+  if (!ip.ok || (await registrationThrottled(platform.env.DB, clientIp ?? ip.ip, now))) {
     return oauthJson(
       { error: "invalid_request", error_description: "too many client registrations from this address; retry later" },
       429,

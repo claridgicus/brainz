@@ -33,6 +33,8 @@ import {
   type VaultRole,
 } from "@brainz/contracts";
 import { hashApiKey as sha256Hex } from "./api-keys";
+import { OPENAI_EGRESS_IPV4, OPENAI_EGRESS_IPV6 } from "./openai-egress";
+import { expandIpv6, rateLimitBucket } from "./rate-limit";
 import { isOwnerExpired } from "./vault-access";
 
 // ------------------------------------------------------------------ ports
@@ -86,10 +88,17 @@ export const OAUTH_PATHS = {
  */
 export const CSRF_EXEMPT_PATHS: ReadonlySet<string> = new Set([OAUTH_PATHS.token, OAUTH_PATHS.revoke]);
 
-/** DCR: registrations per client IP bucket (IPv6 /64) per rolling hour. */
+/**
+ * DCR: registrations per client bucket per rolling hour. The bucket is the
+ * IPv4 address or the IPv6 /48: an attacker holding one /48 can't rotate
+ * through 65,536 /64s to multiply the per-bucket limit.
+ */
 export const REGISTER_RATE_LIMIT = 20;
-/** DCR: registrations per rolling hour across ALL non-Anthropic traffic. */
-export const REGISTER_GLOBAL_LIMIT = 1000;
+/**
+ * DCR: backstop across ALL non-directory traffic per rolling hour. High on
+ * purpose — it only bounds table growth; the per-/48 limit does the work.
+ */
+export const REGISTER_GLOBAL_LIMIT = 20_000;
 const REGISTER_WINDOW_MS = 60 * 60 * 1000;
 /**
  * Grantless DCR clients idle (no authorize-page use) this long are purged.
@@ -284,28 +293,75 @@ export function buildRedirect(redirectUri: string, params: Record<string, string
 
 // ------------------------------------------------------------- clients
 
+function ipv4ToInt(ip: string): number | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!m) return null;
+  const parts = m.slice(1).map(Number);
+  if (parts.some((p) => p > 255)) return null;
+  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+}
+
+function ipv6ToBigInt(ip: string): bigint | null {
+  const groups = expandIpv6(ip);
+  return groups ? groups.reduce((acc, g) => (acc << 16n) | BigInt(parseInt(g, 16)), 0n) : null;
+}
+
+/** Is `ip` inside the IPv4 or IPv6 CIDR `cidr`? False on any mismatch or parse failure. */
+export function ipInCidr(ip: string, cidr: string): boolean {
+  const [net, bitsRaw] = cidr.split("/");
+  const bits = Number(bitsRaw);
+  const v4ip = ipv4ToInt(ip);
+  const v4net = ipv4ToInt(net);
+  if (v4ip !== null && v4net !== null) {
+    if (!(bits >= 0 && bits <= 32)) return false;
+    const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+    return ((v4ip & mask) >>> 0) === ((v4net & mask) >>> 0);
+  }
+  const v6ip = ipv6ToBigInt(ip);
+  const v6net = ipv6ToBigInt(net);
+  if (v6ip === null || v6net === null || !(bits >= 0 && bits <= 128)) return false;
+  const mask = bits === 0 ? 0n : ((1n << 128n) - 1n) ^ ((1n << BigInt(128 - bits)) - 1n);
+  return (v6ip & mask) === (v6net & mask);
+}
+
 /**
- * Anthropic's published egress range (160.79.104.0/21): Claude registers a
- * fresh DCR client on every new connection from these few addresses, so they
- * are exempt from the per-IP registration limit.
+ * Anthropic's published egress range (160.79.104.0/21, per
+ * https://claude.com/docs/connectors/building/authentication): Claude
+ * registers a fresh DCR client on every new connection from these few
+ * addresses, so they are exempt from the DCR limits.
  */
 export function isAnthropicEgress(ip: string): boolean {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
-  if (!m) return false;
-  const [a, b, c] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  return a === 160 && b === 79 && c >= 104 && c <= 111;
+  return ipInCidr(ip, "160.79.104.0/21");
+}
+
+/**
+ * OpenAI's published ChatGPT-integrations egress (plugins, connectors, GPT
+ * Actions): https://openai.com/chatgpt-connectors.json, documented at
+ * https://developers.openai.com/api/docs/guides/ip-addresses. Snapshot in
+ * ./openai-egress (scripts/refresh-openai-egress.mjs regenerates it).
+ */
+export function isOpenAiEgress(ip: string): boolean {
+  const list = ip.includes(":") ? OPENAI_EGRESS_IPV6 : OPENAI_EGRESS_IPV4;
+  return list.some((cidr) => ipInCidr(ip, cidr));
+}
+
+/** Directory clients whose shared egress registers on every connection: DCR-limit exempt. */
+export function isDirectoryEgress(ip: string): boolean {
+  return isAnthropicEgress(ip) || isOpenAiEgress(ip);
 }
 
 /**
  * Durable limits on DCR: true when this registration should be refused.
- * `ip` is the rate-limit bucket (IPv6 already collapsed to its /64). Two caps:
- * REGISTER_RATE_LIMIT per bucket and REGISTER_GLOBAL_LIMIT across all
- * non-Anthropic traffic. A request against an already-full bucket is refused
- * WITHOUT recording a row, so a flood can't grow the events table; otherwise
- * it records first and re-counts inclusively (TOCTOU-safe, like signup_events).
+ * `clientIp` is the raw client address (cf-connecting-ip). Directory egress
+ * (Anthropic, OpenAI) is exempt; everyone else is bucketed (IPv4 address or
+ * IPv6 /48) with REGISTER_RATE_LIMIT per bucket plus the REGISTER_GLOBAL_LIMIT
+ * backstop. A request against an already-full bucket is refused WITHOUT
+ * recording a row, so a flood can't grow the events table; otherwise it
+ * records first and re-counts inclusively (TOCTOU-safe, like signup_events).
  */
-export async function registrationThrottled(db: OAuthDb, ip: string, now: Date): Promise<boolean> {
-  if (isAnthropicEgress(ip)) return false;
+export async function registrationThrottled(db: OAuthDb, clientIp: string, now: Date): Promise<boolean> {
+  if (isDirectoryEgress(clientIp)) return false;
+  const ip = rateLimitBucket(clientIp, 48);
   const since = now.getTime() - REGISTER_WINDOW_MS;
   const counts = async () => {
     const row = await db
@@ -777,6 +833,32 @@ async function revokeGrant(db: OAuthDb, grantId: string, now: Date): Promise<voi
 }
 
 /**
+ * Revoke every token issued from `parentHash` except `keep`, AND all of their
+ * descendants (a recursive walk down parent_hash), so a superseded chain dies
+ * whole even if it had already rotated. Insert-then-revoke-others: when two
+ * issuances from one parent interleave, the worst case is both pairs revoked
+ * (the client re-authorizes), never two live chains.
+ */
+export async function supersedeChildren(
+  db: OAuthDb,
+  parentHash: string,
+  keep: readonly string[],
+  now: Date,
+): Promise<void> {
+  await db
+    .prepare(
+      `WITH RECURSIVE doomed(hash) AS (
+         SELECT token_hash FROM oauth_token WHERE parent_hash = ? AND token_hash NOT IN (?, ?)
+         UNION
+         SELECT t.token_hash FROM oauth_token t JOIN doomed d ON t.parent_hash = d.hash
+       )
+       UPDATE oauth_token SET revoked_at = ? WHERE token_hash IN (SELECT hash FROM doomed) AND revoked_at IS NULL`,
+    )
+    .bind(parentHash, keep[0], keep[1], now.getTime())
+    .run();
+}
+
+/**
  * Issue an access + refresh pair. `parentHash` is the refresh token it was
  * rotated from (null for the code exchange). With `supersedeSiblings`, every
  * OTHER pair issued from the same parent is revoked afterwards, so a parent
@@ -803,15 +885,7 @@ async function issueTokenPair(
     .bind(refreshHash, grantId, "refresh", now.getTime(), now.getTime() + REFRESH_TOKEN_TTL_SECONDS * 1000, parentHash)
     .run();
   if (supersedeSiblings && parentHash !== null) {
-    // Insert-then-revoke-others: if two grace re-issues interleave, the worst
-    // case is both pairs revoked (the client re-authorizes), never two live.
-    await db
-      .prepare(
-        `UPDATE oauth_token SET revoked_at = ?
-         WHERE parent_hash = ? AND token_hash NOT IN (?, ?) AND revoked_at IS NULL`,
-      )
-      .bind(now.getTime(), parentHash, accessHash, refreshHash)
-      .run();
+    await supersedeChildren(db, parentHash, [accessHash, refreshHash], now);
   }
   return {
     access_token: access,
@@ -965,7 +1039,10 @@ async function rotateRefresh(deps: TokenDeps, client: ResolvedClient, form: Reco
     .first();
   // Lost the race to a concurrent refresh of the same token: a grace re-issue.
   if (!consumed) return graceReissue();
-  return issueTokenPair(db, row.grant_id, row.scope, now, tokenHash);
+  // First use also supersedes siblings: if a concurrent grace re-issue of the
+  // same parent already inserted its pair, the last insert wins (worst case
+  // both die) — never two live chains.
+  return issueTokenPair(db, row.grant_id, row.scope, now, tokenHash, true);
 }
 
 /** The token endpoint (RFC 6749 §3.2) — never throws; errors are RFC JSON. */
