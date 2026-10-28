@@ -1,7 +1,14 @@
 /**
  * PUBLIC MCP server — what an /mcp connection with NO Authorization header
- * gets: two tools, `signup` and `sign_in` (PUBLIC_MCP_TOOLS in @brainz/contracts).
- * A present-but-invalid bearer never reaches this server; it still 401s.
+ * gets: two callable tools, `signup` and `sign_in` (PUBLIC_MCP_TOOLS in
+ * @brainz/contracts). A present-but-invalid bearer never reaches this server;
+ * it still 401s.
+ *
+ * Lazy authentication (Wave OA): the server also LISTS every vault tool
+ * (MCP_TOOLS), so directory clients know they exist. Calling one never reaches
+ * these handlers — the /mcp route answers a gated `tools/call` without a token
+ * with an HTTP 401 OAuth challenge before the SDK runs (callsGatedTool in
+ * $lib/server/oauth). The handlers registered here are a fallback only.
  *
  * Signup v2 (Wave G — agent self-signup guardrails): `signup` provisions an
  * ANONYMOUS, PROVISIONAL workspace — a Better Auth-compatible user row with a
@@ -36,9 +43,11 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
+  MCP_TOOLS,
   PUBLIC_MCP_TOOLS,
   signInInputSchema,
   signupInputSchema,
+  type McpToolDef,
   type PublicMcpToolDef,
   type SignInInput,
   type SignInOutput,
@@ -295,6 +304,22 @@ export function buildPublicMcpServer(deps: SignupDeps): McpServer {
         annotations: { title: tool.title, ...tool.annotations },
       },
       async (args: Record<string, unknown>) => handler(args),
+    );
+  }
+
+  // Advertise the gated vault tools (lazy auth). The route 401s a call to any
+  // of them before the SDK runs; this handler only answers if that gate is
+  // ever bypassed.
+  for (const tool of MCP_TOOLS as readonly McpToolDef[]) {
+    server.registerTool(
+      tool.name,
+      {
+        title: tool.title,
+        description: tool.description,
+        inputSchema: tool.inputSchema.shape,
+        annotations: { title: tool.title, ...tool.annotations },
+      },
+      async () => fail(`sign in required: connect Brainz with OAuth to use ${tool.name}`),
     );
   }
 

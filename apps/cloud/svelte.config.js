@@ -14,6 +14,13 @@ const config = {
         configPath: "wrangler.dev.jsonc",
       },
     }),
+    csrf: {
+      // SvelteKit's origin check runs BEFORE hooks and can't exempt a path,
+      // but the OAuth token/revoke endpoints take cross-origin form POSTs
+      // (RFC 6749) with no Origin. hooks.server.ts re-applies the identical
+      // check to every other path (isCrossSiteFormPost in $lib/server/oauth).
+      trustedOrigins: ["*"],
+    },
   },
 };
 

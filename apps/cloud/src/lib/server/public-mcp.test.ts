@@ -1,7 +1,8 @@
 /**
  * Public MCP server tests over fake SignupDeps, exercised through a real MCP
  * client via the SDK's InMemoryTransport — proves the unauthenticated /mcp
- * surface is exactly PUBLIC_MCP_TOOLS (signup + sign_in), that signup v2
+ * surface CALLS only PUBLIC_MCP_TOOLS (signup + sign_in) while listing the
+ * gated vault tools for lazy auth (Wave OA), that signup v2
  * (Wave G) provisions an ANONYMOUS provisional account (placeholder identity,
  * 7-day expiry), returns NO URL of any kind, fires the claim request when an
  * email is supplied, and enforces the per-IP rate limit with the TOCTOU-safe
@@ -13,6 +14,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   MCP_TOOL_NAMES,
+  MCP_TOOLS,
   PUBLIC_MCP_TOOLS,
   PUBLIC_MCP_TOOL_NAMES,
   signInOutputSchema,
@@ -74,22 +76,26 @@ function allText(result: Awaited<ReturnType<Client["callTool"]>>): string {
 }
 
 describe("public MCP server (unauthenticated surface)", () => {
-  it("registers exactly the PUBLIC_MCP_TOOLS — signup + sign_in, none of the vault tools", async () => {
+  it("lists signup + sign_in plus every vault tool (lazy auth), never claim", async () => {
     const client = await connect(fakeDeps().deps);
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name)).toEqual([...PUBLIC_MCP_TOOL_NAMES]);
-    for (const contract of PUBLIC_MCP_TOOLS) {
+    // Wave OA: the gated vault tools are LISTED so directory clients know they
+    // exist; calling one is answered by the /mcp route's 401 OAuth challenge.
+    expect(tools.map((t) => t.name)).toEqual([...PUBLIC_MCP_TOOL_NAMES, ...MCP_TOOL_NAMES]);
+    // Every listed tool — public AND gated — carries its contract annotations.
+    for (const contract of [...PUBLIC_MCP_TOOLS, ...MCP_TOOLS]) {
       const tool = tools.find((t) => t.name === contract.name)!;
       expect(tool.annotations).toEqual({ title: contract.title, ...contract.annotations });
     }
-    // Both public tools are advertised on tools/list.
-    expect(tools.map((t) => t.name)).toContain("signup");
-    expect(tools.map((t) => t.name)).toContain("sign_in");
-    for (const name of MCP_TOOL_NAMES) {
-      expect(tools.map((t) => t.name)).not.toContain(name);
-    }
-    // The cloud-only claim tool is NOT on the public surface either.
+    // The cloud-only claim tool is NOT on the public surface.
     expect(tools.map((t) => t.name)).not.toContain("claim");
+  });
+
+  it("a gated tool that slips past the route's 401 gate is an isError, never vault data", async () => {
+    const client = await connect(fakeDeps().deps);
+    const result = await client.callTool({ name: "search_concepts", arguments: { query: "x" } });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/sign in required/);
   });
 
   it("anonymous signup provisions a provisional user + vault + key — no email needed", async () => {

@@ -253,11 +253,46 @@ https://modelcontextprotocol.io/registry/remote-servers):
 Bump `version` in `server.json` and the two well-known files alongside
 `SERVER_VERSION` when the surface changes — the next deploy re-publishes.
 
+## OAuth 2.1 for MCP clients (operator)
+
+`/mcp` accepts OAuth 2.1 access tokens alongside `bz_` keys, which is what
+the Claude Connectors Directory and the ChatGPT plugin directory require.
+The spec is SPEC-CLOUD.md "OAuth 2.1 for remote MCP (Wave OA)". The code
+lives in `src/lib/server/oauth.ts`, `src/routes/oauth/**` and
+`src/routes/.well-known/oauth-*`.
+
+- Discovery: `/.well-known/oauth-protected-resource/mcp` (also served
+  without the `/mcp` suffix) and `/.well-known/oauth-authorization-server`.
+  The issuer is `BETTER_AUTH_URL`.
+- Clients register through DCR (`POST /oauth/register`) or a client ID
+  metadata document. No per-client setup is needed for Claude
+  (`https://claude.ai/api/mcp/auth_callback`), Claude Code (loopback, any
+  port) or ChatGPT (DCR).
+- Try it from Claude Code: `claude mcp add --transport http brainz
+  https://brainz.brownmatter.ai/mcp` (no header), then `/mcp` → authenticate.
+  The browser opens the consent page and you pick a vault.
+- **Reviewer accounts** (password login with no email step, for directory
+  reviewers). The script writes the user and credential rows and can seed
+  a "Brainz demo" vault from `examples/demo-vault`:
+
+  ```sh
+  node scripts/reviewer-account.mjs --email reviewer@brownmatter.ai --remote \
+    --seed https://brainz.brownmatter.ai
+  ```
+
+  It prints a generated password once; enter it in the directory portal.
+  Re-run the script to rotate the password. Users can't create password
+  accounts (`disableSignUp`).
+- **Before submitting**, make sure no Cloudflare WAF, bot-fight or rate-limit
+  rule on the `brownmatter.ai` zone blocks Anthropic's egress range
+  `160.79.104.0/21`. Anthropic fetches discovery, registration and tokens
+  from it, with a 10 s timeout.
+
 ## File map (backend / UI ownership)
 
 Backend-owned (this wave): `wrangler.jsonc` (+`wrangler.dev.jsonc`,
 `wrangler.do.jsonc`), `drizzle/**`, `src/lib/server/**`,
-`src/hooks.server.ts`, `src/routes/api/**`, `src/routes/mcp/**`,
+`src/hooks.server.ts`, `src/routes/api/**`, `src/routes/mcp/**`, `src/routes/oauth/**` (server files; the consent `+page.svelte` is UI), `src/routes/.well-known/**`,
 `src/app.d.ts`, `src/routes/+layout.server.ts`, `scripts/**`, `package.json`.
 
 UI-owned: the root `+page.svelte` (splash), `/login`, `/signup`,

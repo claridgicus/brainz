@@ -9,6 +9,7 @@ import {
   MAGIC_LINK_REQUEST_PATH,
   throttleResponse,
 } from "$lib/server/magic-link-guard";
+import { isCrossSiteFormPost } from "$lib/server/oauth";
 import { resolveRateLimitIp } from "$lib/server/rate-limit";
 
 /** Extract the email from a magic-link request body without consuming it. */
@@ -22,6 +23,15 @@ async function readMagicLinkEmail(request: Request): Promise<string | null> {
 }
 
 export const handle: Handle = async ({ event, resolve }) => {
+  // CSRF: SvelteKit's built-in cross-site form-POST check is switched off in
+  // svelte.config.js (it can't exempt the OAuth token/revoke endpoints), so
+  // the same rule is enforced here for every other path.
+  if (isCrossSiteFormPost(event.request, event.url)) {
+    return new Response(`Cross-site ${event.request.method} form submissions are forbidden`, {
+      status: 403,
+    });
+  }
+
   if (building || !event.platform?.env) {
     // Prerender/build: no Cloudflare bindings to wire up.
     return resolve(event);

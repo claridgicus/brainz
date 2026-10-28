@@ -38,7 +38,12 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "16"', () => {
+  it('is "18"', () => {
+    // 18: OAuth 2.1 for remote MCP — new oauth.ts shapes (protected-resource +
+    //     authorization-server metadata, client registration, token response,
+    //     error body) and OAUTH_VAULT_SCOPE. Additive.
+    // 17: MCP tool annotations — every MCP_TOOLS / PUBLIC_MCP_TOOLS /
+    //     CLOUD_MCP_TOOLS entry declares readOnly/destructive/openWorld hints.
     // 16: dreaming spend controls — dream status gains optional provider /
     //     killSwitch / spend (dreamKillSwitchSchema, dreamSpendSchema); new
     //     account dreaming REST shapes (llmKeyPutRequestSchema, llmKeyInfoSchema,
@@ -65,7 +70,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("17");
+    expect(CONTRACTS_VERSION).toBe("18");
   });
 });
 

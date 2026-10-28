@@ -12,7 +12,7 @@
       "headers": [
         {
           "name": "Authorization",
-          "description": "Bearer bz_... vault API key. Omit the header entirely to reach the public signup tool, which provisions a workspace and returns a key.",
+          "description": "Bearer bz_... vault API key (optional: clients that support MCP OAuth sign in instead). Omit it to reach the public tools; gated tools then answer with an OAuth 401 challenge.",
           "isRequired": false,
           "isSecret": true
         }
@@ -43,6 +43,7 @@
         "claim"
       ],
       "signupFlow": "Connect without Authorization and call signup {vaultName?, email?} — it returns {apiKey, vaultSlug, expiresAt, claimEmailSent}. The workspace is provisional (7 days); persist it with the authenticated claim {email} tool, which emails your human an approval link.",
+      "oauth": "OAuth 2.1 (PKCE S256, dynamic client registration, client ID metadata documents). Protected-resource metadata: https://brainz.brownmatter.ai/.well-known/oauth-protected-resource/mcp; one grant = one vault, picked at consent.",
       "agentSetupPrompt": "https://brainz.brownmatter.ai/skill.md",
       "docs": "https://brownmatter.ai/docs",
       "privacyPolicy": "https://brownmatter.ai/privacy",

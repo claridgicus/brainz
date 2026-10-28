@@ -12,7 +12,7 @@
       "headers": [
         {
           "name": "Authorization",
-          "description": "Bearer bz_... vault API key. Omit the header entirely to reach the public signup tool, which provisions a workspace and returns a key.",
+          "description": "Bearer bz_... vault API key (optional: clients that support MCP OAuth sign in instead). Omit it to reach the public tools; gated tools then answer with an OAuth 401 challenge.",
           "isRequired": false,
           "isSecret": true
         }

@@ -15,7 +15,10 @@
  * captures the EMAILED approval URL → /claim/<token> page → approve → human
  * session on /dashboard, key still works, token single-use → signup w/ email
  * auto-fires the claim + decline path → per-IP rate limit → invalid bearer
- * still 401 → NO password endpoints → magic-link request rate-limit trips →
+ * still 401 → password sign-in only for the provisioned reviewer → magic-link
+ * request rate-limit trips → OAuth 2.1 (discovery, lazy-auth 401, reviewer
+ * password login, DCR, consent, PKCE token exchange, MCP over the access
+ * token, refresh rotation + reuse revocation) →
  * restart with backdated expiries: unclaimed keys 401 "workspace expired
  * unclaimed", the claimed key keeps working.
  *
@@ -39,6 +42,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   apiKeyCreateResponseSchema,
+  oauthAuthorizationServerMetadataSchema,
+  oauthClientRegistrationResponseSchema,
+  oauthProtectedResourceMetadataSchema,
+  oauthTokenResponseSchema,
   apiKeyListResponseSchema,
   claimOutputSchema,
   contextResponseSchema,
@@ -73,6 +80,9 @@ const appDir = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const PORT = Number(process.env.E2E_PORT ?? 8788);
 const BASE = `http://127.0.0.1:${PORT}`;
 const STATE_DIR = path.join(appDir, ".wrangler", "e2e-state");
+// Directory-reviewer account (Wave OA), provisioned straight into D1 before boot.
+const REVIEWER_EMAIL = "reviewer@example.com";
+const REVIEWER_PASSWORD = "e2e-reviewer-password-0123456789";
 
 let passed = 0;
 let failed = 0;
@@ -171,6 +181,11 @@ async function main() {
   rmSync(STATE_DIR, { recursive: true, force: true });
   console.log("-- applying D1 migrations to scratch state…");
   run("npx", ["wrangler", "d1", "migrations", "apply", "brainz", "--local", "--persist-to", STATE_DIR]);
+  console.log("-- provisioning the reviewer account…");
+  run("node", [
+    "scripts/reviewer-account.mjs", "--email", REVIEWER_EMAIL, "--password", REVIEWER_PASSWORD,
+    "--local", "--persist-to", STATE_DIR,
+  ]);
 
   console.log(`-- starting wrangler dev on :${PORT}…`);
   // --local: remote bindings (Workers AI) disabled so no Cloudflare login is
@@ -393,14 +408,15 @@ async function main() {
       `emailVerified=${JSON.stringify(sessJson?.user?.emailVerified)}`,
     );
 
-    // No password endpoints exist any more.
+    // Password sign-in exists only for operator-provisioned reviewer accounts
+    // (Wave OA): a user's email + any password never signs in, and sign-up is off.
     const pwSignIn = await fetch(`${BASE}/api/auth/sign-in/email`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: BASE },
       body: JSON.stringify({ email, password: "anything-at-all-123" }),
     });
     step(
-      "email+password sign-in endpoint is gone (4xx, never 200)",
+      "email+password sign-in never works for a normal (passwordless) user (4xx)",
       pwSignIn.status >= 400 && pwSignIn.status !== 200,
       `status ${pwSignIn.status}`,
     );
@@ -410,7 +426,7 @@ async function main() {
       body: JSON.stringify({ name: "X", email: `x-${Date.now()}@example.com`, password: "anything-123" }),
     });
     step(
-      "email+password sign-up endpoint is gone (4xx, never 200)",
+      "email+password sign-up is disabled (4xx, never 200)",
       pwSignUp.status >= 400 && pwSignUp.status !== 200,
       `status ${pwSignUp.status}`,
     );
@@ -1086,9 +1102,8 @@ async function main() {
     const pubTools = await pub.listTools();
     const pubNames = pubTools.tools.map((t) => t.name);
     step(
-      "unauthenticated tools/list is exactly [signup, sign_in] — no vault tools, no claim",
-      JSON.stringify(pubNames) === JSON.stringify(["signup", "sign_in"]) &&
-        !pubNames.some((n) => MCP_TOOL_NAMES.includes(n)) &&
+      "unauthenticated tools/list is [signup, sign_in, ...vault tools] (lazy auth) — never claim",
+      JSON.stringify(pubNames) === JSON.stringify(["signup", "sign_in", ...MCP_TOOL_NAMES]) &&
         !pubNames.includes("claim"),
       pubNames.join(", "),
     );
@@ -2370,6 +2385,252 @@ async function main() {
         normUsers[0]?.id === mixedUserId,
       `mixed=${mixedUserId} rows=${JSON.stringify(normUsers.map((r) => r.id))}`,
     );
+
+    // ================================================================
+    // 19b. OAUTH 2.1 (Wave OA) — the directory path. Discovery documents,
+    // the lazy-auth 401 challenge, reviewer password sign-in (no email
+    // verification), DCR, authorize → login → consent → code to a loopback
+    // redirect on a port the client never registered, form-encoded token
+    // exchange with NO Origin (server-to-server), MCP over the access token on
+    // the picked vault, refresh rotation, reuse revoking the grant.
+    // ================================================================
+    {
+    // Own block: these names would otherwise collide with earlier steps.
+    console.log("\n-- OAuth 2.1 (Wave OA)");
+    const prm = await api("GET", "/.well-known/oauth-protected-resource/mcp", { cookie: false });
+    assertParse(oauthProtectedResourceMetadataSchema, prm.json, "protected-resource metadata (path-suffixed) parses");
+    // wrangler dev rewrites request URLs to the custom-domain route host, so
+    // the issuer here is that host, not BASE. Like a real client, read the
+    // resource + issuer from the discovery documents instead of assuming them.
+    const issuer = prm.json?.authorization_servers?.[0];
+    const resource = prm.json?.resource;
+    // …and its proxy maps the route host back to BASE in response HEADERS
+    // (Location, WWW-Authenticate) but not in bodies: compare headers on BASE.
+    const viaProxy = (s) => (typeof issuer === "string" ? s.replaceAll(issuer, BASE) : s);
+    step(
+      "PRM resource is <issuer>/mcp and names exactly one AS",
+      typeof issuer === "string" && resource === `${issuer}/mcp` && prm.json?.authorization_servers?.length === 1,
+      JSON.stringify(resource),
+    );
+    const prmRoot = await api("GET", "/.well-known/oauth-protected-resource", { cookie: false });
+    step("PRM also served at the root well-known path", prmRoot.status === 200 && prmRoot.json?.resource === resource);
+    const asMeta = await api("GET", "/.well-known/oauth-authorization-server", { cookie: false });
+    assertParse(oauthAuthorizationServerMetadataSchema, asMeta.json, "authorization-server metadata parses");
+    step(
+      "AS metadata: issuer matches PRM; S256 only, DCR + CIMD, public clients",
+      asMeta.json?.issuer === issuer &&
+        JSON.stringify(asMeta.json?.code_challenge_methods_supported) === '["S256"]' &&
+        Boolean(asMeta.json?.registration_endpoint) &&
+        asMeta.json?.client_id_metadata_document_supported === true &&
+        asMeta.json?.token_endpoint_auth_methods_supported?.includes("none"),
+    );
+
+    // Lazy auth: a gated tools/call with no token is an HTTP 401 challenge.
+    const rpc = (body, headers = {}) =>
+      fetch(`${BASE}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
+        body: JSON.stringify(body),
+      });
+    const gated = await rpc({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "search_concepts", arguments: { query: "x" } } });
+    const challenge = gated.headers.get("www-authenticate") ?? "";
+    step(
+      "unauthenticated gated tools/call → 401 + resource_metadata challenge (not a 200 isError)",
+      gated.status === 401 &&
+        viaProxy(challenge).includes(`resource_metadata="${BASE}/.well-known/oauth-protected-resource/mcp"`) &&
+        challenge.includes('scope="vault"'),
+      `status ${gated.status} — ${challenge} — issuer ${issuer}`,
+    );
+    const publicCall = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "sign_in", arguments: { email: "nobody@example.com" } } });
+    step("unauthenticated PUBLIC tool call still answers 200", publicCall.status === 200, `status ${publicCall.status}`);
+    const badBearer = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" }, { authorization: `Bearer bzat_${"x".repeat(40)}` });
+    step(
+      "a dead OAuth access token → 401 carrying the same challenge",
+      badBearer.status === 401 && (badBearer.headers.get("www-authenticate") ?? "").includes("resource_metadata="),
+      `status ${badBearer.status}`,
+    );
+
+    // Reviewer login: email + password, no inbox step (provisioned pre-boot).
+    const reviewerJar = new Map();
+    const reviewerSignIn = await api("POST", "/api/auth/sign-in/email", {
+      body: { email: REVIEWER_EMAIL, password: REVIEWER_PASSWORD },
+      jar: reviewerJar,
+    });
+    step(
+      "reviewer signs in with email + password (no email verification)",
+      reviewerSignIn.status === 200 && reviewerJar.size > 0,
+      `status ${reviewerSignIn.status}`,
+    );
+    const reviewerWrong = await api("POST", "/api/auth/sign-in/email", {
+      body: { email: REVIEWER_EMAIL, password: "definitely-not-the-password" },
+      jar: new Map(),
+    });
+    step("wrong reviewer password → 401", reviewerWrong.status === 401, `status ${reviewerWrong.status}`);
+    const reviewerVault = await api("POST", "/api/vaults", {
+      body: { name: "Reviewer demo", slug: "reviewer-demo" },
+      jar: reviewerJar,
+    });
+    step("reviewer creates a vault → 201", reviewerVault.status === 201, `status ${reviewerVault.status}`);
+    const reviewerVaultId = reviewerVault.json?.id;
+    await api("POST", `/api/vaults/${reviewerVaultId}/concepts`, {
+      body: { id: "oauth-probe", title: "OAuth probe", body: "Written by the reviewer before connecting." },
+      jar: reviewerJar,
+    });
+
+    // DCR as Claude Code would: a public client with loopback redirects.
+    const reg = await api("POST", "/oauth/register", {
+      cookie: false,
+      body: {
+        client_name: "E2E Claude Code",
+        redirect_uris: ["http://localhost/callback", "http://127.0.0.1/callback"],
+        token_endpoint_auth_method: "none",
+        grant_types: ["authorization_code", "refresh_token"],
+      },
+    });
+    step("DCR → 201 with a bzc_ client_id and no secret", reg.status === 201 && /^bzc_/.test(reg.json?.client_id ?? "") && !reg.json?.client_secret, `status ${reg.status}`);
+    assertParse(oauthClientRegistrationResponseSchema, reg.json, "DCR response parses");
+    const badReg = await api("POST", "/oauth/register", { cookie: false, body: { redirect_uris: ["http://evil.example/cb"] } });
+    step("DCR rejects a non-loopback http redirect", badReg.status === 400 && badReg.json?.error === "invalid_redirect_uri", `status ${badReg.status}`);
+    const clientId = reg.json?.client_id;
+
+    const verifier = `e2e-verifier-${crypto.randomUUID()}-${crypto.randomUUID()}`;
+    const challengeDigest = Buffer.from(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
+    ).toString("base64url");
+    const redirectUri = "http://localhost:43117/callback"; // port never registered
+    const authorizeQs = new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      code_challenge: challengeDigest,
+      code_challenge_method: "S256",
+      state: "e2e-state",
+      scope: "vault offline_access",
+      resource,
+    }).toString();
+    const authorizePath = `/oauth/authorize?${authorizeQs}`;
+
+    const anonAuthorize = await fetch(`${BASE}${authorizePath}`, { redirect: "manual" });
+    const loginLocation = anonAuthorize.headers.get("location") ?? "";
+    step(
+      "authorize without a session → login, returning to the authorize URL",
+      anonAuthorize.status === 303 && loginLocation.startsWith("/login?next=") &&
+        // `next` carries the authorize URL encoded once more; decode both levels.
+        viaProxy(decodeURIComponent(decodeURIComponent(loginLocation.slice("/login?next=".length)))) ===
+          viaProxy(decodeURIComponent(authorizePath)),
+      `status ${anonAuthorize.status} → ${decodeURIComponent(loginLocation)} vs ${authorizePath}`,
+    );
+    const evilAuthorize = await fetch(`${BASE}/oauth/authorize?${authorizeQs.replace(encodeURIComponent(redirectUri), encodeURIComponent("https://evil.example/cb"))}`, { redirect: "manual" });
+    step("an unregistered redirect renders an error page, never redirects", evilAuthorize.status === 200, `status ${evilAuthorize.status}`);
+
+    const consent = await fetch(`${BASE}${authorizePath}`, { redirect: "manual", headers: { cookie: cookieHeader(reviewerJar) } });
+    const consentHtml = await consent.text();
+    step(
+      "consent page names the client, the redirect host and offers the reviewer's vault",
+      consent.status === 200 && consentHtml.includes("E2E Claude Code") && consentHtml.includes("localhost:43117") &&
+        consentHtml.includes("Reviewer demo") && consentHtml.includes(reviewerVaultId),
+      `status ${consent.status}`,
+    );
+
+    const consentForm = new URLSearchParams(authorizeQs);
+    consentForm.set("vault_id", reviewerVaultId);
+    const crossSite = await fetch(`${BASE}/oauth/authorize?/approve`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", origin: "https://evil.example", cookie: cookieHeader(reviewerJar) },
+      body: consentForm.toString(),
+    });
+    step("a cross-site POST to the consent action is refused (403)", crossSite.status === 403, `status ${crossSite.status}`);
+    const approve = await fetch(`${BASE}/oauth/authorize?/approve`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", origin: BASE, cookie: cookieHeader(reviewerJar) },
+      body: consentForm.toString(),
+    });
+    const approveLocation = new URL(approve.headers.get("location") ?? "http://x.invalid/");
+    const code = approveLocation.searchParams.get("code");
+    step(
+      "approve → 303 to the loopback redirect with code, state and iss",
+      approve.status === 303 && approveLocation.origin === "http://localhost:43117" &&
+        approveLocation.pathname === "/callback" && Boolean(code) &&
+        approveLocation.searchParams.get("state") === "e2e-state" && viaProxy(approveLocation.searchParams.get("iss") ?? "") === BASE,
+      `status ${approve.status} → ${approveLocation.origin}${approveLocation.pathname} — ${approve.status === 303 ? "" : (await approve.text()).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 700)}`,
+    );
+
+    // Token exchange: form-encoded, NO Origin header (server-to-server).
+    const tokenCall = (form) =>
+      fetch(`${BASE}/oauth/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(form).toString(),
+      }).then(async (r) => ({ status: r.status, json: await r.json().catch(() => null), headers: r.headers }));
+    const exchanged = await tokenCall({
+      grant_type: "authorization_code",
+      code,
+      code_verifier: verifier,
+      redirect_uri: redirectUri,
+      client_id: clientId,
+    });
+    step("token exchange (form-encoded, no Origin) → 200", exchanged.status === 200, `status ${exchanged.status} ${JSON.stringify(exchanged.json)}`);
+    assertParse(oauthTokenResponseSchema, exchanged.json, "token response parses (bzat_ + rotating bzrt_)");
+    step("token response is no-store", exchanged.headers.get("cache-control") === "no-store");
+    const replay = await tokenCall({ grant_type: "authorization_code", code, code_verifier: verifier, redirect_uri: redirectUri, client_id: clientId });
+    step("replaying the code → invalid_grant", replay.status === 400 && replay.json?.error === "invalid_grant", `status ${replay.status}`);
+
+    // The replay revoked that grant, so run the flow once more for a live one.
+    const approve2 = await fetch(`${BASE}/oauth/authorize?/approve`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", origin: BASE, cookie: cookieHeader(reviewerJar) },
+      body: consentForm.toString(),
+    });
+    const code2 = new URL(approve2.headers.get("location") ?? "http://x.invalid/").searchParams.get("code");
+    const live = await tokenCall({ grant_type: "authorization_code", code: code2, code_verifier: verifier, redirect_uri: redirectUri, client_id: clientId });
+    step("second consent → fresh tokens", live.status === 200 && Boolean(live.json?.access_token), `status ${live.status}`);
+    step(
+      "the replayed code's grant is revoked (its access token 401s)",
+      (await rpc({ jsonrpc: "2.0", id: 4, method: "tools/list" }, { authorization: `Bearer ${exchanged.json?.access_token}` })).status === 401,
+    );
+
+    const oauthTransport = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${live.json?.access_token}` } },
+    });
+    const oauthMcp = new Client({ name: "brainz-e2e-oauth", version: "0.0.0" });
+    await oauthMcp.connect(oauthTransport);
+    const oauthTools = (await oauthMcp.listTools()).tools.map((t) => t.name);
+    step(
+      "MCP over the OAuth token: full vault toolset, no claim",
+      MCP_TOOL_NAMES.every((n) => oauthTools.includes(n)) && !oauthTools.includes("claim"),
+      oauthTools.length + " tools",
+    );
+    const probe = await oauthMcp.callTool({ name: "get_concept", arguments: { id: "oauth-probe" } });
+    step(
+      "OAuth token reads the vault picked at consent",
+      !probe.isError && JSON.stringify(probe.content).includes("Written by the reviewer"),
+      JSON.stringify(probe.content).slice(0, 80),
+    );
+    const otherVault = await oauthMcp.callTool({ name: "get_concept", arguments: { id: "lead-scoring" } });
+    step("…and not another user's vault", otherVault.isError === true);
+    await oauthMcp.close();
+
+    // Refresh rotation + reuse detection.
+    const rotated = await tokenCall({ grant_type: "refresh_token", refresh_token: live.json?.refresh_token, client_id: clientId });
+    step(
+      "refresh → new pair (refresh token rotated)",
+      rotated.status === 200 && rotated.json?.refresh_token !== live.json?.refresh_token,
+      `status ${rotated.status}`,
+    );
+    const reused = await tokenCall({ grant_type: "refresh_token", refresh_token: live.json?.refresh_token, client_id: clientId });
+    step("reusing the rotated refresh token → invalid_grant", reused.status === 400 && reused.json?.error === "invalid_grant", `status ${reused.status}`);
+    const afterTheft = await rpc({ jsonrpc: "2.0", id: 5, method: "tools/list" }, { authorization: `Bearer ${rotated.json?.access_token}` });
+    step("…and the whole grant is revoked (newest access token 401s)", afterTheft.status === 401, `status ${afterTheft.status}`);
+    const crossSiteRegister = await fetch(`${BASE}/oauth/register`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: "{}",
+    });
+    step("cross-site form posts outside the token endpoints are still refused", crossSiteRegister.status === 403, `status ${crossSiteRegister.status}`);
+    }
 
     // ================================================================
     // 20. EXPIRY ENFORCEMENT (Wave G) — signup → never claim → clock past

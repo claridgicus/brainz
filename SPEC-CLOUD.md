@@ -76,7 +76,7 @@ Concept writes parse the submitted markdown body with engine's `parseNote` (wiki
 
 ### Auth (Better Auth)
 
-- better-auth with drizzle adapter (sqlite/D1), email+password enabled; GitHub OAuth enabled only when `GITHUB_CLIENT_ID/SECRET` present.
+- better-auth with drizzle adapter (sqlite/D1); magic link is the user credential (Wave A), and password sign-in exists only for operator-provisioned reviewer accounts (Wave OA); GitHub OAuth enabled only when `GITHUB_CLIENT_ID/SECRET` present.
 - SvelteKit integration per Better Auth docs: mount handler in `src/hooks.server.ts`, expose session in `locals`. Client: better-auth/svelte client for the UI.
 - **Production domain: `https://brainz.brownmatter.ai`** — the user-facing dashboard AND the MCP/API host. `BETTER_AUTH_URL=https://brainz.brownmatter.ai` in production (localhost in `.dev.vars`), Better Auth `trustedOrigins` includes it, and wrangler.jsonc declares the custom domain route (`routes: [{ pattern: "brainz.brownmatter.ai", custom_domain: true }]`). MCP setup snippets/docs use `https://brainz.brownmatter.ai/mcp`.
 - Secrets via wrangler: `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`. Provide `.dev.vars.example`.
@@ -96,7 +96,7 @@ Concept writes parse the submitted markdown body with engine's `parseNote` (wiki
 
 ### Remote MCP (`/mcp` route)
 
-- MCP Streamable HTTP, auth: `Authorization: Bearer bz_...` → resolves vault via D1 key lookup, then routes into that vault's `VaultDO`; 401 otherwise.
+- MCP Streamable HTTP, auth: `Authorization: Bearer bz_...` → resolves vault via D1 key lookup, then routes into that vault's `VaultDO`; 401 otherwise. OAuth 2.1 access tokens (`bzat_…`) are accepted too, and a gated tool called with no token gets a 401 lazy-auth challenge: see "OAuth 2.1 for remote MCP (Wave OA)" below.
 - Same 8 tools as SPEC.md (search_concepts, get_concept, get_related, get_context, upsert_concept, link_concepts, list_concepts, vault_stats), registered by iterating `MCP_TOOLS` from `@brainz/contracts`, backed by the VaultDO + engine.
 - Implementation options (agent's call, in preference order): (a) Cloudflare `agents` SDK `McpAgent` — MCP server AS a Durable Object, the platform-native pattern; run it per-vault, or (b) stateless `@modelcontextprotocol/sdk` StreamableHTTP via a fetch-adapter (e.g. `@hono/mcp`) in the route handler that calls into VaultDO. Either way the agent verifies against a real MCP client call over HTTP in wrangler dev. If McpAgent fights SvelteKit route integration, (b) is fine — don't sink hours.
 - Client wiring docs: `claude mcp add --transport http brainz https://<host>/mcp --header "Authorization: Bearer bz_..."` (and raw .mcp.json equivalent).
@@ -108,7 +108,7 @@ Concept writes parse the submitted markdown body with engine's `parseNote` (wiki
 
 An orchestrator agent must be able to provision a workspace straight from the MCP endpoint — **without an email** — and the workspace only becomes permanent once a human approves attaching their email (see Wave G below, which supersedes this section's earlier email-at-signup + `claimUrl`/`loginUrl` designs):
 
-- **Unauthenticated `/mcp` connections** no longer 401: they get a PUBLIC MCP server exposing exactly one tool, `signup` `{vaultName?, email?}`. (Invalid/revoked bearer still 401s — only *absent* auth gets the public server.)
+- **Unauthenticated `/mcp` connections** no longer 401: they get a PUBLIC MCP server exposing exactly one tool, `signup` `{vaultName?, email?}`. (Now two callable tools, `signup` and `sign_in`. Since Wave OA the public server also *lists* the gated tools, and calling one returns the OAuth 401 challenge.) (Invalid/revoked bearer still 401s — only *absent* auth gets the public server.)
 - `signup` creates a **provisional** account: a Better Auth user row with a placeholder identity (`unclaimed-<userId>@pending.brainz.invalid`, `emailVerified: false`, `expires_at = now + 7 days`), a first vault (default "My vault"), and an API key. Returns `{ apiKey: "bz_…", vaultSlug, expiresAt, claimEmailSent }` — NO login or claim URL is ever returned to the agent (a returned URL sits in orchestrator logs and proves nothing about a human).
 - If `email` is supplied, it is NOT bound to the account — it merely triggers the same claim-request flow as the `claim` tool (Wave G), and `claimEmailSent: true` is returned regardless of the address's eligibility (no account-existence oracle).
 - **Rate limiting**: per-IP (CF-Connecting-IP) counter, max 5 signups/hour — D1 `signup_events`; 429-style isError beyond it.
@@ -286,7 +286,7 @@ Keep the term **vault** (do NOT rename to project — that migration is out of s
 
 Auth becomes **magic-link only — passwordless**. Email delivery via Cloudflare's `send_email` Worker binding (MailChannels transport).
 
-- **Better Auth**: enable the `magicLink` plugin; REMOVE email+password (no credential provider). Sign-in = enter email → receive a one-time link → click → session. Sign-up = same flow (first magic-link for an unknown email creates the user). Keep GitHub OAuth conditional as-is.
+- **Better Auth**: enable the `magicLink` plugin; REMOVE email+password (no credential provider). (Wave OA re-enables `emailAndPassword` with `disableSignUp: true`, but ONLY for operator-provisioned directory-reviewer accounts. No user can create a password account.) Sign-in = enter email → receive a one-time link → click → session. Sign-up = same flow (first magic-link for an unknown email creates the user). Keep GitHub OAuth conditional as-is.
 - **The claim/invite flows collapse into magic links**: ~~agent `signup` still provisions user+vault+API key and returns a `loginUrl` (a magic link that signs the human straight in)~~ **SUPERSEDED by Wave G — `signup` returns no URL of any kind; the agent-held `loginUrl` (and its 10-min `AGENT_MAGIC_LINK_TTL_SECONDS` minter) is removed.** The old `account_claims`/password (`password.ts`, PBKDF2) machinery stays REMOVED; project invites (Wave P) likewise become magic-link joins. `/claim/[token]` is revived by Wave G as the claim-approval page (not a set-password page).
 - **Email**: `Mailer` interface (`sendMagicLink({to, url})`, `sendInvite(...)`) with two implementations: `MailChannelsMailer` (uses the `SEND_EMAIL` binding — `wrangler.jsonc` `send_email: [{ name: "SEND_EMAIL" }]`, `nodejs_compat`; from `no-reply@brownmatter.ai`, DKIM-signed) and a `DevMailer` (logs the URL to stderr — used in `wrangler dev`/tests where no binding/DKIM exists). Select by binding presence. HTML + text templates, Brownmatter-branded, one clear button. Never log the token in prod; DevMailer logging is dev-only.
 - **Security hardenings folded in** (from the audit):
@@ -327,6 +327,56 @@ Threat model this wave closes (from the July 2026 review): (1) `signup` required
 
 **Verification (Wave G)**: unit tests for signup v2 (anonymous + with-email), claim request (eligible / already-claimed / already-registered / rate-limited), approval action (happy, expired, reuse, decline), expiry enforcement at `resolveApiKey`; e2e: signup → key works → claim → DevMailer captures approval URL → approve → human session on /dashboard → key still works and account is permanent; and signup → never claim → clock past expiry → key 401s.
 
+### OAuth 2.1 for remote MCP (Wave OA — directory listing)
+
+The Claude Connectors Directory and the ChatGPT plugin directory both require OAuth for an MCP server whose tools act on a user's account: Anthropic accepts a static key only as an org-Owner beta, and OpenAI has no API-key or fixed-header input at all. Brainz therefore runs its own OAuth 2.1 authorization server (AS) on the Worker origin, and `/mcp` accepts its access tokens alongside `bz_` keys. Requirements are from https://claude.com/docs/connectors/building/authentication, `/lazy-authentication`, the MCP authorization spec (2025-11-25), and https://developers.openai.com/plugins/deploy/submission.
+
+**Hand-rolled, not Better Auth's `mcp`/`oidcProvider` plugin.** That plugin (deprecated in favour of `@better-auth/oauth-provider`) stores tokens in plaintext, never invalidates a used refresh token, only issues refresh tokens for `offline_access`, has no client-ID-metadata-document support and no way to bind a grant to a vault. The AS lives in `$lib/server/oauth.ts` (logic over a small `D1Like` port, unit-tested on the migrated schema) and the routes below. Better Auth stays the identity layer: the consent page reads the Better Auth session.
+
+**Issuer and discovery.** Issuer = `BETTER_AUTH_URL` (production `https://brainz.brownmatter.ai`), else the request origin. The protected resource is `<issuer>/mcp`.
+
+- `GET /.well-known/oauth-protected-resource/mcp` and `GET /.well-known/oauth-protected-resource` (RFC 9728): `{resource: "<issuer>/mcp", authorization_servers: ["<issuer>"], scopes_supported: ["vault"], bearer_methods_supported: ["header"], resource_name: "Brainz", resource_documentation}`.
+- `GET /.well-known/oauth-authorization-server` (RFC 8414): authorize/token/register/revoke endpoints under `/oauth/*`, `response_types_supported: ["code"]`, `grant_types_supported: ["authorization_code", "refresh_token"]`, `code_challenge_methods_supported: ["S256"]`, `token_endpoint_auth_methods_supported: ["none", "client_secret_post", "client_secret_basic"]`, `scopes_supported: ["vault", "offline_access"]`, `client_id_metadata_document_supported: true`.
+- Wire shapes live in `@brainz/contracts` (`oauth.ts`); the routes parse their own output against them.
+
+**Client registration: DCR and CIMD.**
+
+- `POST /oauth/register` (RFC 7591, JSON). `redirect_uris` must be non-empty (max 10). Each must be `https:` with no fragment, or `http:` on a loopback host (`localhost`, `127.0.0.1`, `[::1]`). Only the `authorization_code` and `refresh_token` grants and the `code` response type are accepted. `token_endpoint_auth_method` is `none` (public client, PKCE only) or `client_secret_post`/`client_secret_basic` (the confidential client gets a `bzcs_` secret, shown once and stored SHA-256-hashed). The response is 201 with `client_id` (`bzc_…`). Registration is not IP-rate-limited, because Anthropic registers from one shared egress range (`160.79.104.0/21`) on every fresh connection. Field lengths are capped instead.
+- Client ID metadata documents: a `client_id` that is an `https://` URL with a path is fetched at authorize time (5 s timeout, 16 KB cap, no redirects, no IP-literal or localhost hosts). The document's `client_id` must equal the URL, and it is treated as a public client. The consent screen names the URL's host, not the self-asserted `client_name`.
+- Redirect matching is exact string equality, except loopback `http:` URIs, which match with the port ignored (RFC 8252 §7.3, and `localhost` too, because Claude Code declares it). This accepts `https://claude.ai/api/mcp/auth_callback` and Claude Code's `http://localhost:<any>/callback`. ChatGPT registers its own callback through DCR, so its exact URL (unconfirmed in OpenAI's docs) needs no allowlist.
+
+**Authorization: `GET /oauth/authorize` (consent page).**
+
+- Requires `response_type=code`, a known `client_id`, a `redirect_uri` that matches (optional only when the client registered exactly one), `code_challenge`, and `code_challenge_method=S256`. `plain` is rejected. `state` is passed through. `scope` is narrowed to `vault`. A `resource` (RFC 8707), if sent, must equal `<issuer>/mcp`, else `invalid_target`.
+- An unknown client or a bad redirect renders an error page and never redirects (no open redirector). Every other error redirects to the client with `error`, `state` and `iss`.
+- No session: 303 to `/login?next=<authorize URL>`. Every login method returns there (magic link `callbackURL`, GitHub, password).
+- The consent screen shows the client (registered name, or the CIMD host), the redirect host (with a warning when it is loopback-only), what is granted ("read and write the concepts and tasks in one vault, as you"), and a **vault picker** listing the user's member vaults with their role. A user with no vault is sent to create one first. Approve or Deny posts back to the page (same-origin form). Approve re-validates everything plus membership on the picked vault.
+- **One grant = one user × one vault × one client.** Connecting a second vault means connecting again.
+- Approve mints an authorization code (32 random bytes, SHA-256 at rest, 5-minute TTL, single-use) bound to client, redirect URI, PKCE challenge, user and vault, and 303s to `redirect_uri?code=…&state=…&iss=<issuer>`. Deny redirects with `error=access_denied`.
+
+**Tokens: `POST /oauth/token`.**
+
+- Accepts `application/x-www-form-urlencoded` (RFC 6749 §4.1.3; JSON is tolerated). Client authentication: HTTP Basic or `client_secret_post` for confidential clients, `client_id` alone for public ones.
+- `authorization_code`: the code must be unexpired and unused, issued to this client, for this exact `redirect_uri`, and `BASE64URL(SHA256(code_verifier)) == code_challenge`. Replaying a used code is `invalid_grant` and revokes the grant it produced. Success creates an `oauth_grant` row and returns `{access_token: "bzat_…", token_type: "Bearer", expires_in: 3600, refresh_token: "bzrt_…", scope: "vault"}` with `Cache-Control: no-store`. A refresh token is always issued; `offline_access` is not required.
+- `refresh_token`: refresh tokens **rotate**. A successful refresh marks the old token used and returns a new pair (30-day sliding lifetime). Presenting an already-rotated refresh token is treated as theft: the whole grant is revoked and the call fails with `invalid_grant`. Expired or revoked tokens, a client mismatch, or a user who has lost vault membership also fail with `invalid_grant`, never `invalid_request`.
+- Errors are RFC 6749 JSON `{error, error_description}`: 400, or 401 for `invalid_client`.
+- `POST /oauth/revoke` (RFC 7009) revokes the token's whole grant and always answers 200.
+- All tokens and codes are SHA-256 hashed at rest (`oauth_client`, `oauth_code`, `oauth_grant`, `oauth_token` D1 tables). Tables cascade on user and vault delete.
+- **CSRF exemption.** SvelteKit's built-in origin check rejects any cross-origin form POST before hooks run, and server-to-server token requests carry no matching `Origin`. `svelte.config.js` therefore sets `csrf.trustedOrigins: ["*"]`, and `hooks.server.ts` re-applies the identical check (`isCrossSiteFormPost`) to every path except `/oauth/token` and `/oauth/revoke`. Both are non-cookie, client-authenticated endpoints.
+
+**`/mcp` with OAuth, and lazy authentication.**
+
+- `Authorization: Bearer bzat_…` resolves token → grant → vault. Expired or revoked tokens, a revoked grant, an owner past `expires_at`, or a user who is no longer a member all get 401. The user's **current** membership role sets the surface: owner or editor gets the full vault toolset, and viewer gets the read tools only (`PUBLIC_VAULT_READ_TOOL_NAMES`, the same server as a public-vault token). The cloud-only `claim` tool is not registered for OAuth connections, because an OAuth user is already a signed-in human.
+- `bz_` keys and public-vault tokens keep working exactly as before.
+- **Lazy authentication (mixed auth).** A request with NO Authorization header still gets the public server. That server now lists the **whole** tool surface (the public `signup`/`sign_in` plus every vault and cloud tool), so directory clients know the gated tools exist. Before the MCP SDK runs, the route inspects the JSON-RPC body (single or batch). A `tools/call` for any tool outside `PUBLIC_MCP_TOOL_NAMES` gets **HTTP 401** with `WWW-Authenticate: Bearer error="invalid_token", error_description="Authentication required for this tool", resource_metadata="<issuer>/.well-known/oauth-protected-resource/mcp", scope="vault"`. It is never a 200 `isError`, because only a transport-level 401 makes Claude or ChatGPT start sign-in. `initialize`, `tools/list` and public tool calls pass through.
+- Every bearer 401 on `/mcp` (invalid, expired or revoked token or key) carries the same `resource_metadata` challenge, so a client with an expired access token refreshes or re-authorizes.
+
+**Reviewer test login (password, operator-provisioned).** Directory reviewers need a login with no email verification step (OpenAI: test credentials must not use "email or other verification schemes"). Magic links fail that rule. Better Auth `emailAndPassword` is enabled with `disableSignUp: true` and `minPasswordLength: 20`. Nobody can create a password account through the app. Only an operator can, with `apps/cloud/scripts/reviewer-account.mjs`, which writes the user and a `credential` account row (Better Auth scrypt hash) into D1 and can seed a demo vault through the REST API. `/login` gets a secondary "Sign in with a password" form for those accounts. The script generates high-entropy passwords, so brute force is infeasible even though Better Auth's sign-in limiter is per-isolate. Everyone else stays passwordless.
+
+**Network.** Anthropic calls the MCP and OAuth endpoints from `160.79.104.0/21`. No Cloudflare WAF or bot rule may block that range on `brainz.brownmatter.ai`. The repo ships no WAF rules, so this is an operator check on the zone before submission.
+
+**Verification (Wave OA).** Unit tests cover redirect matching (loopback any port, exact https), DCR validation, CIMD fetch rules, PKCE, code single-use and replay revocation, refresh rotation and reuse detection, membership loss, the lazy-auth gate, and the CSRF re-check. The E2E journey against wrangler dev covers: the discovery documents; an unauthenticated gated `tools/call` returning 401 with `resource_metadata`; the public tool still answering 200 and `tools/list` showing the full surface; the reviewer password sign-in; DCR; authorize redirecting to login and then to consent; approve returning the code to a loopback redirect on a different port; the token exchange (form-encoded, no Origin); MCP tools over the access token on the picked vault; refresh rotation; reuse revoking the grant; `bz_` keys unaffected.
+
 ### Brand model
 
 - **Brownmatter** = the company / parent brand. The marketing site at `brownmatter.ai` presents Brownmatter.
@@ -355,7 +405,7 @@ Logo mark (Brainz, the product): a custom zombie half-eaten brain SVG — flat p
 
 ### File ownership (multi-agent discipline)
 
-- Backend agent owns: `wrangler.jsonc`, `drizzle/**`, `src/lib/server/**`, `src/hooks.server.ts`, `src/routes/api/**`, `src/routes/mcp/**`, `apps/cloud/package.json` (installs ALL deps upfront, including UI's: d3-force, marked), root workspace edit, `src/app.d.ts`, `.dev.vars.example`, root `+layout.server.ts` session load.
+- Backend agent owns: `wrangler.jsonc`, `drizzle/**`, `src/lib/server/**`, `src/hooks.server.ts`, `src/routes/api/**`, `src/routes/mcp/**`, `src/routes/oauth/**` + `src/routes/.well-known/**` (Wave OA), `apps/cloud/package.json` (installs ALL deps upfront, including UI's: d3-force, marked), root workspace edit, `src/app.d.ts`, `.dev.vars.example`, root `+layout.server.ts` session load.
 - UI agent owns: `src/routes/(marketing)/**`, `src/routes/(app)/**`, `/login`, `/signup` routes, `src/lib/components/**`, `src/lib/api.ts` (typed fetch client), `src/app.css`. UI agent MUST NOT edit backend-owned files or run npm install for new packages (deps are pre-installed; if one is missing, note it in the final report instead).
 
 ### Verification

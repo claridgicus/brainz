@@ -16,12 +16,22 @@
  *   ANONYMOUS VIEWER on that vault: the READ tools only (search/get/related/
  *   context/list/stats — buildPublicVaultMcpServer), NO write/onboard/task/claim
  *   tools, per-IP rate-limited. Rotated/revoked/disabled token → generic 401.
- * - Authorization header present but invalid/revoked → 401, exactly as before.
- * - NO Authorization header → the PUBLIC MCP server: two tools, `signup`
- *   (anonymous provisional workspaces) and `sign_in` (emails a magic sign-in
- *   link to an existing account); see PUBLIC_MCP_TOOLS and
+ * - `Authorization: Bearer bzat_...` (Wave OA) → an OAuth 2.1 access token
+ *   ($lib/server/oauth): token → grant → one vault, acting as the signed-in
+ *   user. The user's CURRENT membership role picks the surface: owner/editor
+ *   get the vault tools, a viewer gets the read tools only. No `claim` tool
+ *   (an OAuth user is already a signed-in human).
+ * - Authorization header present but invalid/revoked/expired → 401. Every
+ *   bearer 401 carries `WWW-Authenticate: Bearer ... resource_metadata=...`
+ *   so OAuth clients refresh or re-authorize.
+ * - NO Authorization header → the PUBLIC MCP server: two callable tools,
+ *   `signup` (anonymous provisional workspaces) and `sign_in` (emails a magic
+ *   sign-in link to an existing account); see PUBLIC_MCP_TOOLS and
  *   $lib/server/public-mcp. No URL of any kind is ever returned — both the
  *   sign-in link and claim approval travel by EMAIL only ($lib/server/claim).
+ *   Lazy authentication (Wave OA): the public server also LISTS the vault
+ *   tools, and a `tools/call` for one of them gets an HTTP 401 OAuth
+ *   challenge BEFORE the SDK runs (a 200 isError never starts sign-in).
  *
  * Stateless: a fresh McpServer + transport per request (no session ids),
  * served through @hono/mcp's fetch-native StreamableHTTPTransport — chosen
@@ -30,13 +40,15 @@
  * worker; @hono/mcp drops cleanly into a SvelteKit endpoint.
  *
  * Client wiring:
+ *   claude mcp add --transport http brainz https://brainz.brownmatter.ai/mcp
+ *     (OAuth sign-in on first gated call), or with a key:
  *   claude mcp add --transport http brainz https://brainz.brownmatter.ai/mcp \
  *     --header "Authorization: Bearer bz_..."
  */
 import type { RequestHandler } from "@sveltejs/kit";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
-import { CLOUD_MCP_TOOLS } from "@brainz/contracts";
+import { CLOUD_MCP_TOOLS, PUBLIC_MCP_TOOL_NAMES } from "@brainz/contracts";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { apiError, HttpError, requirePlatform } from "$lib/server/api-util";
@@ -47,27 +59,64 @@ import { createMailer } from "$lib/server/mailer";
 import { guardDepsFromDb, guardMagicLinkRequest } from "$lib/server/magic-link-guard";
 import { magicLinkSender } from "$lib/server/magic-link";
 import { parseBearer } from "$lib/server/api-keys";
-import { resolveApiKey } from "$lib/server/vault-access";
+import { resolveApiKey, WORKSPACE_EXPIRED_MESSAGE } from "$lib/server/vault-access";
 import { buildMcpServer, buildPublicVaultMcpServer } from "$lib/server/mcp";
+import {
+  callsGatedTool,
+  isAccessTokenFormat,
+  issuerFor,
+  resolveAccessToken,
+  wwwAuthenticate,
+} from "$lib/server/oauth";
 import { buildPublicMcpServer, signupDepsFromDb } from "$lib/server/public-mcp";
 import { recordAndCheckPublicRead, resolvePublicVault } from "$lib/server/public-vault";
 import { resolveRateLimitIp } from "$lib/server/rate-limit";
 import { vaultClient } from "$lib/server/vault-client";
 
-function unauthorized(message: string): Response {
+/**
+ * 401 with the OAuth challenge. `resource_metadata` points at the RFC 9728
+ * document, so a client with a dead or missing token starts (or refreshes)
+ * OAuth instead of failing.
+ */
+function unauthorized(issuer: string, message: string): Response {
   return new Response(JSON.stringify({ error: `unauthorized: ${message}` }), {
     status: 401,
     headers: {
       "content-type": "application/json",
-      "www-authenticate": 'Bearer realm="brainz-cloud"',
+      "www-authenticate": wwwAuthenticate(issuer, message),
     },
   });
+}
+
+const PUBLIC_TOOLS: ReadonlySet<string> = new Set(PUBLIC_MCP_TOOL_NAMES);
+
+/** The JSON-RPC body of a POST, read from a clone (the transport reads the original). */
+async function peekJsonRpc(request: Request): Promise<unknown> {
+  if (request.method !== "POST") return null;
+  try {
+    return await request.clone().json();
+  } catch {
+    return null;
+  }
+}
+
+/** Mirror onboard / sync completion into the D1 control-plane columns. */
+function mirrorHooks(d1: Parameters<typeof createDb>[0], vaultId: string) {
+  return {
+    onOnboarded: async (onboardedAt: Date) => {
+      await createDb(d1).update(schema.vault).set({ onboardedAt }).where(eq(schema.vault.id, vaultId));
+    },
+    onSynced: async (lastSyncedAt: Date) => {
+      await createDb(d1).update(schema.vault).set({ lastSyncedAt }).where(eq(schema.vault.id, vaultId));
+    },
+  };
 }
 
 const handleMcp: RequestHandler = async (event) => {
   const platform = requirePlatform(event);
   const db = createDb(platform.env.DB);
   const ip = event.request.headers.get("cf-connecting-ip") ?? "local";
+  const issuer = issuerFor(platform.env.BETTER_AUTH_URL, event.url.origin);
   // Claim deps shared by both surfaces: approval links are EMAILED via the
   // env-selected mailer and built on the request origin (production pins
   // BETTER_AUTH_URL). Never handed back to the caller.
@@ -80,9 +129,16 @@ const handleMcp: RequestHandler = async (event) => {
   };
 
   let server: McpServer;
+  const bearerToken = parseBearer(event.request.headers.get("authorization"));
   if (event.request.headers.get("authorization") === null) {
-    // Absent auth → public server (signup tool only). Invalid auth never
-    // lands here — it still 401s below.
+    // Lazy-auth gate (Wave OA): a gated tools/call without a token gets the
+    // HTTP 401 OAuth challenge BEFORE the SDK runs. initialize, tools/list and
+    // the public tools fall through to the public server.
+    if (callsGatedTool(await peekJsonRpc(event.request), PUBLIC_TOOLS)) {
+      return unauthorized(issuer, "Authentication required for this tool");
+    }
+    // Absent auth → public server (signup + sign_in; lists the gated tools).
+    // Invalid auth never lands here — it still 401s below.
     //
     // Fail closed on a missing cf-connecting-ip in production (audit LOW): the
     // signup rate limit is keyed on this IP, so header-less traffic must not
@@ -125,6 +181,20 @@ const handleMcp: RequestHandler = async (event) => {
         },
       }),
     );
+  } else if (bearerToken !== null && isAccessTokenFormat(bearerToken)) {
+    // OAuth 2.1 access token (Wave OA): one grant = one user × one vault.
+    const access = await resolveAccessToken(platform.env.DB, bearerToken, new Date());
+    if (!access.ok) {
+      return unauthorized(
+        issuer,
+        access.reason === "owner_expired" ? WORKSPACE_EXPIRED_MESSAGE : "invalid or expired access token",
+      );
+    }
+    const vault = vaultClient(platform.env.VAULT_DO, access.vaultId);
+    server =
+      access.role === "viewer"
+        ? buildPublicVaultMcpServer(vault)
+        : buildMcpServer(vault, mirrorHooks(platform.env.DB, access.vaultId));
   } else {
     let resolved: Awaited<ReturnType<typeof resolveApiKey>>;
     try {
@@ -132,7 +202,7 @@ const handleMcp: RequestHandler = async (event) => {
     } catch (err) {
       // Wave G: expired-unclaimed owners get the actionable message, not the
       // generic one. Anything else stays a plain 401.
-      if (err instanceof HttpError && err.status === 401) return unauthorized(err.message);
+      if (err instanceof HttpError && err.status === 401) return unauthorized(issuer, err.message);
       resolved = null;
     }
     if (!resolved) {
@@ -140,8 +210,7 @@ const handleMcp: RequestHandler = async (event) => {
       // token (public vaults): a token that hashes to an enabled vault's
       // public_token_hash grants an ANONYMOUS VIEWER — the read tools only,
       // per-IP rate-limited (a public token is not a secret credential).
-      const bearer = parseBearer(event.request.headers.get("authorization"));
-      const publicVault = bearer ? await resolvePublicVault(db, bearer) : null;
+      const publicVault = bearerToken ? await resolvePublicVault(db, bearerToken) : null;
       if (publicVault) {
         const resolvedIp = resolveRateLimitIp(
           event.request.headers.get("cf-connecting-ip"),
@@ -175,25 +244,12 @@ const handleMcp: RequestHandler = async (event) => {
       }
       // Unknown/rotated/revoked token → the same generic 401 as any bad bearer
       // (no existence leak — a dead public token reads like any invalid key).
-      return unauthorized("provide a Bearer bz_ API key");
+      return unauthorized(issuer, "provide a Bearer bz_ API key or an OAuth access token");
     }
     const vaultId = resolved.vault.id;
     const ownerId = resolved.vault.ownerId;
     server = buildMcpServer(vaultClient(platform.env.VAULT_DO, vaultId), {
-      // Mirror onboard completion into the D1 control-plane column.
-      onOnboarded: async (onboardedAt) => {
-        await createDb(platform.env.DB)
-          .update(schema.vault)
-          .set({ onboardedAt })
-          .where(eq(schema.vault.id, vaultId));
-      },
-      // Mirror sync completion (last_synced_at) into the D1 control-plane column.
-      onSynced: async (lastSyncedAt) => {
-        await createDb(platform.env.DB)
-          .update(schema.vault)
-          .set({ lastSyncedAt })
-          .where(eq(schema.vault.id, vaultId));
-      },
+      ...mirrorHooks(platform.env.DB, vaultId),
       // Cloud-only claim tool: attach this workspace to a human's email. The
       // approval link is EMAILED — never present in the tool result.
       extraTools: CLOUD_MCP_TOOLS.map((def) => ({

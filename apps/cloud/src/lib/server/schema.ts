@@ -55,8 +55,9 @@ export const account = sqliteTable(
     refreshTokenExpiresAt: integer("refresh_token_expires_at", { mode: "timestamp_ms" }),
     scope: text("scope"),
     idToken: text("id_token"),
-    // Kept for the Better Auth account schema; unused now that auth is
-    // passwordless (magic-link only). No credential rows are written.
+    // Better Auth scrypt hash. Set only on `credential` rows for
+    // operator-provisioned reviewer accounts (Wave OA,
+    // scripts/reviewer-account.mjs); users stay passwordless.
     password: text("password"),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
@@ -333,3 +334,82 @@ export const controlFlag = sqliteTable("control_flag", {
   value: text("value").notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
+
+// -------------------------------------------------- OAuth 2.1 (Wave OA)
+
+/**
+ * Dynamically registered OAuth clients (RFC 7591). Client-ID-metadata-document
+ * clients (an https URL as client_id) are NOT stored; they are fetched at
+ * authorize time. `client_secret_hash` is null for public (PKCE-only) clients.
+ * `redirect_uris` is a JSON array. See $lib/server/oauth.
+ */
+export const oauthClient = sqliteTable("oauth_client", {
+  clientId: text("client_id").primaryKey(),
+  clientSecretHash: text("client_secret_hash"),
+  clientName: text("client_name"),
+  redirectUris: text("redirect_uris").notNull(),
+  tokenEndpointAuthMethod: text("token_endpoint_auth_method").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+/**
+ * Authorization codes: SHA-256 hash at rest, 5-minute TTL, single-use
+ * (`used_at`). `grant_id` records the grant the exchange produced so a replayed
+ * code can revoke it. `client_id` is not a foreign key (CIMD clients are URLs).
+ */
+export const oauthCode = sqliteTable("oauth_code", {
+  codeHash: text("code_hash").primaryKey(),
+  clientId: text("client_id").notNull(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  vaultId: text("vault_id")
+    .notNull()
+    .references(() => vault.id, { onDelete: "cascade" }),
+  redirectUri: text("redirect_uri").notNull(),
+  codeChallenge: text("code_challenge").notNull(),
+  scope: text("scope").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  usedAt: integer("used_at", { mode: "timestamp_ms" }),
+  grantId: text("grant_id"),
+});
+
+/** One consented grant = one user × one vault × one client. Revoking it kills every token. */
+export const oauthGrant = sqliteTable(
+  "oauth_grant",
+  {
+    id: text("id").primaryKey(),
+    clientId: text("client_id").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    vaultId: text("vault_id")
+      .notNull()
+      .references(() => vault.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    revokedAt: integer("revoked_at", { mode: "timestamp_ms" }),
+  },
+  (t) => [index("oauth_grant_user_id").on(t.userId)],
+);
+
+/**
+ * Access (`bzat_`) and refresh (`bzrt_`) tokens, SHA-256 hashed. A refresh
+ * token's `used_at` is stamped when it rotates; presenting it again revokes
+ * the grant (reuse detection).
+ */
+export const oauthToken = sqliteTable(
+  "oauth_token",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    grantId: text("grant_id")
+      .notNull()
+      .references(() => oauthGrant.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+    usedAt: integer("used_at", { mode: "timestamp_ms" }),
+  },
+  (t) => [index("oauth_token_grant_id").on(t.grantId)],
+);

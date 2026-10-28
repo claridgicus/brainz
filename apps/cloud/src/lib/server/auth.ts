@@ -1,10 +1,16 @@
 /**
  * Better Auth, instantiated per request (Workers bindings are per-request).
  *
- * PASSWORDLESS: the only credential surface is the magicLink plugin — enter an
- * email, receive a one-time link, click it, get a session. An unknown email
- * signs up on first use. There is NO email+password provider. GitHub OAuth is
- * still enabled only when GITHUB_CLIENT_ID/SECRET are both present.
+ * PASSWORDLESS for users: the user credential is the magicLink plugin — enter
+ * an email, receive a one-time link, click it, get a session. An unknown email
+ * signs up on first use. GitHub OAuth is still enabled only when
+ * GITHUB_CLIENT_ID/SECRET are both present.
+ *
+ * Reviewer exception (Wave OA): email+password sign-in is enabled with
+ * `disableSignUp`, so it works ONLY for accounts an operator provisioned with
+ * scripts/reviewer-account.mjs. Directory reviewers need a login without an
+ * email-verification step (OpenAI's submission rules); nobody can create a
+ * password account through the app.
  *
  * - drizzle adapter over the D1 control plane
  * - magic-link tokens: hashed at rest, single-use, ~15 min TTL (plugin opts)
@@ -107,6 +113,9 @@ export function isMagicLinkVerify(ctx: { path?: string } | null | undefined): bo
 export function shouldMarkEmailVerified(user: { emailVerified?: boolean | null }): boolean {
   return user.emailVerified !== true;
 }
+
+/** Reviewer passwords are operator-generated; anything shorter is refused. */
+export const REVIEWER_MIN_PASSWORD_LENGTH = 20;
 
 const DEV_SECRET_FALLBACK = "dev-insecure-secret-change-me";
 
@@ -214,6 +223,13 @@ export function createAuth(
       },
     },
     socialProviders: github,
+    // Reviewer accounts only (see the header): sign-up is disabled, so the
+    // sign-in endpoint succeeds only for operator-provisioned credential rows.
+    emailAndPassword: {
+      enabled: true,
+      disableSignUp: true,
+      minPasswordLength: REVIEWER_MIN_PASSWORD_LENGTH,
+    },
     plugins: [
       magicLink({
         expiresIn: magicLinkTtlSeconds,
