@@ -8,7 +8,7 @@
  */
 import Database from "better-sqlite3";
 import { dreamOutputSchema } from "@brainz/contracts";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VaultDO } from "./vault-do";
 import { VAULT_ID_HEADER } from "./do-helpers";
 import { KILL_SWITCH_FLAG, recordDreamSpend, saveLlmKey, utcDay } from "./dream-budget";
@@ -239,6 +239,18 @@ describe("VaultDO dreaming", () => {
 });
 
 describe("VaultDO dreaming spend controls", () => {
+  // A frozen clock: the ledger's UTC day can't roll over mid-test, and every
+  // sweep starts and finishes at the same instant, so a dream's own writes are
+  // not "changed since" its start (with a ticking clock the next sweep stages
+  // them and is not idle — the flake this replaced).
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-06-15T12:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("meters Workers AI spend to the owner's daily ledger and reports it in status", async () => {
     const { d1, env } = billed({ AI: fakeAi() });
     const { vault } = await seededVault(env);
