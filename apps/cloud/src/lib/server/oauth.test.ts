@@ -15,7 +15,11 @@ import {
   fetchClientMetadataDocument,
   handleRevokeRequest,
   handleTokenRequest,
+  isAnthropicEgress,
   isCrossSiteFormPost,
+  purgeUnusedClients,
+  REGISTER_RATE_LIMIT,
+  registrationThrottled,
   protectedResourceMetadata,
   readOAuthForm,
   redirectUriMatches,
@@ -97,12 +101,18 @@ describe("discovery documents", () => {
     expect(as.token_endpoint_auth_methods_supported).toContain("none");
   });
 
-  it("the 401 challenge points at the path-suffixed metadata", () => {
-    const h = wwwAuthenticate(ISSUER, 'needs "auth"');
-    expect(h).toMatch(/^Bearer error="invalid_token"/);
+  it("the no-token 401 challenge has no error code (RFC 6750 §3.1)", () => {
+    const h = wwwAuthenticate(ISSUER);
+    expect(h).toBe(
+      `Bearer resource_metadata="${ISSUER}/.well-known/oauth-protected-resource/mcp", scope="vault"`,
+    );
+    expect(h).not.toContain("error");
+  });
+
+  it("a rejected token's challenge carries invalid_token (quotes stripped)", () => {
+    const h = wwwAuthenticate(ISSUER, { invalidToken: 'expired "token"' });
+    expect(h).toMatch(/^Bearer error="invalid_token", error_description="expired token"/);
     expect(h).toContain(`resource_metadata="${ISSUER}/.well-known/oauth-protected-resource/mcp"`);
-    expect(h).toContain('scope="vault"');
-    expect(h).not.toContain('"auth"');
   });
 });
 
@@ -161,6 +171,60 @@ describe("dynamic client registration", () => {
       code: "invalid_client_metadata",
     });
   });
+
+  it("caps registrations at 5 redirect URIs of 512 chars", async () => {
+    const d1 = fakeD1();
+    const six = Array.from({ length: 6 }, (_, i) => `https://x.example/cb${i}`);
+    await expect(registerClient(d1, { redirect_uris: six }, new Date())).rejects.toMatchObject({
+      code: "invalid_client_metadata",
+    });
+    const long = `https://x.example/${"a".repeat(500)}`;
+    await expect(registerClient(d1, { redirect_uris: [long] }, new Date())).rejects.toMatchObject({
+      code: "invalid_client_metadata",
+    });
+    await expect(
+      registerClient(d1, { redirect_uris: [CLAUDE_CALLBACK], logo_uri: `https://x/${"a".repeat(600)}` }, new Date()),
+    ).rejects.toMatchObject({ code: "invalid_client_metadata" });
+  });
+
+  it("limits registrations per IP, exempting Anthropic's egress range", async () => {
+    const d1 = fakeD1();
+    const now = new Date();
+    for (let i = 0; i < REGISTER_RATE_LIMIT; i++) {
+      expect(await registrationThrottled(d1, "203.0.113.9", now)).toBe(false);
+    }
+    expect(await registrationThrottled(d1, "203.0.113.9", now)).toBe(true);
+    expect(await registrationThrottled(d1, "203.0.113.10", now)).toBe(false);
+    // An hour later the window has moved on.
+    expect(await registrationThrottled(d1, "203.0.113.9", new Date(now.getTime() + 61 * 60 * 1000))).toBe(false);
+    for (let i = 0; i < REGISTER_RATE_LIMIT * 3; i++) {
+      expect(await registrationThrottled(d1, "160.79.104.17", now)).toBe(false);
+    }
+  });
+
+  it("recognises exactly 160.79.104.0/21 as Anthropic egress", () => {
+    expect(isAnthropicEgress("160.79.104.0")).toBe(true);
+    expect(isAnthropicEgress("160.79.111.255")).toBe(true);
+    expect(isAnthropicEgress("160.79.103.255")).toBe(false);
+    expect(isAnthropicEgress("160.79.112.0")).toBe(false);
+    expect(isAnthropicEgress("2001:db8::1")).toBe(false);
+    expect(isAnthropicEgress("local")).toBe(false);
+  });
+
+  it("purges day-old clients that never got a grant, keeping connected ones", async () => {
+    const d1 = setup();
+    const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    const unused = await registerClient(d1, { redirect_uris: [CLAUDE_CALLBACK], token_endpoint_auth_method: "none" }, old);
+    const { client: used } = await connect(d1, old);
+    const fresh = await registerClient(d1, { redirect_uris: [CLAUDE_CALLBACK], token_endpoint_auth_method: "none" }, new Date());
+    d1.db.prepare(`INSERT INTO oauth_register_events (id, ip, created_at) VALUES ('e1', '1.2.3.4', ?)`).run(old.getTime());
+    await purgeUnusedClients(d1, new Date());
+    const ids = (d1.db.prepare(`SELECT client_id FROM oauth_client`).all() as { client_id: string }[]).map((r) => r.client_id);
+    expect(ids).not.toContain(unused.client_id);
+    expect(ids).toContain(used.client_id);
+    expect(ids).toContain(fresh.client_id);
+    expect(d1.db.prepare(`SELECT COUNT(*) AS n FROM oauth_register_events`).get()).toEqual({ n: 0 });
+  });
 });
 
 describe("client ID metadata documents", () => {
@@ -173,7 +237,8 @@ describe("client ID metadata documents", () => {
       token_endpoint_auth_method: "none",
       ...over,
     });
-  const serving = (body: string, status = 200): FetchLike => async () => new Response(body, { status });
+  const serving = (body: string, status = 200, type = "application/json"): FetchLike => async () =>
+    new Response(body, { status, headers: { "content-type": type } });
 
   it("accepts a self-consistent document and names the host", async () => {
     const c = await fetchClientMetadataDocument(URL_ID, serving(doc()));
@@ -189,6 +254,26 @@ describe("client ID metadata documents", () => {
     ).toBeNull();
     expect(await fetchClientMetadataDocument(URL_ID, serving(doc({ pad: "x".repeat(20_000) })))).toBeNull();
     expect(await fetchClientMetadataDocument(URL_ID, serving("not json"))).toBeNull();
+    expect(await fetchClientMetadataDocument(URL_ID, serving(doc(), 200, "text/html"))).toBeNull();
+  });
+
+  it("streams the body and gives up past 16 KB without buffering it (no content-length)", async () => {
+    let pulled = 0;
+    let cancelled = false;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(ctrl) {
+        pulled++;
+        ctrl.enqueue(new Uint8Array(4096).fill(32));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetchEndless: FetchLike = async () =>
+      new Response(endless, { status: 200, headers: { "content-type": "application/json" } });
+    expect(await fetchClientMetadataDocument(URL_ID, fetchEndless)).toBeNull();
+    expect(cancelled).toBe(true);
+    expect(pulled).toBeLessThan(10);
   });
 
   it("never fetches IP-literal, localhost or non-https ids", async () => {
@@ -240,6 +325,20 @@ describe("authorize validation", () => {
     }
   });
 
+  it("never bounces from the GET: request errors carry a redirect only the consent action may use", async () => {
+    // The page load renders every invalid request (see authorize/+page.server.ts);
+    // validateAuthorizeRequest still computes the bounce for the POST actions.
+    const d1 = fakeD1();
+    const evil = await registerClient(d1, { redirect_uris: ["https://evil.example/x"], token_endpoint_auth_method: "none" }, new Date());
+    const v = await validateAuthorizeRequest(
+      d1,
+      await authorizeParams(evil.client_id, { redirect_uri: "https://evil.example/x", response_type: "bad" }),
+      ISSUER,
+      noFetch,
+    );
+    expect(v).toMatchObject({ ok: false, fatal: false });
+  });
+
   it("defaults the redirect when exactly one is registered", async () => {
     const d1 = fakeD1();
     const client = await registerClient(d1, { redirect_uris: [CLAUDE_CALLBACK], token_endpoint_auth_method: "none" }, new Date());
@@ -247,6 +346,7 @@ describe("authorize validation", () => {
     params.delete("redirect_uri");
     const v = await validateAuthorizeRequest(d1, params, ISSUER, noFetch);
     expect(v.ok && v.request.redirectUri).toBe(CLAUDE_CALLBACK);
+    expect(v.ok && v.request.redirectUriExplicit).toBe(false);
   });
 });
 
@@ -286,7 +386,12 @@ describe("token endpoint", () => {
     if (!v.ok) throw new Error("authorize failed");
     const freshCode = () => createAuthorizationCode(d1, { request: v.request, userId: "u1", vaultId: "v1", now });
     const deps = { db: d1, now, fetchImpl: noFetch };
-    const base = { grant_type: "authorization_code", client_id: client.client_id, code_verifier: VERIFIER };
+    const base = {
+      grant_type: "authorization_code",
+      client_id: client.client_id,
+      code_verifier: VERIFIER,
+      redirect_uri: CLAUDE_CALLBACK,
+    };
 
     const wrongVerifier = await handleTokenRequest(deps, { ...base, code: await freshCode(), code_verifier: "w".repeat(43) }, null);
     expect(wrongVerifier.body).toMatchObject({ error: "invalid_grant" });
@@ -302,17 +407,82 @@ describe("token endpoint", () => {
     expect(late.body).toMatchObject({ error: "invalid_grant" });
     const noPkce = await handleTokenRequest(deps, { ...base, code: await freshCode(), code_verifier: "" }, null);
     expect(noPkce.body).toMatchObject({ error: "invalid_request" });
-    for (const r of [wrongVerifier, wrongRedirect, otherClient, late, noPkce]) {
+    const noRedirect = await handleTokenRequest(
+      deps,
+      { grant_type: "authorization_code", client_id: client.client_id, code_verifier: VERIFIER, code: await freshCode() },
+      null,
+    );
+    expect(noRedirect.body).toMatchObject({ error: "invalid_request" });
+    for (const r of [wrongVerifier, wrongRedirect, otherClient, late, noPkce, noRedirect]) {
       expect(oauthErrorSchema.safeParse(r.body).success).toBe(true);
     }
+  });
+
+  it("omitting redirect_uri is fine when the authorize request omitted it too", async () => {
+    const d1 = setup();
+    const now = new Date();
+    const client = await registerClient(d1, { redirect_uris: [CLAUDE_CALLBACK], token_endpoint_auth_method: "none" }, now);
+    const params = await authorizeParams(client.client_id);
+    params.delete("redirect_uri");
+    const v = await validateAuthorizeRequest(d1, params, ISSUER, noFetch);
+    if (!v.ok) throw new Error("authorize failed");
+    const code = await createAuthorizationCode(d1, { request: v.request, userId: "u1", vaultId: "v1", now });
+    const res = await handleTokenRequest(
+      { db: d1, now, fetchImpl: noFetch },
+      { grant_type: "authorization_code", code, code_verifier: VERIFIER, client_id: client.client_id },
+      null,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("returns invalid_client, not a 500, for a malformed Basic header", async () => {
+    const d1 = setup();
+    const deps = { db: d1, now: new Date(), fetchImpl: noFetch };
+    for (const header of [`Basic ${btoa("%E0%A4%A:secret")}`, `Basic ${btoa("id:%zz")}`, "Basic !!!not-base64", `Basic ${btoa("nocolon")}`]) {
+      const res = await handleTokenRequest(deps, { grant_type: "authorization_code" }, header);
+      expect(res.status).toBe(401);
+      expect(res.body).toMatchObject({ error: "invalid_client" });
+    }
+  });
+
+  it("a just-rotated refresh token re-presented within 60 s is a race, not theft", async () => {
+    const d1 = setup();
+    const { client, tokens } = await connect(d1);
+    const t0 = Date.now();
+    const at = (ms: number) => ({ db: d1, now: new Date(t0 + ms), fetchImpl: noFetch });
+    const form = { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: client.client_id };
+    const first = await handleTokenRequest(at(0), form, null);
+    const retry = await handleTokenRequest(at(30_000), form, null);
+    expect(first.status).toBe(200);
+    expect(retry.status).toBe(200);
+    const a = first.body as OAuthTokenResponse;
+    const b = retry.body as OAuthTokenResponse;
+    // Both pairs live on the same, still-valid grant.
+    expect((await resolveAccessToken(d1, a.access_token, new Date(t0 + 30_000))).ok).toBe(true);
+    expect((await resolveAccessToken(d1, b.access_token, new Date(t0 + 30_000))).ok).toBe(true);
+    // Past the window, the same token is theft.
+    const late = await handleTokenRequest(at(61_000), form, null);
+    expect(late.body).toMatchObject({ error: "invalid_grant" });
+    expect((await resolveAccessToken(d1, b.access_token, new Date(t0 + 61_000))).ok).toBe(false);
+  });
+
+  it("reads the grace override from env, defaulting to 60 s", async () => {
+    const { refreshGraceFromEnv } = await import("./oauth");
+    expect(refreshGraceFromEnv(undefined)).toBe(60);
+    expect(refreshGraceFromEnv("")).toBe(60);
+    expect(refreshGraceFromEnv("nope")).toBe(60);
+    expect(refreshGraceFromEnv("-1")).toBe(60);
+    expect(refreshGraceFromEnv("3")).toBe(3);
   });
 
   it("rotates refresh tokens and treats reuse as theft", async () => {
     const d1 = setup();
     const { client, tokens } = await connect(d1);
     const deps = { db: d1, now: new Date(), fetchImpl: noFetch };
-    const refresh = (token: string, clientId = client.client_id) =>
-      handleTokenRequest(deps, { grant_type: "refresh_token", refresh_token: token, client_id: clientId }, null);
+    // Reuse is judged a minute later, past the race grace window.
+    const later = { ...deps, now: new Date(deps.now.getTime() + 61_000) };
+    const refresh = (token: string, clientId = client.client_id, d = deps) =>
+      handleTokenRequest(d, { grant_type: "refresh_token", refresh_token: token, client_id: clientId }, null);
 
     const second = await refresh(tokens.refresh_token);
     expect(second.status).toBe(200);
@@ -320,11 +490,11 @@ describe("token endpoint", () => {
     expect(pair.refresh_token).not.toBe(tokens.refresh_token);
     expect((await resolveAccessToken(d1, pair.access_token, new Date())).ok).toBe(true);
 
-    const reuse = await refresh(tokens.refresh_token);
+    const reuse = await refresh(tokens.refresh_token, client.client_id, later);
     expect(reuse.body).toMatchObject({ error: "invalid_grant" });
     // The whole grant is dead, including the pair issued by the rotation.
-    expect((await resolveAccessToken(d1, pair.access_token, new Date())).ok).toBe(false);
-    expect((await refresh(pair.refresh_token)).body).toMatchObject({ error: "invalid_grant" });
+    expect((await resolveAccessToken(d1, pair.access_token, later.now)).ok).toBe(false);
+    expect((await refresh(pair.refresh_token, client.client_id, later)).body).toMatchObject({ error: "invalid_grant" });
   });
 
   it("a refresh token presented by another client fails without burning the grant", async () => {
@@ -354,7 +524,13 @@ describe("token endpoint", () => {
     if (!v.ok) throw new Error("authorize failed");
     const deps = { db: d1, now, fetchImpl: noFetch };
     const code = await createAuthorizationCode(d1, { request: v.request, userId: "u1", vaultId: "v1", now });
-    const form = { grant_type: "authorization_code", code, code_verifier: VERIFIER, client_id: client.client_id };
+    const form = {
+      grant_type: "authorization_code",
+      code,
+      code_verifier: VERIFIER,
+      client_id: client.client_id,
+      redirect_uri: CLAUDE_CALLBACK,
+    };
 
     const missing = await handleTokenRequest(deps, form, null);
     expect(missing.status).toBe(401);

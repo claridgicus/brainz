@@ -78,12 +78,13 @@ import { vaultClient } from "$lib/server/vault-client";
  * document, so a client with a dead or missing token starts (or refreshes)
  * OAuth instead of failing.
  */
-function unauthorized(issuer: string, message: string): Response {
+function unauthorized(issuer: string, message: string, opts: { tokenPresented: boolean }): Response {
   return new Response(JSON.stringify({ error: `unauthorized: ${message}` }), {
     status: 401,
     headers: {
       "content-type": "application/json",
-      "www-authenticate": wwwAuthenticate(issuer, message),
+      // RFC 6750 §3.1: an error code only when a token was actually rejected.
+      "www-authenticate": wwwAuthenticate(issuer, opts.tokenPresented ? { invalidToken: message } : {}),
     },
   });
 }
@@ -135,7 +136,7 @@ const handleMcp: RequestHandler = async (event) => {
     // HTTP 401 OAuth challenge BEFORE the SDK runs. initialize, tools/list and
     // the public tools fall through to the public server.
     if (callsGatedTool(await peekJsonRpc(event.request), PUBLIC_TOOLS)) {
-      return unauthorized(issuer, "Authentication required for this tool");
+      return unauthorized(issuer, "Authentication required for this tool", { tokenPresented: false });
     }
     // Absent auth → public server (signup + sign_in; lists the gated tools).
     // Invalid auth never lands here — it still 401s below.
@@ -188,6 +189,7 @@ const handleMcp: RequestHandler = async (event) => {
       return unauthorized(
         issuer,
         access.reason === "owner_expired" ? WORKSPACE_EXPIRED_MESSAGE : "invalid or expired access token",
+        { tokenPresented: true },
       );
     }
     const vault = vaultClient(platform.env.VAULT_DO, access.vaultId);
@@ -202,7 +204,9 @@ const handleMcp: RequestHandler = async (event) => {
     } catch (err) {
       // Wave G: expired-unclaimed owners get the actionable message, not the
       // generic one. Anything else stays a plain 401.
-      if (err instanceof HttpError && err.status === 401) return unauthorized(issuer, err.message);
+      if (err instanceof HttpError && err.status === 401) {
+        return unauthorized(issuer, err.message, { tokenPresented: true });
+      }
       resolved = null;
     }
     if (!resolved) {
@@ -244,7 +248,9 @@ const handleMcp: RequestHandler = async (event) => {
       }
       // Unknown/rotated/revoked token → the same generic 401 as any bad bearer
       // (no existence leak — a dead public token reads like any invalid key).
-      return unauthorized(issuer, "provide a Bearer bz_ API key or an OAuth access token");
+      return unauthorized(issuer, "provide a Bearer bz_ API key or an OAuth access token", {
+        tokenPresented: true,
+      });
     }
     const vaultId = resolved.vault.id;
     const ownerId = resolved.vault.ownerId;

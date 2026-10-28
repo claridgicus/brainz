@@ -10,7 +10,29 @@ import {
   throttleResponse,
 } from "$lib/server/magic-link-guard";
 import { isCrossSiteFormPost } from "$lib/server/oauth";
+import { gatePasswordSignIn, PASSWORD_SIGN_IN_PATH } from "$lib/server/reviewer-login";
 import { resolveRateLimitIp } from "$lib/server/rate-limit";
+
+/**
+ * Anti-clickjacking (Wave OA): no page of the app is meant to be framed, and
+ * the consent page must never be. Applied to every HTML document.
+ */
+function withFrameProtection(response: Response): Response {
+  if (!(response.headers.get("content-type") ?? "").includes("text/html")) return response;
+  const set = (h: Headers) => {
+    h.set("x-frame-options", "DENY");
+    if (!h.has("content-security-policy")) h.set("content-security-policy", "frame-ancestors 'none'");
+  };
+  try {
+    set(response.headers);
+    return response;
+  } catch {
+    // Immutable headers (e.g. a passed-through fetch response): copy.
+    const copy = new Response(response.body, response);
+    set(copy.headers);
+    return copy;
+  }
+}
 
 /** Extract the email from a magic-link request body without consuming it. */
 async function readMagicLinkEmail(request: Request): Promise<string | null> {
@@ -63,6 +85,25 @@ export const handle: Handle = async ({ event, resolve }) => {
     }
   }
 
+  // Password sign-in is for operator-provisioned reviewer accounts only: the
+  // durable rate limit and the credential allow-list run BEFORE Better Auth,
+  // so random attempts never reach its scrypt (see $lib/server/reviewer-login).
+  if (event.request.method === "POST" && event.url.pathname === PASSWORD_SIGN_IN_PATH) {
+    const email = await readMagicLinkEmail(event.request);
+    if (email) {
+      const resolvedIp = resolveRateLimitIp(
+        event.request.headers.get("cf-connecting-ip"),
+        isProductionEnv(event.platform.env),
+      );
+      if (!resolvedIp.ok) return throttleResponse();
+      const blocked = await gatePasswordSignIn(
+        { db: event.platform.env.DB, guard: guardDepsFromDb(createDb(event.platform.env.DB)) },
+        { email, ip: resolvedIp.ip },
+      );
+      if (blocked) return blocked;
+    }
+  }
+
   // Resolve the cookie session (skip when there are no cookies at all —
   // e.g. bearer-authenticated API/MCP calls).
   if (event.request.headers.get("cookie")) {
@@ -73,5 +114,5 @@ export const handle: Handle = async ({ event, resolve }) => {
     }
   }
 
-  return svelteKitHandler({ event, resolve, auth, building });
+  return withFrameProtection(await svelteKitHandler({ event, resolve, auth, building }));
 };

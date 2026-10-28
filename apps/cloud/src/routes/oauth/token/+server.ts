@@ -6,12 +6,23 @@
  */
 import type { RequestHandler } from "@sveltejs/kit";
 import { requirePlatform } from "$lib/server/api-util";
-import { handleTokenRequest, oauthJson, oauthPreflight, readOAuthForm } from "$lib/server/oauth";
+import {
+  handleTokenRequest,
+  oauthJson,
+  oauthPreflight,
+  readOAuthForm,
+  refreshGraceFromEnv,
+} from "$lib/server/oauth";
 
 export const POST: RequestHandler = async (event) => {
   const platform = requirePlatform(event);
   const result = await handleTokenRequest(
-    { db: platform.env.DB, now: new Date(), fetchImpl: fetch },
+    {
+      db: platform.env.DB,
+      now: new Date(),
+      fetchImpl: fetch,
+      refreshGraceSeconds: refreshGraceFromEnv(platform.env.OAUTH_REFRESH_GRACE_SECONDS),
+    },
     await readOAuthForm(event.request),
     event.request.headers.get("authorization"),
   );

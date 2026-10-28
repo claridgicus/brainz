@@ -191,7 +191,7 @@ async function main() {
   // --local: remote bindings (Workers AI) disabled so no Cloudflare login is
   // needed; the vault degrades to keyword-only search, which we assert.
   // BYOK_ENCRYPTION_KEY: the dream-key round trip needs the secret.
-  const DEV_ARGS = ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", STATE_DIR, "--show-interactive-dev-session=false", "--var", "BYOK_ENCRYPTION_KEY:e2e-byok-secret"];
+  const DEV_ARGS = ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", STATE_DIR, "--show-interactive-dev-session=false", "--var", "BYOK_ENCRYPTION_KEY:e2e-byok-secret", "--var", "OAUTH_REFRESH_GRACE_SECONDS:3"];
   let devLog = "";
   function startDev() {
     // detached → own process group, so stopDev can kill wrangler AND its
@@ -2435,18 +2435,21 @@ async function main() {
     const gated = await rpc({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "search_concepts", arguments: { query: "x" } } });
     const challenge = gated.headers.get("www-authenticate") ?? "";
     step(
-      "unauthenticated gated tools/call → 401 + resource_metadata challenge (not a 200 isError)",
+      "unauthenticated gated tools/call → 401 + resource_metadata challenge, no error code (not a 200 isError)",
       gated.status === 401 &&
         viaProxy(challenge).includes(`resource_metadata="${BASE}/.well-known/oauth-protected-resource/mcp"`) &&
-        challenge.includes('scope="vault"'),
+        challenge.includes('scope="vault"') &&
+        !challenge.includes("error="),
       `status ${gated.status} — ${challenge} — issuer ${issuer}`,
     );
     const publicCall = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "sign_in", arguments: { email: "nobody@example.com" } } });
     step("unauthenticated PUBLIC tool call still answers 200", publicCall.status === 200, `status ${publicCall.status}`);
     const badBearer = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" }, { authorization: `Bearer bzat_${"x".repeat(40)}` });
     step(
-      "a dead OAuth access token → 401 carrying the same challenge",
-      badBearer.status === 401 && (badBearer.headers.get("www-authenticate") ?? "").includes("resource_metadata="),
+      "a dead OAuth access token → 401 carrying the challenge with error=\"invalid_token\"",
+      badBearer.status === 401 &&
+        (badBearer.headers.get("www-authenticate") ?? "").includes("resource_metadata=") &&
+        (badBearer.headers.get("www-authenticate") ?? "").includes('error="invalid_token"'),
       `status ${badBearer.status}`,
     );
 
@@ -2466,6 +2469,15 @@ async function main() {
       jar: new Map(),
     });
     step("wrong reviewer password → 401", reviewerWrong.status === 401, `status ${reviewerWrong.status}`);
+    const notReviewer = await api("POST", "/api/auth/sign-in/email", {
+      body: { email: `not-a-reviewer-${Date.now()}@example.com`, password: "whatever-password-123456" },
+      jar: new Map(),
+    });
+    step(
+      "password sign-in for a non-reviewer email → the generic 401 (gated before Better Auth)",
+      notReviewer.status === 401 && notReviewer.json?.code === "INVALID_EMAIL_OR_PASSWORD",
+      `status ${notReviewer.status} ${notReviewer.text.slice(0, 80)}`,
+    );
     const reviewerVault = await api("POST", "/api/vaults", {
       body: { name: "Reviewer demo", slug: "reviewer-demo" },
       jar: reviewerJar,
@@ -2522,9 +2534,26 @@ async function main() {
     );
     const evilAuthorize = await fetch(`${BASE}/oauth/authorize?${authorizeQs.replace(encodeURIComponent(redirectUri), encodeURIComponent("https://evil.example/cb"))}`, { redirect: "manual" });
     step("an unregistered redirect renders an error page, never redirects", evilAuthorize.status === 200, `status ${evilAuthorize.status}`);
+    const badRequest = await fetch(
+      `${BASE}/oauth/authorize?${authorizeQs.replace("response_type=code", "response_type=token")}`,
+      { redirect: "manual" },
+    );
+    step(
+      "an invalid request from a registered client renders an error page too (no unauthenticated bounce)",
+      badRequest.status === 200 && !badRequest.headers.get("location"),
+      `status ${badRequest.status}`,
+    );
 
     const consent = await fetch(`${BASE}${authorizePath}`, { redirect: "manual", headers: { cookie: cookieHeader(reviewerJar) } });
     const consentHtml = await consent.text();
+    step(
+      "consent page refuses framing (X-Frame-Options + frame-ancestors)",
+      consent.headers.get("x-frame-options") === "DENY" &&
+        (consent.headers.get("content-security-policy") ?? "").includes("frame-ancestors 'none'"),
+      `${consent.headers.get("x-frame-options")} / ${consent.headers.get("content-security-policy")}`,
+    );
+    const loginPage = await fetch(`${BASE}/login`, { redirect: "manual" });
+    step("/login refuses framing", loginPage.headers.get("x-frame-options") === "DENY");
     step(
       "consent page names the client, the redirect host and offers the reviewer's vault",
       consent.status === 200 && consentHtml.includes("E2E Claude Code") && consentHtml.includes("localhost:43117") &&
@@ -2620,8 +2649,13 @@ async function main() {
       rotated.status === 200 && rotated.json?.refresh_token !== live.json?.refresh_token,
       `status ${rotated.status}`,
     );
+    // Grace window (3 s here via OAUTH_REFRESH_GRACE_SECONDS; 60 s in prod):
+    // re-presenting the just-rotated token is a race/retry, not theft.
+    const retried = await tokenCall({ grant_type: "refresh_token", refresh_token: live.json?.refresh_token, client_id: clientId });
+    step("re-presenting the just-rotated refresh token inside the grace window → 200", retried.status === 200, `status ${retried.status}`);
+    await new Promise((r) => setTimeout(r, 4000));
     const reused = await tokenCall({ grant_type: "refresh_token", refresh_token: live.json?.refresh_token, client_id: clientId });
-    step("reusing the rotated refresh token → invalid_grant", reused.status === 400 && reused.json?.error === "invalid_grant", `status ${reused.status}`);
+    step("reusing it after the grace window → invalid_grant", reused.status === 400 && reused.json?.error === "invalid_grant", `status ${reused.status}`);
     const afterTheft = await rpc({ jsonrpc: "2.0", id: 5, method: "tools/list" }, { authorization: `Bearer ${rotated.json?.access_token}` });
     step("…and the whole grant is revoked (newest access token 401s)", afterTheft.status === 401, `status ${afterTheft.status}`);
     const crossSiteRegister = await fetch(`${BASE}/oauth/register`, {

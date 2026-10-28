@@ -3,9 +3,11 @@
  * 2.1 for remote MCP").
  *
  * load:
- * - validates the authorization request ($lib/server/oauth). An unknown client
- *   or unregistered redirect renders `{status: "error"}` and NEVER redirects;
- *   other request errors bounce back to the client's redirect URI.
+ * - validates the authorization request ($lib/server/oauth). ANY invalid
+ *   request renders `{status: "error"}` and NEVER redirects: anyone can
+ *   register a client with their own redirect URI, so bouncing errors from a
+ *   GET would be an open redirector (RFC 9700 §4.11.2). Errors only go back to
+ *   the client from the consent actions, after the user signed in and acted.
  * - no session → 303 to /login?next=<this URL>; every login method returns here.
  * - else `{status: "consent", client, redirectHost, loopback, vaults, params}`:
  *   the vault picker lists the user's member vaults with their role.
@@ -55,8 +57,12 @@ async function validate(event: RequestEvent, params: URLSearchParams): Promise<A
 
 export const load: PageServerLoad = async (event) => {
   const result = await validate(event, event.url.searchParams);
-  if (!result.ok && result.fatal) return { status: "error" as const, message: result.message };
-  if (!result.ok) redirect(303, result.redirectTo);
+  if (!result.ok) {
+    return {
+      status: "error" as const,
+      message: result.fatal ? result.message : bouncedErrorMessage(result.redirectTo),
+    };
+  }
 
   if (!event.locals.user) {
     redirect(303, `/login?next=${encodeURIComponent(event.url.pathname + event.url.search)}`);
@@ -90,6 +96,12 @@ export const load: PageServerLoad = async (event) => {
     params,
   };
 };
+
+/** The human-readable reason carried by a would-be error redirect. */
+function bouncedErrorMessage(redirectTo: string): string {
+  const params = new URL(redirectTo).searchParams;
+  return `The app sent an invalid request (${params.get("error")}: ${params.get("error_description") ?? "no detail"}).`;
+}
 
 /** Rebuild the authorization request from the consent form's hidden inputs. */
 function paramsFrom(form: FormData): URLSearchParams {

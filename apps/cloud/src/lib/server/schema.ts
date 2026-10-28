@@ -367,6 +367,8 @@ export const oauthCode = sqliteTable("oauth_code", {
     .notNull()
     .references(() => vault.id, { onDelete: "cascade" }),
   redirectUri: text("redirect_uri").notNull(),
+  /** 1 when the authorize request carried redirect_uri, so the token request must repeat it. */
+  redirectUriExplicit: integer("redirect_uri_explicit", { mode: "boolean" }).notNull().default(true),
   codeChallenge: text("code_challenge").notNull(),
   scope: text("scope").notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
@@ -412,4 +414,19 @@ export const oauthToken = sqliteTable(
     usedAt: integer("used_at", { mode: "timestamp_ms" }),
   },
   (t) => [index("oauth_token_grant_id").on(t.grantId)],
+);
+
+/**
+ * One row per dynamic client registration, keyed by client IP — the durable
+ * per-IP DCR limit (record-then-count, like signup_events). Anthropic's egress
+ * range is exempt. Rows past the window are purged on registration.
+ */
+export const oauthRegisterEvent = sqliteTable(
+  "oauth_register_events",
+  {
+    id: text("id").primaryKey(),
+    ip: text("ip").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => [index("oauth_register_events_ip_created_at").on(t.ip, t.createdAt)],
 );

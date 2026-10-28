@@ -29,6 +29,8 @@ export interface CloudEnv {
   DREAMING_AI_DISABLED?: string;
   /** Secret the AES-GCM key for stored BYOK dream LLM keys is derived from. */
   BYOK_ENCRYPTION_KEY?: string;
+  /** OAuth refresh-reuse grace window in seconds (default 60; the E2E shortens it). */
+  OAUTH_REFRESH_GRACE_SECONDS?: string;
 }
 
 type Auth = ReturnType<typeof createAuth>;

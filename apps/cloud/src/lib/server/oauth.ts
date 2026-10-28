@@ -55,6 +55,12 @@ export const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 /** Sliding: every rotation issues a fresh 30-day refresh token. */
 export const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 export const AUTHORIZATION_CODE_TTL_SECONDS = 5 * 60;
+/**
+ * A refresh token rotated less than this long ago may be presented again by
+ * the same client (concurrent refreshes, a retry after a timed-out response)
+ * without counting as theft: it gets a fresh pair instead of revoking the grant.
+ */
+export const REFRESH_REUSE_GRACE_SECONDS = 60;
 
 export const ACCESS_TOKEN_PREFIX = "bzat_";
 export const REFRESH_TOKEN_PREFIX = "bzrt_";
@@ -77,6 +83,12 @@ export const OAUTH_PATHS = {
  * hooks.server.ts exempts them from the cross-site form-POST check.
  */
 export const CSRF_EXEMPT_PATHS: ReadonlySet<string> = new Set([OAUTH_PATHS.token, OAUTH_PATHS.revoke]);
+
+/** DCR: registrations per client IP per rolling hour (Anthropic's egress range is exempt). */
+export const REGISTER_RATE_LIMIT = 20;
+const REGISTER_WINDOW_MS = 60 * 60 * 1000;
+/** DCR clients that never obtained a grant are purged after this long. */
+export const UNUSED_CLIENT_TTL_MS = 24 * 60 * 60 * 1000;
 
 const CIMD_TIMEOUT_MS = 5_000;
 const CIMD_MAX_BYTES = 16 * 1024;
@@ -146,14 +158,19 @@ export function authorizationServerMetadata(issuer: string): OAuthAuthorizationS
 
 /**
  * The RFC 6750 challenge every /mcp 401 carries. `resource_metadata` is what
- * makes Claude / ChatGPT start (or refresh) the OAuth flow.
+ * makes Claude / ChatGPT start (or refresh) the OAuth flow. Per RFC 6750 §3.1
+ * the `error` code is sent only when a token WAS presented and rejected
+ * (`invalidToken`); a request with no credentials gets the bare challenge.
  */
-export function wwwAuthenticate(issuer: string, description: string): string {
-  const esc = description.replace(/["\\]/g, "");
-  return (
-    `Bearer error="invalid_token", error_description="${esc}", ` +
-    `resource_metadata="${protectedResourceMetadataUrl(issuer)}", scope="${OAUTH_VAULT_SCOPE}"`
-  );
+export function wwwAuthenticate(issuer: string, opts: { invalidToken?: string } = {}): string {
+  const params = [
+    ...(opts.invalidToken !== undefined
+      ? [`error="invalid_token"`, `error_description="${opts.invalidToken.replace(/["\\]/g, "")}"`]
+      : []),
+    `resource_metadata="${protectedResourceMetadataUrl(issuer)}"`,
+    `scope="${OAUTH_VAULT_SCOPE}"`,
+  ];
+  return `Bearer ${params.join(", ")}`;
 }
 
 // ------------------------------------------------------------ randomness
@@ -260,6 +277,55 @@ export function buildRedirect(redirectUri: string, params: Record<string, string
 
 // ------------------------------------------------------------- clients
 
+/**
+ * Anthropic's published egress range (160.79.104.0/21): Claude registers a
+ * fresh DCR client on every new connection from these few addresses, so they
+ * are exempt from the per-IP registration limit.
+ */
+export function isAnthropicEgress(ip: string): boolean {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!m) return false;
+  const [a, b, c] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  return a === 160 && b === 79 && c >= 104 && c <= 111;
+}
+
+/**
+ * Durable per-IP limit on DCR (record-then-count, like signup_events): true
+ * when this registration should be refused.
+ */
+export async function registrationThrottled(db: OAuthDb, ip: string, now: Date): Promise<boolean> {
+  if (isAnthropicEgress(ip)) return false;
+  await db
+    .prepare(`INSERT INTO oauth_register_events (id, ip, created_at) VALUES (?, ?, ?)`)
+    .bind(crypto.randomUUID(), ip, now.getTime())
+    .run();
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM oauth_register_events WHERE ip = ? AND created_at > ?`)
+    .bind(ip, now.getTime() - REGISTER_WINDOW_MS)
+    .first<{ n: number }>();
+  return (row?.n ?? 0) > REGISTER_RATE_LIMIT;
+}
+
+/**
+ * Housekeeping run alongside registration: drop DCR clients older than
+ * UNUSED_CLIENT_TTL_MS that never obtained a grant (and have no pending code),
+ * plus registration events past the rate window.
+ */
+export async function purgeUnusedClients(db: OAuthDb, now: Date): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM oauth_client WHERE created_at < ?
+         AND NOT EXISTS (SELECT 1 FROM oauth_grant g WHERE g.client_id = oauth_client.client_id)
+         AND NOT EXISTS (SELECT 1 FROM oauth_code c WHERE c.client_id = oauth_client.client_id AND c.expires_at > ?)`,
+    )
+    .bind(now.getTime() - UNUSED_CLIENT_TTL_MS, now.getTime())
+    .run();
+  await db
+    .prepare(`DELETE FROM oauth_register_events WHERE created_at < ?`)
+    .bind(now.getTime() - REGISTER_WINDOW_MS)
+    .run();
+}
+
 export interface ResolvedClient {
   clientId: string;
   kind: "dcr" | "cimd";
@@ -365,10 +431,11 @@ export async function fetchClientMetadataDocument(
       signal: ctrl.signal,
     });
     if (res.status !== 200) return null;
+    if (!/^application\/([\w.+-]*\+)?json\b/i.test(res.headers.get("content-type") ?? "")) return null;
     const declared = Number(res.headers.get("content-length") ?? "0");
     if (declared > CIMD_MAX_BYTES) return null;
-    const text = await res.text();
-    if (text.length > CIMD_MAX_BYTES) return null;
+    const text = await readCapped(res, CIMD_MAX_BYTES);
+    if (text === null) return null;
     const doc = JSON.parse(text) as Record<string, unknown>;
     if (doc.client_id !== clientId) return null;
     const uris = doc.redirect_uris;
@@ -393,6 +460,35 @@ export async function fetchClientMetadataDocument(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Read a response body with a running byte count, cancelling the stream as
+ * soon as it passes `maxBytes` (content-length can be absent or lie, and a
+ * buffered `res.text()` would let a hostile URL exhaust isolate memory).
+ */
+export async function readCapped(res: Response, maxBytes: number): Promise<string | null> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    buf.set(c, off);
+    off += c.byteLength;
+  }
+  return new TextDecoder().decode(buf);
 }
 
 /** Look a client up: a DCR row, else a CIMD URL (fetched). Null when unknown. */
@@ -435,6 +531,8 @@ export async function resolveClient(
 export interface AuthorizeRequest {
   client: ResolvedClient;
   redirectUri: string;
+  /** Did the request carry redirect_uri? Then the token request must repeat it (RFC 6749 §4.1.3). */
+  redirectUriExplicit: boolean;
   codeChallenge: string;
   state: string | undefined;
   scope: string;
@@ -495,7 +593,14 @@ export async function validateAuthorizeRequest(
   }
   return {
     ok: true,
-    request: { client, redirectUri, codeChallenge: challenge, state, scope: OAUTH_VAULT_SCOPE },
+    request: {
+      client,
+      redirectUri,
+      redirectUriExplicit: requested !== null && requested !== "",
+      codeChallenge: challenge,
+      state,
+      scope: OAUTH_VAULT_SCOPE,
+    },
   };
 }
 
@@ -508,8 +613,8 @@ export async function createAuthorizationCode(
   const { request, now } = args;
   await db
     .prepare(
-      `INSERT INTO oauth_code (code_hash, client_id, user_id, vault_id, redirect_uri, code_challenge, scope, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO oauth_code (code_hash, client_id, user_id, vault_id, redirect_uri, redirect_uri_explicit, code_challenge, scope, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       await sha256Hex(code),
@@ -517,6 +622,7 @@ export async function createAuthorizationCode(
       args.userId,
       args.vaultId,
       request.redirectUri,
+      request.redirectUriExplicit ? 1 : 0,
       request.codeChallenge,
       request.scope,
       now.getTime(),
@@ -532,6 +638,14 @@ export interface TokenDeps {
   db: OAuthDb;
   now: Date;
   fetchImpl: FetchLike;
+  /** Override REFRESH_REUSE_GRACE_SECONDS (env OAUTH_REFRESH_GRACE_SECONDS; the E2E shortens it). */
+  refreshGraceSeconds?: number;
+}
+
+/** Parse the OAUTH_REFRESH_GRACE_SECONDS override; falls back to the default. */
+export function refreshGraceFromEnv(raw: string | undefined): number {
+  const n = Number(raw);
+  return raw !== undefined && raw !== "" && Number.isFinite(n) && n >= 0 ? n : REFRESH_REUSE_GRACE_SECONDS;
 }
 
 export interface TokenHttpResult {
@@ -578,12 +692,17 @@ export async function authenticateClient(
     }
     const colon = decoded.indexOf(":");
     if (colon < 0) throw new OAuthError("invalid_client", "malformed Basic authorization header");
-    const basicId = decodeURIComponent(decoded.slice(0, colon));
+    let basicId: string;
+    try {
+      basicId = decodeURIComponent(decoded.slice(0, colon));
+      secret = decodeURIComponent(decoded.slice(colon + 1));
+    } catch {
+      throw new OAuthError("invalid_client", "malformed Basic authorization header");
+    }
     if (clientId && clientId !== basicId) {
       throw new OAuthError("invalid_client", "client_id does not match the Authorization header");
     }
     clientId = basicId;
-    secret = decodeURIComponent(decoded.slice(colon + 1));
   }
   if (!clientId) throw new OAuthError("invalid_client", "client_id is required");
   // CIMD clients are public: the token endpoint needs no fetch for them, the
@@ -653,6 +772,7 @@ interface CodeRow {
   user_id: string;
   vault_id: string;
   redirect_uri: string;
+  redirect_uri_explicit: number;
   code_challenge: string;
   scope: string;
   expires_at: number;
@@ -685,6 +805,12 @@ async function exchangeCode(deps: TokenDeps, client: ResolvedClient, form: Recor
   if (row.expires_at < now.getTime()) throw new OAuthError("invalid_grant", "authorization code expired");
   if (row.client_id !== client.clientId) {
     throw new OAuthError("invalid_grant", "authorization code was issued to another client");
+  }
+  // RFC 6749 §4.1.3: if the authorization request carried redirect_uri, the
+  // token request must repeat it exactly; if it didn't, a supplied value must
+  // still be the one the code was issued for.
+  if (row.redirect_uri_explicit && form.redirect_uri === undefined) {
+    throw new OAuthError("invalid_request", "redirect_uri is required: the authorization request included one");
   }
   if (form.redirect_uri !== undefined && form.redirect_uri !== row.redirect_uri) {
     throw new OAuthError("invalid_grant", "redirect_uri does not match the authorization request");
@@ -732,25 +858,30 @@ async function rotateRefresh(deps: TokenDeps, client: ResolvedClient, form: Reco
   if (!row || row.client_id !== client.clientId) {
     throw new OAuthError("invalid_grant", "refresh token is invalid");
   }
-  if (row.used_at !== null) {
-    // Reuse of a rotated refresh token = probable theft: kill the grant.
-    await revokeGrant(db, row.grant_id, now);
-    throw new OAuthError("invalid_grant", "refresh token was already used; the grant is revoked");
-  }
   if (row.revoked_at !== null) throw new OAuthError("invalid_grant", "the grant was revoked");
   if (row.expires_at < now.getTime()) throw new OAuthError("invalid_grant", "refresh token expired");
   if (!(await memberRoleOf(db, row.vault_id, row.user_id))) {
     await revokeGrant(db, row.grant_id, now);
     throw new OAuthError("invalid_grant", "you no longer have access to that vault");
   }
-  const consumed = await db
-    .prepare(`UPDATE oauth_token SET used_at = ? WHERE token_hash = ? AND used_at IS NULL RETURNING token_hash`)
-    .bind(now.getTime(), tokenHash)
-    .first();
-  if (!consumed) {
+  if (row.used_at !== null) {
+    // Same client, rotated moments ago: a concurrent refresh or a retry after
+    // a lost response, not theft. Answer with a fresh pair (only hashes are
+    // stored, so the earlier pair can't be replayed back verbatim).
+    const grace = deps.refreshGraceSeconds ?? REFRESH_REUSE_GRACE_SECONDS;
+    if (now.getTime() - row.used_at <= grace * 1000) {
+      return issueTokenPair(db, row.grant_id, row.scope, now);
+    }
+    // Reuse of a rotated refresh token outside the window = probable theft.
     await revokeGrant(db, row.grant_id, now);
     throw new OAuthError("invalid_grant", "refresh token was already used; the grant is revoked");
   }
+  // Rotate. If a concurrent refresh of the same token won this UPDATE, that is
+  // the race the grace window exists for, so this caller gets a pair as well.
+  await db
+    .prepare(`UPDATE oauth_token SET used_at = ? WHERE token_hash = ? AND used_at IS NULL`)
+    .bind(now.getTime(), tokenHash)
+    .run();
   return issueTokenPair(db, row.grant_id, row.scope, now);
 }
 

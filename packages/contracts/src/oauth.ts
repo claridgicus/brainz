@@ -56,14 +56,15 @@ export type OAuthAuthorizationServerMetadata = z.infer<typeof oauthAuthorization
 /** RFC 7591 client registration request (the members Brainz honours). */
 export const oauthClientRegistrationRequestSchema = z
   .object({
-    redirect_uris: z.array(z.string().max(2000)).min(1).max(10),
+    // Tight caps: registration is unauthenticated, so every row must stay small.
+    redirect_uris: z.array(z.string().max(512)).min(1).max(5),
     token_endpoint_auth_method: oauthTokenEndpointAuthMethodSchema.optional(),
     grant_types: z.array(z.string()).optional(),
     response_types: z.array(z.string()).optional(),
     client_name: z.string().max(200).optional(),
-    client_uri: z.string().max(2000).optional(),
-    logo_uri: z.string().max(2000).optional(),
-    scope: z.string().max(500).optional(),
+    client_uri: z.string().max(512).optional(),
+    logo_uri: z.string().max(512).optional(),
+    scope: z.string().max(200).optional(),
   })
   .passthrough();
 export type OAuthClientRegistrationRequest = z.infer<typeof oauthClientRegistrationRequestSchema>;
