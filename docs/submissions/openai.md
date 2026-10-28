@@ -24,7 +24,7 @@ No secrets are in this file or in `openai-plugin/`. The reviewer credentials liv
 | # | Item | State | Tracking task |
 |---|---|---|---|
 | 1 | Verify the OpenAI Platform org (business: Plutocracy Pty Ltd, or individual) | **gap** (takes days, start first) | `james-verify-the-openai-platform-organization-for-the-brainz-listing` |
-| 2 | Serve the domain-verification token at `/.well-known/openai-apps-challenge` (it 404s today) | **gap** (blocks connecting the server) | `serve-the-openai-domain-verification-token-at-well-known-openai-apps-challenge` |
+| 2 | Serve the domain-verification token at `/.well-known/openai-apps-challenge` (it 404s today) | **code done, needs deploy + secret** (route returns `OPENAI_APPS_CHALLENGE` as text/plain, 404 while unset) | `serve-the-openai-domain-verification-token-at-well-known-openai-apps-challenge` |
 | 3 | Run the 8 test cases in ChatGPT (developer mode) as the OpenAI reviewer | **gap** (read cases verified over curl) | `james-live-client-tests-claude-ai-claude-code-and-chatgpt-against-production` |
 | 4 | Record and host the demo video; add its URL to `plugin.json` | **gap** | `james-record-and-host-the-openai-review-demo-video` |
 | 5 | No Cloudflare WAF/bot rule blocks ChatGPT's egress | **unknown** | `james-confirm-no-cloudflare-waf-bot-rule-blocks-claude-or-chatgpt-on-brainz-brownmatter-ai` |
@@ -95,7 +95,7 @@ Upload it, choose the verified **Developer identity** (the directory shows that 
 | Scopes | `baseScopes: ["vault"]` |
 | Callback URL | ChatGPT registers its own through DCR, and redirect URIs are matched exactly, so there is no allowlist to maintain. The exact ChatGPT callback is **UNCONFIRMED** in OpenAI's docs. |
 | Server headers | None (public submission rejects nonempty headers) |
-| Domain verification | Portal shows a token → serve it at `https://brainz.brownmatter.ai/.well-known/openai-apps-challenge` as plain text (item 2: route + `wrangler secret put OPENAI_APPS_CHALLENGE`). Parent `brownmatter.ai` is also allowed but is a different worker. |
+| Domain verification | Portal shows a token → serve it at `https://brainz.brownmatter.ai/.well-known/openai-apps-challenge` as plain text (item 2: route is on branch `openai-challenge` and ships with the next deploy; then `wrangler secret put OPENAI_APPS_CHALLENGE`). Parent `brownmatter.ai` is also allowed but is a different worker. |
 | Account used to connect and scan | The OpenAI reviewer account (consent screen → "Brainz demo"), or James's own account with a vault |
 
 Discovery as verified live: PRM at `/.well-known/oauth-protected-resource/mcp`
