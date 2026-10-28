@@ -227,7 +227,11 @@ export async function handleMcpRequest(event: RequestEvent, surface: McpSurface)
       return unauthorized(
         issuer,
         surface,
-        access.reason === "owner_expired" ? WORKSPACE_EXPIRED_MESSAGE : "invalid or expired access token",
+        access.reason === "owner_expired"
+          ? WORKSPACE_EXPIRED_MESSAGE
+          : access.reason === "no_vault"
+            ? "this connection covers all your vaults, and you have none yet: create or join a vault"
+            : "invalid or expired access token",
         { tokenPresented: true },
       );
     }

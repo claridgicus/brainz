@@ -18,13 +18,17 @@
  * - approve: re-validate, check membership on every ticked vault (`vault_id`,
  *   repeatable) or take `all_vaults=on`, mint a single-use code, 303 to
  *   `redirect_uri?code&state&iss`.
+ * - createVault ("+ New vault"): create a vault owned by the user (shared
+ *   $lib/server/vaults code path, same slug rules as POST /api/vaults), then
+ *   303 back here with `tick=<new id>` (plus the earlier ticks) so it is
+ *   pre-ticked. Mints no code.
  * - deny: 303 to `redirect_uri?error=access_denied&state&iss`.
  */
 import { fail, redirect } from "@sveltejs/kit";
-import type { VaultRole } from "@brainz/contracts";
+import { vaultCreateRequestSchema, type VaultRole } from "@brainz/contracts";
 import { asc, eq } from "drizzle-orm";
 import type { Actions, PageServerLoad, RequestEvent } from "./$types";
-import { requirePlatform } from "$lib/server/api-util";
+import { HttpError, requirePlatform } from "$lib/server/api-util";
 import { createDb, schema } from "$lib/server/db";
 import {
   buildRedirect,
@@ -35,6 +39,10 @@ import {
   validateAuthorizeRequest,
   type AuthorizeValidation,
 } from "$lib/server/oauth";
+import { createVault } from "$lib/server/vaults";
+
+/** Vault ids to pre-tick on the consent page (set by the "+ New vault" redirect). */
+const TICK_PARAM = "tick";
 
 /** The authorization-request params carried through the consent form. */
 const PARAM_NAMES = [
@@ -95,9 +103,14 @@ export const load: PageServerLoad = async (event) => {
     const v = event.url.searchParams.get(name);
     if (v !== null) params[name] = v;
   }
+  // Pre-ticked vaults: `tick` (repeatable) after "+ New vault" carries the new
+  // vault plus the earlier selection; else the first vault. Only member vaults.
+  const ticks = new Set(event.url.searchParams.getAll(TICK_PARAM));
+  const preTicked = vaults.filter((v) => ticks.has(v.id)).map((v) => v.id);
   const redirect_ = new URL(request.redirectUri);
   return {
     status: "consent" as const,
+    preTicked: preTicked.length > 0 ? preTicked : vaults.slice(0, 1).map((v) => v.id),
     client: {
       name: request.client.displayName,
       selfAsserted: request.client.selfAsserted,
@@ -164,6 +177,34 @@ export const actions: Actions = {
         iss: issuerFor(platform.env.BETTER_AUTH_URL, event.url.origin),
       }),
     );
+  },
+  // "+ New vault" (SPEC-CLOUD.md "Multi-vault grants"): create a vault the
+  // same way POST /api/vaults does (owner = the session user), then 303 back
+  // to this consent page with it pre-ticked. It never mints a code: the user
+  // still has to Approve. A named form action, so hooks.server.ts's CSRF
+  // re-check applies.
+  createVault: async (event) => {
+    const form = await event.request.formData();
+    const params = paramsFrom(form);
+    const result = await validate(event, params);
+    if (!result.ok && result.fatal) return fail(400, { error: result.message });
+    if (!result.ok) redirect(303, result.redirectTo);
+    const user = event.locals.user;
+    if (!user) return fail(401, { error: "Your session ended. Sign in again and retry." });
+    const parsed = vaultCreateRequestSchema.safeParse({ name: String(form.get("name") ?? "").trim() });
+    if (!parsed.success) return fail(400, { createError: "Give the new vault a name." });
+    let vaultId: string;
+    try {
+      vaultId = (await createVault(createDb(requirePlatform(event).env.DB), user.id, parsed.data)).id;
+    } catch (err) {
+      if (err instanceof HttpError) return fail(err.status, { createError: err.message });
+      throw err;
+    }
+    // Back to consent: the new vault plus whatever was ticked before.
+    for (const id of new Set([vaultId, ...form.getAll(TICK_PARAM).filter((v): v is string => typeof v === "string")])) {
+      params.append(TICK_PARAM, id);
+    }
+    redirect(303, `${event.url.pathname}?${params}`);
   },
   deny: async (event) => {
     const form = await event.request.formData();

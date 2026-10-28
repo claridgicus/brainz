@@ -2608,6 +2608,56 @@ async function main() {
       `status ${consent.status}`,
     );
 
+    // "+ New vault" on the consent page: a named form action (CSRF re-check
+    // applies) that creates the vault via the POST /api/vaults code path and
+    // 303s back to consent with it pre-ticked. It never mints a code.
+    const newVaultForm = new URLSearchParams(authorizeQs);
+    newVaultForm.set("name", "Consent new");
+    newVaultForm.append("tick", reviewerVaultId);
+    const crossSiteNew = await fetch(`${BASE}/oauth/authorize?/createVault`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", origin: "https://evil.example", cookie: cookieHeader(reviewerJar) },
+      body: newVaultForm.toString(),
+    });
+    step("a cross-site POST to + New vault is refused (403)", crossSiteNew.status === 403, `status ${crossSiteNew.status}`);
+    const newVault = await fetch(`${BASE}/oauth/authorize?/createVault`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", origin: BASE, cookie: cookieHeader(reviewerJar) },
+      body: newVaultForm.toString(),
+    });
+    const newVaultLocation = new URL(newVault.headers.get("location") ?? "/x", BASE);
+    const listedAfterNew = await api("GET", "/api/vaults", { jar: reviewerJar });
+    const consentNewVault = (listedAfterNew.json?.vaults ?? []).find((v) => v.slug === "consent-new");
+    step(
+      "+ New vault → creates an owned vault and 303s back to consent (no code) with it and the earlier pick ticked",
+      newVault.status === 303 && newVaultLocation.pathname === "/oauth/authorize" &&
+        !newVaultLocation.searchParams.has("code") && newVaultLocation.searchParams.get("client_id") === clientId &&
+        Boolean(consentNewVault) && consentNewVault.role === "owner" &&
+        newVaultLocation.searchParams.getAll("tick").sort().join() === [consentNewVault?.id, reviewerVaultId].sort().join(),
+      `status ${newVault.status} → ${newVaultLocation.pathname}${newVaultLocation.search.slice(0, 60)}`,
+    );
+    // wrangler dev's proxy rewrites the route host to BASE in response headers,
+    // including the encoded `resource` inside this Location; restore the
+    // discovered value (production has no such proxy).
+    newVaultLocation.searchParams.set("resource", resource);
+    const reConsent = await fetch(newVaultLocation, { redirect: "manual", headers: { cookie: cookieHeader(reviewerJar) } });
+    const reConsentHtml = await reConsent.text();
+    const ticked = (id) => new RegExp(`<input[^>]*value="${id}"[^>]*checked|<input[^>]*checked[^>]*value="${id}"`).test(reConsentHtml);
+    step(
+      "the re-rendered consent lists the new vault, pre-ticked alongside the earlier pick",
+      reConsent.status === 200 && reConsentHtml.includes("Consent new") && ticked(consentNewVault?.id) && ticked(reviewerVaultId),
+      `status ${reConsent.status} listed=${reConsentHtml.includes("Consent new")} new=${ticked(consentNewVault?.id)} earlier=${ticked(reviewerVaultId)}`,
+    );
+    const clash = await fetch(`${BASE}/oauth/authorize?/createVault`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", origin: BASE, cookie: cookieHeader(reviewerJar) },
+      body: newVaultForm.toString(),
+    });
+    step("+ New vault with a taken slug → 409, nothing created, no redirect", clash.status === 409 && !clash.headers.get("location"), `status ${clash.status}`);
+
     const consentForm = new URLSearchParams(authorizeQs);
     consentForm.set("vault_id", reviewerVaultId);
     const crossSite = await fetch(`${BASE}/oauth/authorize?/approve`, {

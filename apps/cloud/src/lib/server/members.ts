@@ -13,9 +13,11 @@
  *   (self-leave). Both blocked when the target is the last owner.
  */
 import type { VaultRole } from "@brainz/contracts";
-import { and, count, eq, inArray } from "drizzle-orm";
+import type { D1Database } from "@cloudflare/workers-types";
+import { and, count, eq } from "drizzle-orm";
 import type { Db } from "./db";
 import { schema } from "./db";
+import { memberRemovalStatements } from "./oauth";
 
 export interface MemberRecord {
   userId: string;
@@ -34,8 +36,11 @@ export interface MembersDb {
   deleteMember(vaultId: string, userId: string): Promise<void>;
 }
 
-/** Wire the members domain to the D1 control plane. */
-export function membersDbFrom(db: Db): MembersDb {
+/**
+ * Wire the members domain to the D1 control plane. `d1` is the raw binding
+ * `db` wraps: member removal runs as one raw D1 batch.
+ */
+export function membersDbFrom(db: Db, d1: D1Database): MembersDb {
   const memberSelect = {
     userId: schema.vaultMember.userId,
     email: schema.user.email,
@@ -83,23 +88,10 @@ export function membersDbFrom(db: Db): MembersDb {
         .where(and(eq(schema.vaultMember.vaultId, vaultId), eq(schema.vaultMember.userId, userId)));
     },
     deleteMember: async (vaultId, userId) => {
-      await db
-        .delete(schema.vaultMember)
-        .where(and(eq(schema.vaultMember.vaultId, vaultId), eq(schema.vaultMember.userId, userId)));
-      // Multi-vault OAuth: drop the vault from the user's ticked grants, so
-      // being re-added later never silently restores a connection's access
-      // (SPEC-CLOUD.md "Multi-vault grants"). "all" grants follow membership.
-      await db
-        .delete(schema.oauthGrantVault)
-        .where(
-          and(
-            eq(schema.oauthGrantVault.vaultId, vaultId),
-            inArray(
-              schema.oauthGrantVault.grantId,
-              db.select({ id: schema.oauthGrant.id }).from(schema.oauthGrant).where(eq(schema.oauthGrant.userId, userId)),
-            ),
-          ),
-        );
+      // One D1 batch (one transaction): the membership AND that vault's place
+      // in the user's OAuth grants go together (SPEC-CLOUD.md "Multi-vault
+      // grants"; oauth.memberRemovalStatements).
+      await d1.batch(memberRemovalStatements(d1, { vaultId, userId, now: new Date() }));
     },
   };
 }

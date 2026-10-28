@@ -302,6 +302,54 @@ lives in `src/lib/server/oauth.ts`, `src/routes/oauth/**` and
   `160.79.104.0/21`. Anthropic fetches discovery, registration and tokens
   from it, with a 10 s timeout.
 
+## Migrations 0013–0014: multi-vault OAuth grants (deploy runbook)
+
+0013 adds `oauth_grant_vault` (backfilled one row per existing grant) and
+`vault_scope`. 0014 **rebuilds `oauth_grant`** so `vault_id` can be NULL
+(an "all my vaults" grant outlives the user's last vault). The rebuild copies
+`oauth_token` and `oauth_grant_vault` aside and restores them, because
+dropping the old table cascades into both. Each migration file is applied
+atomically by D1, so an error leaves the database as it was. These tables
+hold live logins, so check the row counts on both sides. The spec is
+SPEC-CLOUD.md "Multi-vault grants".
+
+1. **Before**: pick a cutoff `T` (epoch ms, a few seconds in the past) and
+   record the counts. Rows created before `T` must all survive; newer rows
+   are live traffic.
+   ```sh
+   T=$(( $(date +%s) * 1000 - 5000 )); echo "T=$T"
+   npx wrangler d1 execute brainz --remote --command "
+     SELECT 'oauth_grant' AS t, COUNT(*) AS n FROM oauth_grant WHERE created_at <= $T
+     UNION ALL SELECT 'oauth_token', COUNT(*) FROM oauth_token WHERE created_at <= $T
+     UNION ALL SELECT 'oauth_code', COUNT(*) FROM oauth_code WHERE created_at <= $T"
+   ```
+2. `npm run db:migrate:remote` (applies 0013 and 0014).
+3. **After**: re-run the same command with the same `T`. Every count must
+   match. A grant or token can only disappear through a vault or user deletion
+   in the window. Also check the join table and the new column:
+   ```sh
+   npx wrangler d1 execute brainz --remote --command "
+     SELECT 'oauth_grant_vault' AS t, COUNT(*) AS n FROM oauth_grant_vault
+     UNION ALL SELECT 'grants without a join row', COUNT(*) FROM oauth_grant g
+       WHERE vault_scope <> 'all' AND NOT EXISTS (SELECT 1 FROM oauth_grant_vault WHERE grant_id = g.id)
+     UNION ALL SELECT 'leftover backup tables', COUNT(*) FROM sqlite_master WHERE name LIKE '\_\_bk%' ESCAPE '\'"
+   ```
+   Expect 0 grants without a join row, give or take grants the old code
+   minted since step 2, and 0 leftover backup tables.
+4. `npm run deploy`.
+5. **After deploy**: re-backfill the grants the old code minted between
+   steps 2 and 4. It is idempotent, so it is safe to run more than once.
+   Those grants already work without it, because a `single` grant with no
+   join row covers its anchor. The re-backfill just makes the row explicit.
+   ```sh
+   npx wrangler d1 execute brainz --remote --command "
+     INSERT OR IGNORE INTO oauth_grant_vault (grant_id, vault_id)
+     SELECT id, vault_id FROM oauth_grant g
+     WHERE vault_scope='single' AND vault_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM oauth_grant_vault WHERE grant_id=g.id)"
+   ```
+   Then re-run step 3's join-table check and expect 0.
+
 ## File map (backend / UI ownership)
 
 Backend-owned (this wave): `wrangler.jsonc` (+`wrangler.dev.jsonc`,

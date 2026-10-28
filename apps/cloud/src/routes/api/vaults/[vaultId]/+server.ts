@@ -10,7 +10,7 @@ import { slugify } from "@brainz/engine";
 import { and, count, eq, ne } from "drizzle-orm";
 import { guarded, HttpError, parseBody, requirePlatform } from "$lib/server/api-util";
 import { createDb, schema } from "$lib/server/db";
-import { reanchorGrantsBeforeVaultDelete } from "$lib/server/oauth";
+import { prepareGrantsForVaultDelete } from "$lib/server/oauth";
 import { requireVaultAccess } from "$lib/server/vault-access";
 import { vaultClient } from "$lib/server/vault-client";
 
@@ -83,9 +83,10 @@ export const DELETE = guarded(async (event) => {
   // Destroy DO storage first, then the control-plane rows (keys, members, and
   // invites cascade with the vault row).
   await vaultClient(platform.env.VAULT_DO, vault.id).destroy();
-  // Multi-vault OAuth grants anchored on this vault move to another vault they
-  // cover first, so only a grant left with nothing cascades away.
-  await reanchorGrantsBeforeVaultDelete(platform.env.DB, vault.id);
+  // OAuth grants anchored on this vault: multi-vault grants move to another
+  // vault they cover; single/selected grants left with nothing are deleted;
+  // an "all" grant left with nothing lives on (anchor → NULL).
+  await prepareGrantsForVaultDelete(platform.env.DB, vault.id);
   await db.delete(schema.vault).where(eq(schema.vault.id, vault.id));
   return new Response(null, { status: 204 });
 });

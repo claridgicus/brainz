@@ -1,15 +1,16 @@
 /**
  * GET/POST /api/vaults (session only).
  * GET lists vaults by MEMBERSHIP (Wave M) with the caller's role + a cheap
- * memberCount; POST creates a vault AND its creator's `owner` member row.
+ * memberCount; POST creates a vault AND its creator's `owner` member row
+ * ($lib/server/vaults, shared with the OAuth consent page's "+ New vault").
  */
 import { json } from "@sveltejs/kit";
 import { vaultCreateRequestSchema, type VaultRole } from "@brainz/contracts";
-import { slugify } from "@brainz/engine";
-import { and, count, eq, inArray } from "drizzle-orm";
-import { guarded, HttpError, parseBody, requirePlatform } from "$lib/server/api-util";
+import { count, eq, inArray } from "drizzle-orm";
+import { guarded, parseBody, requirePlatform } from "$lib/server/api-util";
 import { createDb, schema } from "$lib/server/db";
 import { requireUser } from "$lib/server/vault-access";
+import { createVault } from "$lib/server/vaults";
 
 function toWire(
   v: typeof schema.vault.$inferSelect,
@@ -58,40 +59,6 @@ export const GET = guarded(async (event) => {
 export const POST = guarded(async (event) => {
   const user = requireUser(event);
   const body = await parseBody(event, vaultCreateRequestSchema);
-  const slug = slugify(body.slug ?? body.name);
-  if (!slug) throw new HttpError(400, "could not derive a slug");
-
-  const db = createDb(requirePlatform(event).env.DB);
-  const existing = await db
-    .select({ id: schema.vault.id })
-    .from(schema.vault)
-    .where(and(eq(schema.vault.ownerId, user.id), eq(schema.vault.slug, slug)))
-    .limit(1);
-  if (existing.length > 0) throw new HttpError(409, `a vault with slug "${slug}" already exists`);
-
-  const vault: typeof schema.vault.$inferSelect = {
-    id: crypto.randomUUID(),
-    ownerId: user.id,
-    slug,
-    name: body.name,
-    createdAt: new Date(),
-    onboardedAt: null,
-    lastSyncedAt: null,
-    // New vaults start private; public access is opt-in via settings.
-    publicEnabled: false,
-    publicTokenHash: null,
-    publicCreatedAt: null,
-  };
-  // Vault + creator's owner membership land atomically (one D1 batch).
-  await db.batch([
-    db.insert(schema.vault).values(vault),
-    db.insert(schema.vaultMember).values({
-      id: crypto.randomUUID(),
-      vaultId: vault.id,
-      userId: user.id,
-      role: "owner",
-      createdAt: vault.createdAt,
-    }),
-  ]);
+  const vault = await createVault(createDb(requirePlatform(event).env.DB), user.id, body);
   return json(toWire(vault, "owner", 1), { status: 201 });
 });

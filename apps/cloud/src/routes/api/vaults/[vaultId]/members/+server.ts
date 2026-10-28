@@ -12,7 +12,8 @@ import { requireVaultAccess } from "$lib/server/vault-access";
 
 export const GET = guarded(async (event) => {
   const { vault } = await requireVaultAccess(event, event.params.vaultId!, { sessionOnly: true });
-  const db = membersDbFrom(createDb(requirePlatform(event).env.DB));
+  const d1 = requirePlatform(event).env.DB;
+  const db = membersDbFrom(createDb(d1), d1);
   const members = await db.listMembers(vault.id);
   return json({
     members: members.map((m) => ({

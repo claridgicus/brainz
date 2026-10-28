@@ -5,11 +5,13 @@
 	/**
 	 * OAuth consent (Wave OA). Contract with +page.server.ts:
 	 *   load → { status: "consent", client: {name, selfAsserted}, redirectHost,
-	 *            loopback, userEmail, vaults: [{id, name, role}], params }
+	 *            loopback, userEmail, vaults: [{id, name, role}], preTicked, params }
 	 *        | { status: "error", message }
 	 *   ?/approve (vault_id, repeatable, or all_vaults=on + params) → 303 to the
 	 *            client with a code (multi-vault grants: one connection can
 	 *            cover several vaults, or all of them including later ones)
+	 *   ?/createVault (name + tick, repeatable + params) → 303 back here with the
+	 *            new vault pre-ticked ("+ New vault"); never mints a code
 	 *   ?/deny (params) → 303 to the client with error=access_denied
 	 * Plain (non-enhanced) forms: the browser follows the 303 to the client's
 	 * redirect URI itself, which may be another origin or a loopback port.
@@ -18,10 +20,8 @@
 
 	/** "All my vaults, including ones I create or join later". */
 	let allVaults = $state(false);
-	/** Ticked vault ids; the first vault starts ticked (only the initial data matters). */
-	let picked = $state<string[]>(
-		untrack(() => (data.status === "consent" && data.vaults.length > 0 ? [data.vaults[0].id] : [])),
-	);
+	/** Ticked vault ids, starting from the server's pre-ticks (only the initial data matters). */
+	let picked = $state<string[]>(untrack(() => (data.status === "consent" ? [...data.preTicked] : [])));
 	const scopeText = $derived(
 		allVaults
 			? "all your vaults, including ones you create or join later"
@@ -74,8 +74,7 @@
 		{/if}
 
 		{#if data.vaults.length === 0}
-			<p class="intro muted">You don't have a vault yet. Create one, then connect again.</p>
-			<a href="/dashboard" class="btn btn-primary wide">Create a vault</a>
+			<p class="intro muted">You don't have a vault yet. Create one to connect it.</p>
 		{:else}
 			<form method="POST" action="?/approve">
 				{#each Object.entries(data.params) as [name, value] (name)}
@@ -105,6 +104,21 @@
 				</button>
 			</form>
 		{/if}
+		<!-- "+ New vault": creates the vault and comes back here with it ticked; it never connects by itself. -->
+		<form method="POST" action="?/createVault" class="new-vault">
+			{#each Object.entries(data.params) as [name, value] (name)}
+				<input type="hidden" {name} {value} />
+			{/each}
+			{#each picked as id (id)}
+				<input type="hidden" name="tick" value={id} />
+			{/each}
+			<label class="new-vault-name">
+				<span class="sr-only">New vault name</span>
+				<input type="text" name="name" placeholder="New vault name" maxlength="120" required />
+			</label>
+			<button type="submit" class="btn wide">+ New vault</button>
+			{#if form?.createError}<p class="error-text" role="alert">{form.createError}</p>{/if}
+		</form>
 		<form method="POST" action="?/deny">
 			{#each Object.entries(data.params) as [name, value] (name)}
 				<input type="hidden" {name} {value} />
@@ -208,6 +222,23 @@
 	}
 	form + form {
 		margin-top: 8px;
+	}
+	.new-vault {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.new-vault-name input {
+		width: 100%;
+		box-sizing: border-box;
+	}
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
 	}
 	.fineprint {
 		font-size: 12px;

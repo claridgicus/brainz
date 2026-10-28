@@ -18,7 +18,8 @@ export const PATCH = guarded(async (event) => {
     role: "owner",
   });
   const body = await parseBody(event, memberUpdateRequestSchema);
-  const db = membersDbFrom(createDb(requirePlatform(event).env.DB));
+  const d1 = requirePlatform(event).env.DB;
+  const db = membersDbFrom(createDb(d1), d1);
   const result = await changeMemberRole(db, {
     vaultId: vault.id,
     targetUserId: event.params.userId!,
@@ -42,7 +43,8 @@ export const DELETE = guarded(async (event) => {
     sessionOnly: true,
   });
   const user = requireUser(event);
-  const db = membersDbFrom(createDb(requirePlatform(event).env.DB));
+  const d1 = requirePlatform(event).env.DB;
+  const db = membersDbFrom(createDb(d1), d1);
   const result = await removeMember(db, {
     vaultId: vault.id,
     targetUserId: event.params.userId!,

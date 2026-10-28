@@ -7,7 +7,10 @@ import {
   oauthTokenResponseSchema,
   type OAuthTokenResponse,
 } from "@brainz/contracts";
-import { fakeD1, seedOwner } from "./fake-d1.testutil";
+import type { D1Database } from "@cloudflare/workers-types";
+import type { Db } from "./db";
+import { applyMigration, fakeD1, seedOwner } from "./fake-d1.testutil";
+import { membersDbFrom } from "./members";
 import {
   authorizationServerMetadata,
   callsGatedTool,
@@ -31,7 +34,8 @@ import {
   redirectUriMatches,
   redirectUriProblem,
   registerClient,
-  reanchorGrantsBeforeVaultDelete,
+  memberRemovalStatements,
+  prepareGrantsForVaultDelete,
   resolveAccessToken,
   s256,
   validateAuthorizeRequest,
@@ -43,6 +47,10 @@ import {
 const ISSUER = "https://brainz.example";
 const CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback";
 const VERIFIER = "v".repeat(20) + "-._~" + "A1".repeat(10);
+/** The post-deploy re-backfill in apps/cloud/README.md ("Migrations 0013–0014"), verbatim. */
+const REBACKFILL_SQL =
+  "INSERT OR IGNORE INTO oauth_grant_vault (grant_id, vault_id) SELECT id, vault_id FROM oauth_grant g " +
+  "WHERE vault_scope='single' AND vault_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM oauth_grant_vault WHERE grant_id=g.id)";
 const SINGLE_V1 = { selection: { all: false, vaultIds: ["v1"] }, anchorVaultId: "v1" } as const;
 const noFetch: FetchLike = async () => {
   throw new Error("unexpected fetch");
@@ -903,18 +911,11 @@ describe("multi-vault grants", () => {
     const a = await resolveAccessToken(d1, token, now);
     return a.ok ? a.vaults.map((v) => `${v.id}:${v.role}`) : a.reason;
   };
-  const removeMember = (d1: ReturnType<typeof fakeD1>, vaultId: string, userId: string) => {
-    d1.db.prepare(`DELETE FROM vault_member WHERE vault_id = ? AND user_id = ?`).run(vaultId, userId);
-    // members.ts deleteMember does this too (drizzle); mirrored here in SQL.
-    d1.db
-      .prepare(
-        `DELETE FROM oauth_grant_vault WHERE vault_id = ? AND grant_id IN (SELECT id FROM oauth_grant WHERE user_id = ?)`,
-      )
-      .run(vaultId, userId);
-  };
+  // Exactly what members.ts deleteMember and DELETE /api/vaults/:id run.
+  const removeMember = (d1: ReturnType<typeof fakeD1>, vaultId: string, userId: string) =>
+    d1.batch(memberRemovalStatements(d1, { vaultId, userId, now: new Date() }));
   const deleteVault = async (d1: ReturnType<typeof fakeD1>, vaultId: string) => {
-    d1.db.pragma("foreign_keys = ON");
-    await reanchorGrantsBeforeVaultDelete(d1, vaultId);
+    await prepareGrantsForVaultDelete(d1, vaultId);
     d1.db.prepare(`DELETE FROM vault WHERE id = ?`).run(vaultId);
   };
 
@@ -941,7 +942,7 @@ describe("multi-vault grants", () => {
   it("removing the member drops that vault, and re-adding them does not restore it", async () => {
     const d1 = multiSetup();
     const { tokens } = await connect(d1, new Date(), pick("v1", "v2"));
-    removeMember(d1, "v2", "u1");
+    await removeMember(d1, "v2", "u1");
     expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner"]);
     addMember(d1, "v2", "u1", "editor");
     expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner"]);
@@ -967,7 +968,7 @@ describe("multi-vault grants", () => {
     const { tokens } = await connect(d1, new Date(), ALL);
     expect(await resolveAccessToken(d1, tokens.access_token, new Date())).toMatchObject({ vaultScope: "all" });
     expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner", "v2:viewer", "v3:owner"]);
-    removeMember(d1, "v2", "u1");
+    await removeMember(d1, "v2", "u1");
     expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner", "v3:owner"]);
     seedOwner(d1, "u3", "v4");
     addMember(d1, "v4", "u1", "editor");
@@ -1027,5 +1028,198 @@ describe("multi-vault grants", () => {
     expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner"]);
     d1.db.prepare(`UPDATE user SET expires_at = ? WHERE id = 'u1'`).run(past);
     expect(await ids(d1, tokens.access_token)).toBe("owner_expired");
+  });
+  // ---- review finding 2: deploy window + no resurrection
+  it("a single grant with no join row (minted by the pre-multi-vault code) still covers its anchor", async () => {
+    const d1 = multiSetup();
+    const { client, tokens } = await connect(d1, new Date(), pick("v3"));
+    d1.db.prepare(`DELETE FROM oauth_grant_vault`).run(); // as the old code would have left it
+    expect(await ids(d1, tokens.access_token)).toEqual(["v3:owner"]);
+    const refreshed = await handleTokenRequest(
+      { db: d1, now: new Date(), fetchImpl: noFetch },
+      { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: client.client_id },
+      null,
+    );
+    expect(refreshed.status).toBe(200);
+    // The fallback is still intersected with membership.
+    d1.db.prepare(`DELETE FROM vault_member WHERE vault_id = 'v3'`).run();
+    expect(await ids(d1, (refreshed.body as OAuthTokenResponse).access_token)).toBe("invalid");
+    // A selected grant gets no such fallback.
+    const sel = await connect(d1, new Date(), pick("v1", "v2"));
+    d1.db.prepare(`DELETE FROM oauth_grant_vault`).run();
+    expect(await ids(d1, sel.tokens.access_token)).toBe("invalid");
+  });
+
+  it("the README re-backfill is idempotent and only fills single grants with no row", async () => {
+    const d1 = multiSetup();
+    await connect(d1, new Date(), pick("v3"));
+    await connect(d1, new Date(), pick("v1", "v2"));
+    await connect(d1, new Date(), ALL);
+    const singleId = (d1.db.prepare(`SELECT id FROM oauth_grant WHERE vault_scope = 'single'`).get() as { id: string }).id;
+    d1.db.prepare(`DELETE FROM oauth_grant_vault WHERE grant_id = ?`).run(singleId);
+    const rows = () => d1.db.prepare(`SELECT grant_id, vault_id FROM oauth_grant_vault ORDER BY grant_id, vault_id`).all();
+    const before = rows();
+    for (let i = 0; i < 2; i++) d1.db.prepare(REBACKFILL_SQL).run();
+    const after = rows();
+    expect(after).toHaveLength(before.length + 1);
+    expect(after).toContainEqual({ grant_id: singleId, vault_id: "v3" });
+  });
+
+  it("removing the member revokes a single grant outright, so a re-add can't resurrect it via the fallback", async () => {
+    const d1 = multiSetup();
+    const { client, tokens } = await connect(d1, new Date(), pick("v3"));
+    await removeMember(d1, "v3", "u1");
+    addMember(d1, "v3", "u1", "owner");
+    expect(await ids(d1, tokens.access_token)).toBe("invalid");
+    const refresh = await handleTokenRequest(
+      { db: d1, now: new Date(), fetchImpl: noFetch },
+      { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: client.client_id },
+      null,
+    );
+    expect(refresh.body).toMatchObject({ error: "invalid_grant" });
+  });
+
+  // ---- review finding 3: atomic member removal
+  it("member removal is one batch: a failure leaves the membership AND the grant rows untouched", async () => {
+    const d1 = multiSetup();
+    const { tokens } = await connect(d1, new Date(), pick("v1", "v2"));
+    const failing = d1.prepare(`INSERT INTO vault (id) VALUES (?)`).bind("no-owner"); // NOT NULL fails at run
+    await expect(
+      d1.batch([...memberRemovalStatements(d1, { vaultId: "v2", userId: "u1", now: new Date() }), failing]),
+    ).rejects.toThrow();
+    expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner", "v2:viewer"]);
+    expect(d1.db.prepare(`SELECT COUNT(*) AS n FROM oauth_grant_vault`).get()).toEqual({ n: 2 });
+  });
+
+  it("members.ts deleteMember runs the removal as a single D1 batch", async () => {
+    const d1 = multiSetup();
+    const { tokens } = await connect(d1, new Date(), pick("v1", "v2"));
+    const batches: number[] = [];
+    const spy = { ...d1, batch: async (st: readonly { run(): Promise<unknown> }[]) => (batches.push(st.length), d1.batch(st)) };
+    await membersDbFrom({} as Db, spy as unknown as D1Database).deleteMember("v2", "u1");
+    expect(batches).toEqual([3]);
+    expect(await ids(d1, tokens.access_token)).toEqual(["v1:owner"]);
+    expect(d1.db.prepare(`SELECT COUNT(*) AS n FROM vault_member WHERE vault_id = 'v2' AND user_id = 'u1'`).get()).toEqual({ n: 0 });
+  });
+
+  // ---- review finding 4: an "all" grant outlives the last vault
+  it("an all-vaults grant survives deleting the user's last vault, 401s meanwhile, and recovers", async () => {
+    const d1 = setup(); // u1 owns only v1
+    const { client, tokens } = await connect(d1, new Date(), ALL);
+    await deleteVault(d1, "v1");
+    expect(d1.db.prepare(`SELECT vault_id, revoked_at FROM oauth_grant`).get()).toEqual({ vault_id: null, revoked_at: null });
+    expect(await ids(d1, tokens.access_token)).toBe("no_vault");
+    const refreshed = await handleTokenRequest(
+      { db: d1, now: new Date(), fetchImpl: noFetch },
+      { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: client.client_id },
+      null,
+    );
+    expect(refreshed.status).toBe(200);
+    seedOwner(d1, "u5", "v5");
+    addMember(d1, "v5", "u1", "editor");
+    expect(await ids(d1, (refreshed.body as OAuthTokenResponse).access_token)).toEqual(["v5:editor"]);
+  });
+
+  it("single and selected grants left with nothing are still deleted with the vault", async () => {
+    const d1 = setup();
+    const single = await connect(d1, new Date(), pick("v1"));
+    await deleteVault(d1, "v1");
+    expect(await ids(d1, single.tokens.access_token)).toBe("invalid");
+    expect(d1.db.prepare(`SELECT COUNT(*) AS n FROM oauth_grant`).get()).toEqual({ n: 0 });
+    expect(d1.db.prepare(`SELECT COUNT(*) AS n FROM oauth_token`).get()).toEqual({ n: 0 });
+  });
+});
+
+describe("migration 0014 (nullable oauth_grant anchor) preserves live login data", () => {
+  const TABLES = ["oauth_grant", "oauth_token", "oauth_grant_vault", "oauth_code"] as const;
+  const ORDER: Record<(typeof TABLES)[number], string> = {
+    oauth_grant: "id",
+    oauth_token: "token_hash",
+    oauth_grant_vault: "grant_id, vault_id",
+    oauth_code: "code_hash",
+  };
+
+  /** A 0001–0013 control plane with real grants, rotated token families, join rows and codes. */
+  async function populated0013() {
+    const d1 = fakeD1({ through: 13 });
+    seedOwner(d1, "u1", "v1");
+    addMember(d1, "v1", "u1", "owner");
+    seedOwner(d1, "u2", "v2");
+    addMember(d1, "v2", "u2", "owner");
+    addMember(d1, "v2", "u1", "viewer");
+    const now = new Date();
+    // Live grants (single + selected + all), each with a rotated refresh family.
+    for (const vaults of [SINGLE_V1, { selection: { all: false, vaultIds: ["v1", "v2"] }, anchorVaultId: "v1" }, { selection: { all: true, vaultIds: [] }, anchorVaultId: "v1" }]) {
+      const { client, tokens } = await connect(d1, now, vaults);
+      await handleTokenRequest(
+        { db: d1, now, fetchImpl: noFetch },
+        { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: client.client_id },
+        null,
+      );
+    }
+    // A revoked grant, and an unused code still waiting to be exchanged.
+    const revoked = await connect(d1, now);
+    await handleRevokeRequest({ db: d1, now, fetchImpl: noFetch }, { token: revoked.tokens.access_token, client_id: revoked.client.client_id }, null);
+    const v = await validateAuthorizeRequest(d1, await authorizeParams(revoked.client.client_id), ISSUER, noFetch);
+    if (!v.ok) throw new Error("authorize failed");
+    await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
+    return d1;
+  }
+
+  const dump = (d1: ReturnType<typeof fakeD1>) =>
+    Object.fromEntries(TABLES.map((t) => [t, d1.db.prepare(`SELECT * FROM ${t} ORDER BY ${ORDER[t]}`).all()]));
+  const counts = (d1: ReturnType<typeof fakeD1>) =>
+    Object.fromEntries(TABLES.map((t) => [t, (d1.db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n]));
+
+  it("keeps every grant, token, join row and code, byte for byte", async () => {
+    const d1 = await populated0013();
+    const before = { counts: counts(d1), rows: dump(d1) };
+    expect(before.counts).toEqual({ oauth_grant: 4, oauth_token: 14, oauth_grant_vault: 4, oauth_code: 5 });
+    applyMigration(d1, 14);
+    expect(counts(d1)).toEqual(before.counts);
+    expect(dump(d1)).toEqual(before.rows);
+    expect(d1.db.prepare(`PRAGMA foreign_key_check`).all()).toEqual([]);
+    expect(d1.db.prepare(`SELECT name FROM sqlite_master WHERE name LIKE '\\_\\_%' ESCAPE '\\'`).all()).toEqual([]);
+  });
+
+  it("changes only vault_id's nullability and ON DELETE; every other column, FK and index is unchanged", async () => {
+    const d1 = await populated0013();
+    const shape = () => ({
+      columns: d1.db.prepare(`PRAGMA table_info(oauth_grant)`).all() as { name: string; notnull: number }[],
+      fks: d1.db.prepare(`PRAGMA foreign_key_list(oauth_grant)`).all() as { table: string; from: string; on_delete: string }[],
+      indexes: (d1.db.prepare(`PRAGMA index_list(oauth_grant)`).all() as { name: string; unique: number; origin: string }[])
+        .map(({ name, unique, origin }) => ({ name, unique, origin }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+      childFks: ["oauth_token", "oauth_grant_vault"].map((t) => d1.db.prepare(`PRAGMA foreign_key_list(${t})`).all()),
+    });
+    const before = shape();
+    applyMigration(d1, 14);
+    const after = shape();
+    const vaultCol = (cols: { name: string; notnull: number }[]) => cols.find((c) => c.name === "vault_id");
+    expect(vaultCol(before.columns)?.notnull).toBe(1);
+    expect(vaultCol(after.columns)?.notnull).toBe(0);
+    const others = (cols: { name: string }[]) => cols.filter((c) => c.name !== "vault_id");
+    expect(others(after.columns)).toEqual(others(before.columns));
+    const fk = (fks: { table: string; from: string; on_delete: string }[], from: string) =>
+      fks.filter((f) => f.from === from).map(({ table, on_delete }) => ({ table, on_delete }));
+    expect(fk(before.fks, "vault_id")).toEqual([{ table: "vault", on_delete: "CASCADE" }]);
+    expect(fk(after.fks, "vault_id")).toEqual([{ table: "vault", on_delete: "SET NULL" }]);
+    expect(fk(after.fks, "user_id")).toEqual(fk(before.fks, "user_id"));
+    expect(after.indexes).toEqual(before.indexes);
+    expect(after.childFks).toEqual(before.childFks);
+    // The children still cascade from the rebuilt table.
+    d1.db.prepare(`DELETE FROM oauth_grant`).run();
+    expect(counts(d1)).toMatchObject({ oauth_token: 0, oauth_grant_vault: 0 });
+  });
+
+  it("is atomic: a failure mid-migration leaves the 0013 schema and data untouched", async () => {
+    const d1 = await populated0013();
+    const before = { counts: counts(d1), rows: dump(d1) };
+    d1.db.exec(`CREATE TABLE __bk_oauth_grant_vault (x)`); // makes the second statement fail
+    expect(() => applyMigration(d1, 14)).toThrow();
+    d1.db.exec(`DROP TABLE __bk_oauth_grant_vault`);
+    expect(counts(d1)).toEqual(before.counts);
+    expect(dump(d1)).toEqual(before.rows);
+    expect((d1.db.prepare(`PRAGMA table_info(oauth_grant)`).all() as { name: string; notnull: number }[]).find((c) => c.name === "vault_id")?.notnull).toBe(1);
   });
 });

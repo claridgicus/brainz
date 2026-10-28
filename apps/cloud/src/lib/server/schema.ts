@@ -389,9 +389,10 @@ export const oauthCode = sqliteTable("oauth_code", {
  * - "single": the one `oauth_grant_vault` row (the original Wave OA shape);
  * - "selected": the `oauth_grant_vault` rows (several ticked vaults);
  * - "all": every vault the user is a member of, now or later.
- * `vault_id` is only the ANCHOR row the cascade hangs on: deleting a vault
- * first re-anchors multi-vault grants onto another covered vault
- * (reanchorGrantsBeforeVaultDelete), so only a grant left with nothing dies.
+ * `vault_id` is only the ANCHOR: deleting a vault first re-anchors
+ * multi-vault grants onto another covered vault and deletes "single" /
+ * "selected" grants left with nothing (prepareGrantsForVaultDelete); an "all"
+ * grant left with nothing keeps living with a NULL anchor.
  */
 export const oauthGrant = sqliteTable(
   "oauth_grant",
@@ -401,9 +402,12 @@ export const oauthGrant = sqliteTable(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
-    vaultId: text("vault_id")
-      .notNull()
-      .references(() => vault.id, { onDelete: "cascade" }),
+    /**
+     * The anchor vault. Nullable + SET NULL (migration 0014) so an "all"
+     * grant outlives the user's last vault; "single"/"selected" grants that
+     * can't be re-anchored are deleted explicitly before the vault goes.
+     */
+    vaultId: text("vault_id").references(() => vault.id, { onDelete: "set null" }),
     scope: text("scope").notNull(),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     revokedAt: integer("revoked_at", { mode: "timestamp_ms" }),
