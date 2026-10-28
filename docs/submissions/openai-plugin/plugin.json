@@ -1,0 +1,98 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "brainz",
+  "version": "1.0.0",
+  "description": "Brainz connects ChatGPT to one Brainz vault: a linked graph of a product's features, specs, decisions, constraints and tasks. Search it, assemble a briefing for a task, record what you learn, and work through the vault's task pile.",
+  "author": {
+    "name": "Brownmatter",
+    "email": "support@brownmatter.ai",
+    "url": "https://brownmatter.ai"
+  },
+  "homepage": "https://brownmatter.ai/docs",
+  "keywords": ["knowledge graph", "product knowledge", "specs", "decisions", "tasks", "developer tools"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Brainz",
+        "shortDescription": "Your product knowledge graph",
+        "longDescription": "Brainz keeps a product's knowledge in one place that people and AI agents share: features, user stories, specs, workflows, decisions, constraints, glossary terms and tasks, stored as linked markdown notes in a vault.\n\nWith Brainz connected, you can ask ChatGPT to:\n- Search the vault and open any concept with the notes it links to.\n- Walk the graph around a feature to see what depends on it, what constrains it and which decisions apply.\n- Assemble a briefing on a topic, trimmed to a size you choose, ready to hand to a coding agent or a teammate.\n- Record new knowledge: create or update a concept, link two concepts, or delete one that is wrong.\n- Work the task pile: list open tasks, take one (which returns its briefing), create a task from a finding, and mark one done with an outcome.\n- Read the onboarding and sync playbooks for indexing a codebase into the vault, and run or configure the vault's consolidation sweep.\n\nWho it is for: product engineers, tech leads and teams that run AI coding agents and want every agent and person working from the same product knowledge.\n\nHow it connects: you sign in to Brainz with OAuth and pick one vault on the consent screen. The connection reaches only that vault. Owners and editors get every tool; viewers get the read tools only. Connect again to use a second vault.\n\nLimitations: Brainz cannot read your code repository or files. The onboarding and sync tools return playbooks, and ChatGPT records what you tell it. Brainz never receives your conversation, only the arguments of each tool call. You need a Brainz account and at least one vault; sign up at https://brainz.brownmatter.ai.",
+        "developerName": "Brownmatter",
+        "category": "Developer Tools",
+        "capabilities": [
+          "Search product knowledge",
+          "Assemble task briefings",
+          "Record concepts and decisions",
+          "Manage a task pile"
+        ],
+        "websiteURL": "https://brownmatter.ai",
+        "supportURL": "https://brownmatter.ai/support",
+        "privacyPolicyURL": "https://brownmatter.ai/privacy",
+        "termsOfServiceURL": "https://brownmatter.ai/terms",
+        "defaultPrompt": [
+          "What's in my Brainz vault?",
+          "Brief me from Brainz on the lead scoring work before I start coding.",
+          "List the open tasks in my Brainz vault."
+        ],
+        "brandColor": "#C24D6F",
+        "brandColorDark": "#F58EA8",
+        "composerIcon": "./assets/composer-icon.png",
+        "logo": "./assets/logo.png"
+      },
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "Summarize the connected vault",
+              "prompt": "What's in my Brainz vault?",
+              "tools_triggered": "vault_stats",
+              "expected_behavior": "Reports the demo vault's size (about 31 concepts and 114+ edges), the acme-crm product, and the breakdown by type (domains, features, stories, specs, decisions, constraints, tasks, and so on). Nothing is changed."
+            },
+            {
+              "description": "Find a spec and answer from it",
+              "prompt": "Search Brainz for the lead scoring model and tell me the score tiers.",
+              "tools_triggered": "search_concepts, get_concept",
+              "expected_behavior": "Finds spec-lead-scoring-model and answers from it: hot is 70 or more, warm is 40-69, cold is under 40, and hot leads go to lead routing within 5 minutes. Nothing is changed."
+            },
+            {
+              "description": "Assemble a briefing for a coding task",
+              "prompt": "Use Brainz to brief me on showing sales reps why a lead's score changed, including where in the code the work lands.",
+              "tools_triggered": "get_context",
+              "expected_behavior": "Returns a briefing built from the story 'a rep can see why a lead's score changed', the lead scoring spec, the nightly batch scoring decision and the open task, including the code areas services/scoring/src/history.ts and web/src/routes/leads/[id]/**. Nothing is changed."
+            },
+            {
+              "description": "List open tasks and take one",
+              "prompt": "List the open tasks in my Brainz vault, then take the high-priority one about lead score explanations.",
+              "tools_triggered": "list_tasks, take_task",
+              "expected_behavior": "Lists the four open tasks, then claims task-score-change-explanations (its status becomes taken) and shows its briefing: the story it realizes, the spec that governs it and its code areas."
+            },
+            {
+              "description": "Record a decision and link it",
+              "prompt": "Record a decision in Brainz: we will use PostHog for product analytics because it can self-host in the EU. Link it to lead scoring.",
+              "tools_triggered": "upsert_concept, link_concepts",
+              "expected_behavior": "Creates a decision concept about PostHog for product analytics, giving the EU self-hosting reason, and links it to lead-scoring. The new concept can then be found with search."
+            }
+          ],
+          "negative": [
+            {
+              "description": "Request unrelated to product knowledge. Brainz should not be called: the request has nothing to do with the vault, and ChatGPT should answer without the plugin.",
+              "prompt": "What's the weather in Melbourne tomorrow?"
+            },
+            {
+              "description": "Access outside the connected vault. The OAuth grant covers one vault, and no tool can reach another user's vault. Brainz should not act; ChatGPT should explain that only the connected vault is available and that the colleague would need to share theirs.",
+              "prompt": "Show me what's in my colleague's Brainz vault called finance-brain."
+            },
+            {
+              "description": "Action Brainz cannot perform. Brainz has no tool that sends email or messages. It should not act beyond, at most, reading the spec; ChatGPT should say it can't send email and offer the spec's content to send yourself.",
+              "prompt": "Email the lead scoring spec from Brainz to sales@acme.example."
+            }
+          ]
+        },
+        "commerce": false,
+        "commerce_description": "Brainz does not sell anything or process payments, and no tool shows plans, prices or upgrades."
+      },
+      "publication": {
+        "release_notes": "Initial release: search, read and graph tools over one Brainz vault, briefings for tasks, concept and link editing, the task pile, onboarding and sync playbooks, and the consolidation sweep."
+      }
+    }
+  }
+}
