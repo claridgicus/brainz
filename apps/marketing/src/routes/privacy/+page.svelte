@@ -12,7 +12,7 @@
 
 <Seo {title} {description} path="/privacy" type="article" />
 
-<LegalPage kicker="Legal" heading="Privacy Policy" updated="28 October 2026">
+<LegalPage kicker="Legal" heading="Privacy Policy" updated="29 October 2026">
 	<p>
 		Brainz is a hosted knowledge graph for AI agents, run by Plutocracy Pty Ltd ("Brownmatter",
 		"we"). This policy covers <code>brainz.brownmatter.ai</code> (the dashboard, REST API and the
@@ -146,10 +146,12 @@
 			and refresh tokens after 30 days without use. A connection stops working when the app
 			revokes it, when a refresh token is reused, when you lose access to a vault it covers,
 			or when the vault or your account is deleted, which also deletes its connection records,
-			codes and tokens. We do not yet delete expired or revoked connection records, codes and
-			tokens automatically. Apps that registered automatically are deleted after 30 days if
-			they have no connection and have not been used on the consent screen. OAuth registration
-			rate-limit records are deleted after an hour.
+			codes and tokens. Once a day we delete authorization codes a day after they expire,
+			expired tokens, and the tokens of a revoked connection. A revoked connection's record is
+			deleted 30 days after it was revoked, and a connection whose last refresh token has expired
+			is deleted at the next daily run. Apps that registered automatically are deleted after 30
+			days if they have no connection and have not been used on the consent screen. OAuth
+			registration rate-limit records are deleted after an hour.
 		</li>
 		<li>Deleted data can remain in Cloudflare's point-in-time recovery for up to 30 days.</li>
 	</ul>
@@ -181,6 +183,10 @@
 		above.
 	</p>
 	<ul>
+		<li>
+			<strong>29 October 2026:</strong> expired and revoked connected-app codes, tokens and
+			connection records are now deleted automatically.
+		</li>
 		<li>
 			<strong>28 October 2026:</strong> added what we store when you connect an app such as
 			Claude or ChatGPT with OAuth, how long we keep it, and that connected apps send us only

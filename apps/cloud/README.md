@@ -43,8 +43,11 @@ create a vault, point any orchestrator at `https://brainz.brownmatter.ai/mcp`.
 exports — and DO classes must be exported from the entrypoint. So
 `npm run build` = `vite build` + `scripts/patch-worker.mjs`, which appends
 `export { VaultDO } from "../../src/lib/server/vault-do.ts"` to the generated
-worker; wrangler's esbuild compiles it in at dev/deploy time. **Always build
-via `npm run build`** (the `preview`/`deploy` scripts do).
+worker; wrangler's esbuild compiles it in at dev/deploy time. The adapter's
+default export only has `fetch`, so the same script also attaches the cron
+`scheduled` handler (`src/lib/server/scheduled.ts`, triggered by
+`triggers.crons` in `wrangler.jsonc`) to it. **Always build via
+`npm run build`** (the `preview`/`deploy` scripts do).
 
 ## Commands
 
@@ -294,6 +297,11 @@ lives in `src/lib/server/oauth.ts`, `src/routes/oauth/**` and
   failed sign-ins per hour and lock the reviewer out. No inbox is needed.
   Re-run with `--email <that address>` to rotate the password. Users can't create password
   accounts (`disableSignUp`).
+- **Housekeeping.** A daily cron (04:23 UTC) deletes expired codes and
+  tokens, revoked grants after 30 days, grants whose last refresh token
+  expired, and idle grantless DCR clients (SPEC-CLOUD.md "Housekeeping
+  cron"). Fire it locally with `npx wrangler dev --test-scheduled`, then
+  `curl "http://127.0.0.1:8787/__scheduled?cron=23+4+*+*+*"`.
 - **Before submitting**, refresh the OpenAI egress snapshot (exempts ChatGPT's
   client registrations from the DCR limit): `node scripts/refresh-openai-egress.mjs`
   (source: https://openai.com/chatgpt-connectors.json).

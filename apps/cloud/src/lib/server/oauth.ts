@@ -105,6 +105,16 @@ const REGISTER_WINDOW_MS = 60 * 60 * 1000;
  * Long, because native clients such as Claude Code cache their client_id.
  */
 export const UNUSED_CLIENT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** Codes are kept this long past expiry (a late replay still finds and revokes its grant). */
+export const EXPIRED_CODE_RETENTION_MS = 24 * 60 * 60 * 1000;
+/** Revoked grants are kept this long, so their DCR client survives a reconnect. */
+export const REVOKED_GRANT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+/**
+ * A live grant left with no token this long after creation is dead (its last
+ * refresh token expired). The margin covers the code exchange, which inserts
+ * the grant before its first token pair.
+ */
+const TOKENLESS_GRANT_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 
 const CIMD_TIMEOUT_MS = 5_000;
 const CIMD_MAX_BYTES = 16 * 1024;
@@ -402,6 +412,38 @@ export async function purgeUnusedClients(db: OAuthDb, now: Date): Promise<void> 
     .prepare(`DELETE FROM oauth_register_events WHERE created_at < ?`)
     .bind(now.getTime() - REGISTER_WINDOW_MS)
     .run();
+}
+
+/**
+ * The daily OAuth purge (Worker cron, see $lib/server/scheduled). In order:
+ * codes a day past expiry; expired tokens and every token of a revoked grant;
+ * grants revoked over REVOKED_GRANT_RETENTION_MS ago and live grants with no
+ * token left; then purgeUnusedClients, which now sees those grants gone.
+ * Superseded-but-unexpired tokens stay: presenting one is reuse and must
+ * still revoke its grant. Each statement is idempotent, so a run cut short
+ * is finished by the next one.
+ */
+export async function purgeExpiredOAuthState(db: OAuthDb, now: Date): Promise<void> {
+  const t = now.getTime();
+  await db.prepare(`DELETE FROM oauth_code WHERE expires_at < ?`).bind(t - EXPIRED_CODE_RETENTION_MS).run();
+  await db
+    .prepare(
+      `DELETE FROM oauth_token WHERE expires_at < ?
+         OR grant_id IN (SELECT id FROM oauth_grant WHERE revoked_at IS NOT NULL)`,
+    )
+    .bind(t)
+    .run();
+  // Dead grants: revoked long enough ago, or live but tokenless. Join rows and
+  // tokens are deleted explicitly rather than trusting the FK cascade.
+  const dead = `SELECT id FROM oauth_grant
+    WHERE (revoked_at IS NOT NULL AND revoked_at < ?)
+       OR (revoked_at IS NULL AND created_at < ?
+           AND NOT EXISTS (SELECT 1 FROM oauth_token tk WHERE tk.grant_id = oauth_grant.id))`;
+  const deadBounds = [t - REVOKED_GRANT_RETENTION_MS, t - TOKENLESS_GRANT_MIN_AGE_MS];
+  await db.prepare(`DELETE FROM oauth_grant_vault WHERE grant_id IN (${dead})`).bind(...deadBounds).run();
+  await db.prepare(`DELETE FROM oauth_token WHERE grant_id IN (${dead})`).bind(...deadBounds).run();
+  await db.prepare(`DELETE FROM oauth_grant WHERE id IN (${dead})`).bind(...deadBounds).run();
+  await purgeUnusedClients(db, now);
 }
 
 export interface ResolvedClient {

@@ -49,5 +49,9 @@
   // ("workers-ai" | "all") only to force it from config. BYOK_ENCRYPTION_KEY
   // is a secret: wrangler secret put BYOK_ENCRYPTION_KEY.
   "vars": { "DREAM_DAILY_USD_PER_ACCOUNT": "1" },
+  // Daily housekeeping (src/lib/server/scheduled.ts): purges expired/revoked
+  // OAuth codes, tokens and grants and idle DCR clients. The `scheduled`
+  // handler is attached by scripts/patch-worker.mjs.
+  "triggers": { "crons": ["23 4 * * *"] },
   "observability": { "enabled": true }
 }

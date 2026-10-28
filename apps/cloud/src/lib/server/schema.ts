@@ -437,7 +437,8 @@ export const oauthGrantVault = sqliteTable(
 /**
  * Access (`bzat_`) and refresh (`bzrt_`) tokens, SHA-256 hashed. A refresh
  * token's `used_at` is stamped when it rotates; presenting it again revokes
- * the grant (reuse detection).
+ * the grant (reuse detection). The daily cron deletes expired tokens and
+ * those of revoked grants, then dead grants (oauth.purgeExpiredOAuthState).
  */
 export const oauthToken = sqliteTable(
   "oauth_token",

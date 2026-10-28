@@ -24,6 +24,7 @@ import {
   isOpenAiEgress,
   supersedeChildren,
   isCrossSiteFormPost,
+  purgeExpiredOAuthState,
   purgeUnusedClients,
   REGISTER_GLOBAL_LIMIT,
   REGISTER_RATE_LIMIT,
@@ -267,6 +268,82 @@ describe("dynamic client registration", () => {
       expect(await registrationThrottled(d1, "100.31.168.162", now)).toBe(false);
     }
     expect(d1.db.prepare(`SELECT COUNT(*) AS n FROM oauth_register_events`).get()).toEqual({ n: 0 });
+  });
+
+  it("daily purge drops expired codes and tokens, dead grants and their idle clients", async () => {
+    const d1 = setup();
+    const day = 24 * 60 * 60 * 1000;
+    const now = new Date();
+    const ago = (days: number) => new Date(now.getTime() - days * day);
+    const grantOf = (clientId: string) =>
+      (d1.db.prepare(`SELECT id FROM oauth_grant WHERE client_id = ?`).get(clientId) as { id: string }).id;
+    const revoke = (clientId: string, when: Date) =>
+      d1.db.prepare(`UPDATE oauth_grant SET revoked_at = ? WHERE client_id = ?`).run(when.getTime(), clientId);
+    const count = (sql: string, ...args: unknown[]) => (d1.db.prepare(sql).get(...args) as { n: number }).n;
+
+    // Live, and refreshed once: the rotated (used, unexpired) refresh token stays for reuse detection.
+    const live = await connect(d1, ago(2));
+    const liveGrant = grantOf(live.client.client_id);
+    const rotated = await handleTokenRequest(
+      { db: d1, now: ago(1), fetchImpl: noFetch },
+      { grant_type: "refresh_token", refresh_token: live.tokens.refresh_token, client_id: live.client.client_id },
+      null,
+    );
+    // Abandoned: its last refresh token expired 10 days ago, so the grant is tokenless.
+    const abandoned = await connect(d1, ago(40));
+    const abandonedGrant = grantOf(abandoned.client.client_id);
+    // Revoked recently: tokens go, grant and client stay (30-day retention).
+    const recent = await connect(d1, ago(5));
+    revoke(recent.client.client_id, ago(4));
+    // Revoked long ago: grant goes, then its idle client.
+    const old = await connect(d1, ago(50));
+    revoke(old.client.client_id, ago(35));
+    const oldGrant = grantOf(old.client.client_id);
+    // Codes: one a day past expiry, one just expired.
+    const code = (hash: string, expires: Date) =>
+      d1.db
+        .prepare(
+          `INSERT INTO oauth_code (code_hash, client_id, user_id, vault_id, redirect_uri, code_challenge, scope, created_at, expires_at)
+           VALUES (?, 'bzc_x', 'u1', 'v1', ?, 'c', 'vault', ?, ?)`,
+        )
+        .run(hash, CLAUDE_CALLBACK, expires.getTime() - 5 * 60 * 1000, expires.getTime());
+    code("stale-code", ago(2));
+    code("fresh-code", new Date(now.getTime() - 60 * 60 * 1000));
+
+    await purgeExpiredOAuthState(d1, now);
+
+    // Both 1-hour access tokens are gone; the rotated and the current refresh token stay.
+    expect(d1.db.prepare(`SELECT kind, used_at IS NOT NULL AS used FROM oauth_token WHERE grant_id = ? ORDER BY used`).all(liveGrant)).toEqual([
+      { kind: "refresh", used: 0 },
+      { kind: "refresh", used: 1 },
+    ]);
+    expect(count(`SELECT COUNT(*) AS n FROM oauth_token WHERE expires_at < ?`, now.getTime())).toBe(0);
+    const grants = (d1.db.prepare(`SELECT id FROM oauth_grant`).all() as { id: string }[]).map((r) => r.id);
+    expect(grants).toContain(liveGrant);
+    expect(grants).toContain(grantOf(recent.client.client_id));
+    expect(grants).not.toContain(abandonedGrant);
+    expect(grants).not.toContain(oldGrant);
+    expect(count(`SELECT COUNT(*) AS n FROM oauth_token WHERE grant_id = ?`, grantOf(recent.client.client_id))).toBe(0);
+    expect(count(`SELECT COUNT(*) AS n FROM oauth_grant_vault WHERE grant_id IN (?, ?)`, abandonedGrant, oldGrant)).toBe(0);
+    const clients = (d1.db.prepare(`SELECT client_id FROM oauth_client`).all() as { client_id: string }[]).map(
+      (r) => r.client_id,
+    );
+    expect(clients).toContain(live.client.client_id);
+    expect(clients).toContain(recent.client.client_id);
+    expect(clients).not.toContain(abandoned.client.client_id);
+    expect(clients).not.toContain(old.client.client_id);
+    const codes = (d1.db.prepare(`SELECT code_hash FROM oauth_code`).all() as { code_hash: string }[]).map(
+      (r) => r.code_hash,
+    );
+    expect(codes).toContain("fresh-code");
+    expect(codes).not.toContain("stale-code");
+    // The live connection still refreshes after the purge.
+    const refreshed = await handleTokenRequest(
+      { db: d1, now, fetchImpl: noFetch },
+      { grant_type: "refresh_token", refresh_token: (rotated.body as OAuthTokenResponse).refresh_token, client_id: live.client.client_id },
+      null,
+    );
+    expect(refreshed.status).toBe(200);
   });
 
   it("matches IPv4 and IPv6 CIDRs", () => {
