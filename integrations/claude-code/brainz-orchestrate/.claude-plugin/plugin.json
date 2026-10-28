@@ -1,0 +1,9 @@
+{
+  "name": "brainz-orchestrate",
+  "version": "0.1.0",
+  "description": "Run one Claude Code session as an orchestrator over a Brainz task pile: each task becomes a Claude worker in its own git worktree (a tmux window), heavy steps are throttled, branches are reviewed and landed as PRs or fast-forward pushes.",
+  "author": { "name": "Brownmatter", "url": "https://brownmatter.ai" },
+  "homepage": "https://github.com/claridgicus/brainz/tree/main/integrations/claude-code/brainz-orchestrate",
+  "license": "MIT",
+  "keywords": ["brainz", "orchestration", "worktree", "multi-agent", "tmux"]
+}

@@ -4,7 +4,7 @@
  *
  * `npm run test:all` (repo root) runs, in order:
  *   1. typecheck        — tsc/svelte-check across every workspace
- *   2. unit tests       — vitest for packages/* and apps/cloud
+ *   2. unit tests       — vitest for packages/* and apps/cloud, node:test for integrations/
  *   3. svelte-check     — apps/cloud + apps/marketing `check` scripts
  *   4. build            — every workspace (cloud: vite build + DO patch)
  *   5. marketing check  — scripts/check-build.mjs over the fresh build
@@ -57,6 +57,11 @@ const FULL_STEPS = [
       "-w", "@brainz/web",
       "-w", "@brainz/cloud",
     ],
+  },
+  {
+    name: "integration tests (Claude Code plugin script)",
+    cmd: "npm",
+    args: ["run", "test:integrations"],
   },
   {
     // apps/cloud's svelte-check already ran in step 1 (its `typecheck` IS

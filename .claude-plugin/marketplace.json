@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "brainz",
+  "owner": { "name": "Brownmatter", "url": "https://brownmatter.ai" },
+  "metadata": { "description": "Claude Code plugins for Brainz, the shared product-knowledge graph for agent fleets." },
+  "plugins": [
+    {
+      "name": "brainz-orchestrate",
+      "source": "./integrations/claude-code/brainz-orchestrate",
+      "description": "Orchestrate Claude workers over a Brainz task pile: one git worktree and tmux window per task, a heavy-step queue, review and landing as PRs or fast-forward pushes.",
+      "category": "development"
+    }
+  ]
+}

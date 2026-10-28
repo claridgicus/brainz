@@ -12,8 +12,9 @@
   },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "test": "npm test --workspaces --if-present",
+    "test": "npm test --workspaces --if-present && npm run test:integrations",
     "test:all": "node scripts/test-all.mjs",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test:integrations": "node --test integrations/claude-code/brainz-orchestrate/test/brainz-orch.test.mjs"
   }
 }
