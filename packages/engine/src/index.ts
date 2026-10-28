@@ -48,6 +48,8 @@ export {
 } from "./sync.js";
 export type { SyncPlaybookOptions } from "./sync.js";
 
+export { TASK_COMPLETE_NOTICE, TASK_COMPLETE_REMINDER } from "./tasks.js";
+
 export {
   DEFAULT_MCP_SERVER_NAME,
   SESSION_BLOCK_END,

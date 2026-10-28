@@ -28,6 +28,7 @@ import {
   ONBOARDING_SUMMARY_ID,
   SYNC_STALENESS_NOTICE,
   SYNC_STALENESS_NUDGE,
+  TASK_COMPLETE_NOTICE,
   computeCoverage,
   isSyncStale,
   onboardingPlaybook,
@@ -115,9 +116,9 @@ export interface McpServerHooks {
    */
   exclude?: readonly McpToolName[];
   /**
-   * How the onboarding/staleness notice on search_concepts and get_context
-   * reads. "directive" (the default, `bz_` keys) names the onboard/sync tool
-   * to call; "neutral" (directory surfaces: OAuth and public-vault
+   * How the onboarding/staleness notice on search_concepts and get_context,
+   * and the `reminder` on complete_task, read. "directive" (the default, `bz_`
+   * keys) names the tool to call; "neutral" (directory surfaces: OAuth and public-vault
    * connections) states the fact only, because directory review rejects
    * results that tell the model to call a tool the user didn't ask for.
    */
@@ -592,7 +593,9 @@ function vaultToolHandlers(vault: VaultClient, hooks: McpServerHooks): ToolHandl
       guarded(async () => {
         try {
           const result = await vault.completeTask({ id, outcome });
-          return ok(result);
+          // The VaultDO's reminder is the directive one; directory surfaces
+          // get the neutral wording (hooks.notices).
+          return ok(neutral ? { ...result, reminder: TASK_COMPLETE_NOTICE } : result);
         } catch (err) {
           if (err instanceof VaultDoError) return fail(err.message);
           throw err;

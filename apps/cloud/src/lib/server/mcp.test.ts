@@ -29,6 +29,8 @@ import {
   ONBOARDING_SUMMARY_ID,
   SYNC_STALENESS_NOTICE,
   SYNC_STALENESS_NUDGE,
+  TASK_COMPLETE_NOTICE,
+  TASK_COMPLETE_REMINDER,
 } from "@brainz/engine";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -261,7 +263,7 @@ function fakeVault(): FakeVault {
       target.taskStatus = "done";
       target.doneAt = "2026-02-02T00:00:00.000Z";
       target.body = `${target.body}\n## Outcome\n\n${args.outcome}\n`;
-      return { task: taskMeta(target), reminder: "index what changed via upsert_concept" };
+      return { task: taskMeta(target), reminder: TASK_COMPLETE_REMINDER };
     },
     reopenTask: async (args) => {
       const target = state.tasks.find((t) => t.id === args.id);
@@ -479,7 +481,7 @@ describe("task tools", () => {
     });
     const payload = JSON.parse(textBlocks(result)[0]);
     expect(payload.task.taskStatus).toBe("done");
-    expect(payload.reminder).toContain("upsert_concept");
+    expect(payload.reminder).toBe(TASK_COMPLETE_REMINDER);
     expect(getMcpTool("complete_task").outputSchema.safeParse(payload).success).toBe(true);
   });
 
@@ -1018,6 +1020,18 @@ describe("directory surfaces get neutral notices", () => {
     expect(got.ctx.startsWith(ONBOARDING_NOTICE)).toBe(true);
   });
 
+  it("notices: neutral swaps complete_task's reminder for the neutral wording", async () => {
+    const client = await connect(fakeVault(), { notices: "neutral" });
+    const result = await client.callTool({
+      name: "complete_task",
+      arguments: { id: "task-a", outcome: "Shipped it." },
+    });
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(payload.task.taskStatus).toBe("done");
+    expect(payload.reminder).toBe(TASK_COMPLETE_NOTICE);
+    expect(getMcpTool("complete_task").outputSchema.safeParse(payload).success).toBe(true);
+  });
+
   it("multi-vault OAuth connections are neutral", async () => {
     const server = buildMultiVaultMcpServer({
       vaults: [{ id: "id-alpha", slug: "alpha", name: "Alpha", role: "owner" }],
@@ -1031,6 +1045,11 @@ describe("directory surfaces get neutral notices", () => {
       arguments: { vault: "alpha", query: "x" },
     });
     expect(JSON.parse(textBlocks(search)[0]).notice).toBe(ONBOARDING_NOTICE);
+    const done = await client.callTool({
+      name: "complete_task",
+      arguments: { vault: "alpha", id: "task-a", outcome: "Shipped it." },
+    });
+    expect(JSON.parse(textBlocks(done)[0]).reminder).toBe(TASK_COMPLETE_NOTICE);
   });
 });
 

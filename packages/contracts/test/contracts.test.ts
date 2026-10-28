@@ -5,6 +5,8 @@ import {
   ONBOARDING_NUDGE,
   SYNC_STALENESS_NOTICE,
   SYNC_STALENESS_NUDGE,
+  TASK_COMPLETE_NOTICE,
+  TASK_COMPLETE_REMINDER,
 } from "@brainz/engine";
 import {
   BUILTIN_CONCEPT_TYPES,
@@ -786,14 +788,25 @@ describe("directory surfaces", () => {
   // Anthropic rejects results that "instruct Claude to call external software
   // or tools the user didn't request". Cloud OAuth and public-vault connections
   // send the neutral notices; the directive nudges stay on bz_ keys and stdio.
+  // complete_task's `reminder` follows the same split.
   it("directory notices state the fact without telling the model to call a tool", () => {
-    const callsATool = [/\bcall\b/i, /\brun\b/i, /\{"action"/, /\bthe (onboard|sync) tool\b/i];
-    for (const notice of [ONBOARDING_NOTICE, SYNC_STALENESS_NOTICE]) {
+    const callsATool = [
+      /\bcall\b/i,
+      /\brun\b/i,
+      /\{"action"/,
+      /\bthe (onboard|sync) tool\b/i,
+      /\bnow (index|do|call|run|use)\b/i,
+      // Naming any tool reads as "go call it".
+      ...[...MCP_TOOL_NAMES, ...CLOUD_MCP_TOOL_NAMES].map(
+        (name) => new RegExp(`\\b${name}\\b`),
+      ),
+    ];
+    for (const notice of [ONBOARDING_NOTICE, SYNC_STALENESS_NOTICE, TASK_COMPLETE_NOTICE]) {
       expect(notice).not.toContain("\n");
       for (const re of callsATool) expect(notice).not.toMatch(re);
     }
     // The lint bites: each directive nudge trips it.
-    for (const nudge of [ONBOARDING_NUDGE, SYNC_STALENESS_NUDGE]) {
+    for (const nudge of [ONBOARDING_NUDGE, SYNC_STALENESS_NUDGE, TASK_COMPLETE_REMINDER]) {
       expect(callsATool.some((re) => re.test(nudge))).toBe(true);
     }
   });

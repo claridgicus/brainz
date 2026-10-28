@@ -931,7 +931,8 @@ export const MCP_TOOLS = [
     title: "Complete a task",
     description:
       "Mark a task done. Sets taskStatus=done + doneAt and appends `outcome` to the task body as an " +
-      "Outcome section. The result notes that upsert_concept can record what changed.",
+      "Outcome section. The result carries a one-line `reminder` that the rest of the graph is not " +
+        "updated automatically.",
     inputSchema: completeTaskInputSchema,
     outputSchema: completeTaskOutputSchema,
     annotations: ADDITIVE_WRITE_TOOL,

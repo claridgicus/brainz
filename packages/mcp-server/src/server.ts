@@ -18,6 +18,7 @@ import {
   sessionHookPlaybook,
   sessionInstructions,
   syncPlaybook,
+  TASK_COMPLETE_REMINDER,
   type ConceptMeta,
   type DreamLlm,
   type Vault,
@@ -630,8 +631,7 @@ export function createServer(vault: Vault, options: CreateServerOptions = {}): M
             ...(saved.createdAt !== undefined ? { createdAt: saved.createdAt } : {}),
             ...(saved.updatedAt !== undefined ? { updatedAt: saved.updatedAt } : {}),
           },
-          reminder:
-            "Task complete. Now index what changed via upsert_concept so the knowledge graph stays true to the codebase — new/updated features, specs, decisions, and constraints.",
+          reminder: TASK_COMPLETE_REMINDER,
         });
       }),
 

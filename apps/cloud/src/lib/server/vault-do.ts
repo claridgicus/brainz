@@ -39,6 +39,7 @@ import {
   rrfFuse,
   slugify,
   startSweep,
+  TASK_COMPLETE_REMINDER,
   unpackVector,
 } from "@brainz/engine";
 import type {
@@ -1122,8 +1123,7 @@ export class VaultDO {
         ...(meta.createdAt !== undefined ? { createdAt: meta.createdAt } : {}),
         ...(meta.updatedAt !== undefined ? { updatedAt: meta.updatedAt } : {}),
       },
-      reminder:
-        "Task complete. Now index what changed via upsert_concept so the knowledge graph stays true to the codebase — new/updated features, specs, decisions, and constraints.",
+      reminder: TASK_COMPLETE_REMINDER,
     };
   }
 
