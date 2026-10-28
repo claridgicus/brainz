@@ -17,6 +17,15 @@ export const ONBOARDING_SUMMARY_ID = "product-onboarding-summary";
 export const ONBOARDING_NUDGE =
   'Note: this vault is not onboarded yet — call the onboard tool with {"action": "start"} to index your product into it first.';
 
+/**
+ * The neutral form of {@link ONBOARDING_NUDGE} for directory surfaces (Brainz
+ * Cloud OAuth and public-vault connections): states the fact without telling
+ * the model to call a tool the user didn't ask for (SPEC-CLOUD.md "Directory
+ * policy"). The directive form stays on `bz_` key and stdio connections.
+ */
+export const ONBOARDING_NOTICE =
+  "Note: this vault has not been onboarded yet, so results may be sparse.";
+
 export interface OnboardingPlaybookOptions {
   /** Product name, echoed into the playbook heading. */
   productName?: string;

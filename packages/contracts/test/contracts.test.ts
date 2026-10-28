@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
+  ONBOARDING_NOTICE,
+  ONBOARDING_NUDGE,
+  SYNC_STALENESS_NOTICE,
+  SYNC_STALENESS_NUDGE,
+} from "@brainz/engine";
+import {
   BUILTIN_CONCEPT_TYPES,
   CANONICAL_RELATIONS,
   claimInputSchema,
@@ -774,6 +780,21 @@ describe("directory surfaces", () => {
       for (const re of steering) {
         expect(`${tool.name}: ${tool.description}`).not.toMatch(re);
       }
+    }
+  });
+
+  // Anthropic rejects results that "instruct Claude to call external software
+  // or tools the user didn't request". Cloud OAuth and public-vault connections
+  // send the neutral notices; the directive nudges stay on bz_ keys and stdio.
+  it("directory notices state the fact without telling the model to call a tool", () => {
+    const callsATool = [/\bcall\b/i, /\brun\b/i, /\{"action"/, /\bthe (onboard|sync) tool\b/i];
+    for (const notice of [ONBOARDING_NOTICE, SYNC_STALENESS_NOTICE]) {
+      expect(notice).not.toContain("\n");
+      for (const re of callsATool) expect(notice).not.toMatch(re);
+    }
+    // The lint bites: each directive nudge trips it.
+    for (const nudge of [ONBOARDING_NUDGE, SYNC_STALENESS_NUDGE]) {
+      expect(callsATool.some((re) => re.test(nudge))).toBe(true);
     }
   });
 });

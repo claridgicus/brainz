@@ -23,8 +23,10 @@ import {
   type VaultRole,
 } from "@brainz/contracts";
 import {
+  ONBOARDING_NOTICE,
   ONBOARDING_NUDGE,
   ONBOARDING_SUMMARY_ID,
+  SYNC_STALENESS_NOTICE,
   SYNC_STALENESS_NUDGE,
   computeCoverage,
   isSyncStale,
@@ -112,6 +114,14 @@ export interface McpServerHooks {
    * hosted chat client. Applied after `only`.
    */
   exclude?: readonly McpToolName[];
+  /**
+   * How the onboarding/staleness notice on search_concepts and get_context
+   * reads. "directive" (the default, `bz_` keys) names the onboard/sync tool
+   * to call; "neutral" (directory surfaces: OAuth and public-vault
+   * connections) states the fact only, because directory review rejects
+   * results that tell the model to call a tool the user didn't ask for.
+   */
+  notices?: "directive" | "neutral";
 }
 
 /**
@@ -127,18 +137,22 @@ function vaultToolHandlers(vault: VaultClient, hooks: McpServerHooks): ToolHandl
    * The one-line nudge to prefix on search/context results, or null for none.
    * Onboarding takes precedence (you can't be stale before onboarding); an
    * onboarded-but-stale vault (last sync older than the threshold) gets the
-   * sync nudge instead. A nudge, not a wall — the two never stack.
+   * sync nudge instead. A nudge, not a wall — the two never stack. Directory
+   * surfaces get the neutral wording (hooks.notices).
    */
+  const neutral = hooks.notices === "neutral";
   const nudgeNotice = async (): Promise<string | null> => {
     const [{ onboardedAt }, { lastSyncedAt }] = await Promise.all([
       vault.onboarding(),
       vault.syncState(),
     ]);
-    if (onboardedAt === null) return ONBOARDING_NUDGE;
+    if (onboardedAt === null) return neutral ? ONBOARDING_NOTICE : ONBOARDING_NUDGE;
     // Fall back to onboardedAt as the baseline if last_synced_at was never set
     // (a vault onboarded before sync shipped) so staleness is measured from a
     // real point, not treated as "never synced".
-    if (isSyncStale(true, lastSyncedAt ?? onboardedAt)) return SYNC_STALENESS_NUDGE;
+    if (isSyncStale(true, lastSyncedAt ?? onboardedAt)) {
+      return neutral ? SYNC_STALENESS_NOTICE : SYNC_STALENESS_NUDGE;
+    }
     return null;
   };
 
@@ -681,7 +695,9 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
  * per request, exactly like buildMcpServer.
  */
 export function buildPublicVaultMcpServer(vault: VaultClient): McpServer {
-  return buildMcpServer(vault, { only: PUBLIC_VAULT_READ_TOOL_NAMES });
+  // Directory surface (public tokens and OAuth viewers), and a viewer can't
+  // call onboard/sync anyway: neutral notices.
+  return buildMcpServer(vault, { only: PUBLIC_VAULT_READ_TOOL_NAMES, notices: "neutral" });
 }
 
 /** One vault a multi-vault connection may route to. */
@@ -773,7 +789,8 @@ export function buildMultiVaultMcpServer(opts: MultiVaultServerOptions): McpServ
     let h = handlerCache.get(vaultId);
     if (!h) {
       const { client, hooks } = opts.open(vaultId);
-      h = vaultToolHandlers(client, hooks ?? {});
+      // OAuth-only server, so directory (neutral) notices.
+      h = vaultToolHandlers(client, { ...hooks, notices: "neutral" });
       handlerCache.set(vaultId, h);
     }
     return h;

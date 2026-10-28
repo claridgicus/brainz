@@ -36,6 +36,13 @@ export const SYNC_STALENESS_NUDGE =
   'Call the sync tool with {"action": "start"} to re-index changed areas.';
 
 /**
+ * The neutral form of {@link SYNC_STALENESS_NUDGE} for directory surfaces: the
+ * same fact with no instruction to call `sync` (see ONBOARDING_NOTICE).
+ */
+export const SYNC_STALENESS_NOTICE =
+  `Note: this vault hasn't been synced in over ${SYNC_STALENESS_DAYS} days, so its knowledge graph may have drifted from the code.`;
+
+/**
  * True when a vault is "stale": onboarded but its last sync is older than the
  * staleness threshold. `onboarded` must be true (an un-onboarded vault is
  * handled by the onboarding nudge, which takes precedence). `lastSyncedAt` is

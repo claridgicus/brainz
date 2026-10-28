@@ -24,14 +24,17 @@ import {
   type McpToolName,
 } from "@brainz/contracts";
 import {
+  ONBOARDING_NOTICE,
   ONBOARDING_NUDGE,
   ONBOARDING_SUMMARY_ID,
+  SYNC_STALENESS_NOTICE,
   SYNC_STALENESS_NUDGE,
 } from "@brainz/engine";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildMcpServer,
   buildMultiVaultMcpServer,
+  buildPublicVaultMcpServer,
   ok,
   resolveVaultArg,
   type McpServerHooks,
@@ -972,6 +975,62 @@ describe("staleness nudge (composes with the onboarding nudge)", () => {
     const client = await connect(vault);
     const search = await client.callTool({ name: "search_concepts", arguments: { query: "x" } });
     expect(JSON.parse(textBlocks(search)[0]).notice).toBeUndefined();
+  });
+});
+
+describe("directory surfaces get neutral notices", () => {
+  const stale = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+  async function connectServer(server: ReturnType<typeof buildMcpServer>): Promise<Client> {
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    return client;
+  }
+
+  async function notices(client: Client): Promise<{ search: unknown; ctx: string }> {
+    const search = await client.callTool({ name: "search_concepts", arguments: { query: "x" } });
+    const ctx = await client.callTool({ name: "get_context", arguments: { query: "x" } });
+    return { search: JSON.parse(textBlocks(search)[0]).notice, ctx: textBlocks(ctx)[0] };
+  }
+
+  it("notices: neutral swaps both nudges for the neutral wording", async () => {
+    const vault = fakeVault();
+    const client = await connect(vault, { notices: "neutral" });
+    let got = await notices(client);
+    expect(got.search).toBe(ONBOARDING_NOTICE);
+    expect(got.ctx.startsWith(ONBOARDING_NOTICE)).toBe(true);
+    expect(got.ctx).not.toContain("onboard tool");
+
+    vault.state.onboardedAt = "2026-01-01T00:00:00.000Z";
+    vault.state.lastSyncedAt = stale;
+    got = await notices(client);
+    expect(got.search).toBe(SYNC_STALENESS_NOTICE);
+    expect(got.ctx.startsWith(SYNC_STALENESS_NOTICE)).toBe(true);
+    expect(got.ctx).not.toContain("sync tool");
+  });
+
+  it("public-vault (and OAuth viewer) connections are neutral", async () => {
+    const client = await connectServer(buildPublicVaultMcpServer(fakeVault()));
+    const got = await notices(client);
+    expect(got.search).toBe(ONBOARDING_NOTICE);
+    expect(got.ctx.startsWith(ONBOARDING_NOTICE)).toBe(true);
+  });
+
+  it("multi-vault OAuth connections are neutral", async () => {
+    const server = buildMultiVaultMcpServer({
+      vaults: [{ id: "id-alpha", slug: "alpha", name: "Alpha", role: "owner" }],
+      includesFutureVaults: false,
+      open: () => ({ client: fakeVault() }),
+      exclude: DIRECTORY_HIDDEN_TOOL_NAMES,
+    });
+    const client = await connectServer(server);
+    const search = await client.callTool({
+      name: "search_concepts",
+      arguments: { vault: "alpha", query: "x" },
+    });
+    expect(JSON.parse(textBlocks(search)[0]).notice).toBe(ONBOARDING_NOTICE);
   });
 });
 

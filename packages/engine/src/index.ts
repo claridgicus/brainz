@@ -30,6 +30,7 @@ export { assembleContext } from "./context.js";
 export type { AssembleContextOptions, ContextSource } from "./context.js";
 
 export {
+  ONBOARDING_NOTICE,
   ONBOARDING_NUDGE,
   ONBOARDING_SUMMARY_ID,
   onboardingPlaybook,
@@ -40,6 +41,7 @@ export type { OnboardingPlaybookOptions, Coverage, CoverageConcept } from "./onb
 export {
   SYNC_STALENESS_DAYS,
   SYNC_STALENESS_MS,
+  SYNC_STALENESS_NOTICE,
   SYNC_STALENESS_NUDGE,
   isSyncStale,
   syncPlaybook,

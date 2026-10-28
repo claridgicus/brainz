@@ -16,6 +16,7 @@ export type {
 
 export { Vault } from "./vault.js";
 export {
+  ONBOARDING_NOTICE,
   ONBOARDING_NUDGE,
   ONBOARDING_SUMMARY_ID,
   onboardingPlaybook,
@@ -23,6 +24,7 @@ export {
   slugify,
   SYNC_STALENESS_DAYS,
   SYNC_STALENESS_MS,
+  SYNC_STALENESS_NOTICE,
   SYNC_STALENESS_NUDGE,
   isSyncStale,
   syncPlaybook,

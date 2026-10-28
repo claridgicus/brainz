@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   SYNC_STALENESS_DAYS,
   SYNC_STALENESS_MS,
+  SYNC_STALENESS_NOTICE,
   SYNC_STALENESS_NUDGE,
   isSyncStale,
   syncPlaybook,
@@ -84,6 +85,12 @@ describe("SYNC_STALENESS_NUDGE", () => {
     expect(SYNC_STALENESS_NUDGE).not.toContain("\n");
     expect(SYNC_STALENESS_NUDGE).toMatch(/sync/);
     expect(SYNC_STALENESS_NUDGE).toContain(String(SYNC_STALENESS_DAYS));
+  });
+
+  it("has a one-line neutral form that names no tool to call", () => {
+    expect(SYNC_STALENESS_NOTICE).not.toContain("\n");
+    expect(SYNC_STALENESS_NOTICE).toContain(String(SYNC_STALENESS_DAYS));
+    expect(SYNC_STALENESS_NOTICE).not.toMatch(/\bcall\b|tool/i);
   });
 
   it("SYNC_STALENESS_MS is 14 days in ms", () => {

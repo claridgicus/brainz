@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ONBOARDING_NOTICE,
   ONBOARDING_NUDGE,
   ONBOARDING_SUMMARY_ID,
   computeCoverage,
@@ -50,6 +51,12 @@ describe("ONBOARDING_NUDGE", () => {
     expect(ONBOARDING_NUDGE).not.toContain("\n");
     expect(ONBOARDING_NUDGE).toMatch(/not onboarded/);
     expect(ONBOARDING_NUDGE).toMatch(/onboard/);
+  });
+
+  it("has a one-line neutral form that names no tool to call", () => {
+    expect(ONBOARDING_NOTICE).not.toContain("\n");
+    expect(ONBOARDING_NOTICE).toMatch(/not been onboarded/);
+    expect(ONBOARDING_NOTICE).not.toMatch(/\bcall\b|tool/i);
   });
 });
 

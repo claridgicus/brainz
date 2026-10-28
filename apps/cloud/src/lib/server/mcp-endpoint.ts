@@ -243,8 +243,10 @@ export async function handleMcpRequest(event: RequestEvent, surface: McpSurface)
           ? buildPublicVaultMcpServer(vault)
           : buildMcpServer(vault, {
               ...mirrorHooks(platform.env.DB, only.id),
-              // Directory surface: no session_hook (and no claim) for OAuth.
+              // Directory surface: no session_hook (and no claim) for OAuth,
+              // and onboarding/sync notices that don't steer the model.
               exclude: DIRECTORY_HIDDEN_TOOL_NAMES,
+              notices: "neutral",
             });
     } else {
       // Multi-vault grant: every vault tool takes a required `vault` arg, the
