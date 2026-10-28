@@ -42,6 +42,23 @@
 			keys apart), its name and when it was last used. We never store the full key.
 		</li>
 		<li>
+			<strong>Connected apps (OAuth):</strong> when you connect an app such as Claude or
+			ChatGPT to <code>/mcp</code>, we store a connection record (your account; on the consent
+			screen, the vault or vaults you pick, or all your vaults, including ones you create or
+			join later if you choose that option; the app's client id; and when you connected), the
+			short-lived authorization code used to set it up, and the connection's access and
+			refresh tokens. Codes and tokens are stored only as SHA-256 hashes. Apps that register
+			with us automatically store the name they give themselves, their redirect addresses,
+			their sign-in method (and a hash of their secret, if they have one) and when the app was
+			registered and last used. Apps that identify themselves by a URL, as Claude does, are
+			looked up at that URL when you connect and not stored.
+		</li>
+		<li>
+			<strong>Tool calls from connected apps:</strong> an app calling a Brainz tool sends us only that
+			tool's arguments (a search query, a concept to save). No Brainz tool asks for or receives your
+			chat history with the app.
+		</li>
+		<li>
 			<strong>Team and claim records:</strong> invite emails and roles, and pending claim requests
 			(the email an agent asked to attach a workspace to). Their one-time tokens are stored hashed.
 		</li>
@@ -53,7 +70,8 @@
 		<li>
 			<strong>Abuse prevention:</strong> the email address and IP address of each sign-in link
 			request, and the IP address of each agent signup and each public-vault read, used for rate
-			limits.
+			limits. When an app registers for OAuth we record the IP address (for IPv6, its /48 network)
+			and the time, for the same purpose.
 		</li>
 		<li>
 			<strong>Request logs:</strong> Cloudflare Workers Logs record requests and errors for operating
@@ -89,6 +107,13 @@
 			entered) under your own account with that provider.
 		</li>
 		<li>
+			<strong>Apps you connect:</strong> an app you connect with OAuth (such as Claude or
+			ChatGPT) receives the results of the tools it calls on the vault or vaults you pick, or
+			all your vaults, including ones you create or join later if you choose that option, and
+			handles them under its own privacy policy. It can read those vaults, and change any of
+			them where you are the owner or an editor.
+		</li>
+		<li>
 			<strong>Your agents and teammates:</strong> anyone holding one of your vault's API keys, and
 			members you invite, can read and change that vault. If a vault owner turns on public read
 			access, anyone with the link can read it.
@@ -116,23 +141,35 @@
 			Rate-limit records and request logs: we do not yet delete rate-limit records automatically.
 			Request logs are kept for Cloudflare's Workers Logs retention period.
 		</li>
+		<li>
+			Connected apps: authorization codes expire after 5 minutes, access tokens after 1 hour
+			and refresh tokens after 30 days without use. A connection stops working when the app
+			revokes it, when a refresh token is reused, when you lose access to a vault it covers,
+			or when the vault or your account is deleted, which also deletes its connection records,
+			codes and tokens. We do not yet delete expired or revoked connection records, codes and
+			tokens automatically. Apps that registered automatically are deleted after 30 days if
+			they have no connection and have not been used on the consent screen. OAuth registration
+			rate-limit records are deleted after an hour.
+		</li>
 		<li>Deleted data can remain in Cloudflare's point-in-time recovery for up to 30 days.</li>
 	</ul>
 
 	<h2 id="your-choices">Your choices</h2>
 	<p>
-		You can read and export your vaults through the dashboard, REST API or MCP tools, change them at
-		any time, and delete any vault you own from its settings. There is no self-serve account deletion
-		yet: email <a href="mailto:{SUPPORT_EMAIL}">{SUPPORT_EMAIL}</a> from your account's address and
-		we will delete your account and every vault you own within 30 days. You can also ask us what we
-		hold about you, or to correct it.
+		You can read and export your vaults through the dashboard, REST API or MCP tools, change
+		them at any time, and delete any vault you own from its settings. To disconnect an app,
+		remove the connector in that app; if you want us to revoke a connection for you, email us.
+		There is no self-serve account deletion yet: email <a
+		href="mailto:{SUPPORT_EMAIL}">{SUPPORT_EMAIL}</a> from your account's address and we will
+		delete your account and every vault you own within 30 days. You can also ask us what we hold
+		about you, or to correct it.
 	</p>
 
 	<h2 id="security">Security</h2>
 	<p>
-		All traffic is over HTTPS. API keys and one-time tokens are stored hashed, and LLM keys
-		encrypted. We hold no security certifications. Don't put secrets (passwords, private keys) in a
-		vault.
+		All traffic is over HTTPS. API keys, OAuth codes and tokens, and one-time tokens are stored
+		hashed, and LLM keys encrypted. We hold no security certifications. Don't put secrets
+		(passwords, private keys) in a vault.
 	</p>
 
 	<h2 id="children">Children</h2>
@@ -143,6 +180,13 @@
 		We will update this page when what we collect or who processes it changes, and change the date
 		above.
 	</p>
+	<ul>
+		<li>
+			<strong>28 October 2026:</strong> added what we store when you connect an app such as
+			Claude or ChatGPT with OAuth, how long we keep it, and that connected apps send us only
+			tool arguments, never your chat history.
+		</li>
+	</ul>
 
 	<h2 id="contact">Contact</h2>
 	<p>Plutocracy Pty Ltd — <a href="mailto:{SUPPORT_EMAIL}">{SUPPORT_EMAIL}</a></p>
