@@ -187,3 +187,87 @@ Global `--vault <dir>` (default cwd). Human-readable output; `--json` flag for m
 - Never throw raw exceptions across the MCP boundary — return `isError` content.
 - All ids are slugs: lowercase alnum + dashes; `slugify()` lives in core.
 - Wiki-links to unknown ids are allowed (they're "pending" concepts); `validate` reports them as warnings, not errors.
+
+## Orchestration (`integrations/claude-code/brainz-orchestrate`)
+
+A Claude Code plugin that turns one Claude session into an **orchestrator**: it keeps the work pile as Brainz tasks, launches each task as a worker in its own git worktree, throttles heavy steps, relays workers' questions, reviews their branches and lands them. The engine is the Brainz task lifecycle (`list_tasks` / `take_task` / `complete_task` / `create_task` / `upsert_concept`); there is no terminal-multiplexer dependency and **no new MCP tool** — the plugin uses the tools every connection already has, plus a local script. It never touches the directory-listed `/mcp` surface's tool list.
+
+### Layout
+
+```
+integrations/claude-code/brainz-orchestrate/
+  .claude-plugin/plugin.json       # plugin manifest (name "brainz-orchestrate")
+  skills/orchestrate/SKILL.md      # /orchestrate — the orchestrator loop
+  skills/orchestrate/worker-brief.md  # worker contract template ({{TASK}} {{PATH}} {{BRANCH}} {{BASE}} {{REPO}} {{ORCH}} {{EXTRA}})
+  scripts/brainz-orch.mjs          # zero-dependency Node >= 20 script; the only executable
+  test/*.test.mjs                  # node:test, run by the root `npm test`
+  README.md
+```
+
+The Brainz MCP connection itself is not part of the plugin (users connect Brainz the usual way: cloud `/mcp` with an OAuth or `bz_` connection, or local `brainz mcp`).
+
+### `brainz-orch` commands
+
+State lives in the repo's git common dir, `<git-common-dir>/brainz-orchestrate/` (never tracked, shared by every worktree): `config.json`, `jobs.json`, `briefs/<branch>.md`, `heavy/` (slot locks). Every command prints JSON with `--json`, human text otherwise; exit 0 on success, 1 on a failure it reports, 2 on bad usage.
+
+| command | does |
+|---|---|
+| `config set <file\|->` / `config show` | Cache the repo config (JSON, see below) taken from the vault's config concept; `show` prints the effective config (defaults filled in). |
+| `job start <task-id> [--branch b] [--base ref]` | `git fetch`, then `git worktree add -b <branch> <repo>-<branch> <base>` beside the repo (reuses an existing worktree for that branch), runs `setup` in it, renders the worker brief to `briefs/<branch>.md`, records the job. Branch defaults to the task id cut to 40 chars; base defaults to `origin/<default branch>`. Prints `{task, branch, path, base, brief}`. Refuses when `concurrency` jobs are already open. |
+| `job list` | Open jobs with `ahead` (commits over base), `dirty`, `lastActivity` (newest of HEAD commit time and worktree file mtimes) and `stale` (no activity for `leaseMinutes`). |
+| `heavy -- <cmd…>` | Runs `<cmd>` in one of `heavySlots` machine-wide slots (atomic lock dirs under `~/.cache/brainz-orchestrate/heavy`, holder pid recorded, dead holders reclaimed), pinned with `taskset -c <heavyCpus>` when configured and available. Waits (polling) for a free slot; exits with the command's code. |
+| `land <branch> [--mode push\|pr]` | In the job's worktree: fetch, rebase onto `origin/<main>` (a conflict aborts the rebase and fails), run every `gates` command through `heavy`, re-check that `origin/<main>` is still an ancestor, then **push** (`git push origin HEAD:<main>`, fast-forward only) or **pr** (`git push -u origin <branch>` + `gh pr create --fill`). Stops at the first failure; nothing is pushed on failure. Prints the landed commit or PR URL. |
+| `done <branch> [--force]` | Removes the worktree and deletes the branch, and drops the job record. Without `--force` it refuses unless the branch tip is on `origin/<main>` (push mode) or the worktree is clean and pushed (pr mode). |
+| `brief <task-id> [--branch b]` | Prints the rendered worker brief without creating anything. |
+
+### Worker contract (JOB READY / STUCK)
+
+The brief (`worker-brief.md`, plus the config's `workerExtra`) tells a worker:
+1. Call `take_task` with the task id and `takenBy` = the job label `orch:<branch>`; read the briefing; `get_context` if needed.
+2. Work only inside its worktree; never edit, stash, reset or check out anything in the main checkout or another worktree; never push, never merge.
+3. Run tests, typecheck, lint, build, local stacks and `git commit` through `brainz-orch heavy -- …` (absolute path rendered in).
+4. Follow the repo's agent rules; commit on its branch with hooks running (never `--no-verify`).
+5. Never call `complete_task` — the orchestrator does after landing.
+6. Finish with a short report (what changed, commits, gates run, what was tried live, risks) and **exactly one final line**: `JOB READY <task-id>` or `JOB STUCK <task-id>: <why>`. A question only the user can answer is a `JOB STUCK` whose reason is the question; the orchestrator relays it and resumes the worker with the answer.
+
+### Task state (no new fields)
+
+Orchestration state rides on fields tasks already have, written with `upsert_concept` (title/body unchanged) or the lifecycle tools:
+
+| state | encoding |
+|---|---|
+| queued | `taskStatus: open`, tag `ready` (or `needs-<person>` while blocked on a decision) |
+| running | `taskStatus: taken`, `takenBy: orch:<branch>` (set by the worker's `take_task`) |
+| awaiting review | tag `job-review` (orchestrator, on `JOB READY`) |
+| stuck | tag `job-stuck` (on `JOB STUCK`; removed when resumed) |
+| PR open | tag `job-pr` and a `## Pull request` line appended to the body |
+| landed | `complete_task` with the commit hash / PR URL and what was and wasn't verified; all `job-*` tags removed |
+
+**Lease.** A task is leased while its `orch:` job exists and shows activity. `job list` marks a job `stale` after `leaseMinutes` (default 60) without commits or file changes; the orchestrator then checks the worker and either resumes it or releases the task (`upsert_concept` with `taskStatus: open`, tag `released`) and runs `done --force`. A task `taken` by an `orch:` label with no job record on this machine is someone else's (another orchestrator) and is left alone.
+
+### Per-repo config (a vault concept)
+
+The repo's orchestration config is the vault concept **`orchestrate-config`** (type `pattern`), so every orchestrator and teammate sees the same rules. Its body is prose (rendered into the worker brief as `workerExtra`) plus one fenced ```` ```json ```` block:
+
+```json
+{
+  "setup": ["npm install"],                 // run in a new worktree before the worker starts
+  "gates": ["npm run build", "npm test"],   // run by `land` through `heavy`
+  "concurrency": 3,                         // open jobs at once
+  "heavySlots": 2, "heavyCpus": "0-7",      // heavy-step semaphore; heavyCpus optional
+  "landing": "pr",                          // "push" | "pr"
+  "mainBranch": "main",
+  "leaseMinutes": 60
+}
+```
+
+All keys are optional (the values above are the defaults, except `heavyCpus`, which defaults to unset). The orchestrator reads the concept with `get_concept` at start-up and caches it with `config set`; an absent concept means defaults, and the skill offers to create one.
+
+### Orchestrator loop (`/orchestrate`)
+
+1. Start-up: `get_concept orchestrate-config` → `config set`; `list_tasks` (open + taken); `job list` to adopt jobs left by a previous session.
+2. New work becomes a task (`create_task` with body, `codeAreas`, tags).
+3. Launch `ready` tasks up to `concurrency`, never two that edit the same files: `job start`, then a **background Claude Code subagent** (Agent tool, `run_in_background`) whose prompt is the rendered brief. Its completion notification is the wake-up; no polling multiplexer.
+4. On `JOB READY`: tag `job-review`, review (`git log/diff origin/<main>...<branch>`, uncommitted leftovers, gates the worker ran), then `land`; on success `complete_task`, `done`. If main moved or a gate failed, send the worker back (SendMessage) and re-review.
+5. On `JOB STUCK`: relay the question to the user, answer only from what the user said, resume the worker.
+6. Never land unreviewed work, never `--no-verify`, never force-push the main branch; never stash/reset/check out in the main checkout.
