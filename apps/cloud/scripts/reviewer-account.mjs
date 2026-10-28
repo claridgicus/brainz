@@ -15,12 +15,16 @@
  * fully populated account.
  *
  * Usage (from apps/cloud):
- *   node scripts/reviewer-account.mjs --email reviewer@brownmatter.ai --remote
- *   node scripts/reviewer-account.mjs --email r@example.com --local [--persist-to DIR]
- *       [--password P] [--name "Directory Reviewer"] [--seed https://brainz.brownmatter.ai]
+ *   node scripts/reviewer-account.mjs --directory anthropic --remote [--seed https://brainz.brownmatter.ai]
+ *   node scripts/reviewer-account.mjs --email <addr> --local [--persist-to DIR]
+ *       [--password P] [--name "Directory Reviewer"]
  *
- * The password is generated (32 base62 chars) unless --password is given
- * (min 20 chars). It is printed once; store it in the directory portal.
+ * By default the address is UNGUESSABLE and per directory:
+ * `review-<directory>-<12 random chars>@brownmatter.ai`. A guessable address
+ * (reviewer@…) would let anyone burn its failed-sign-in allowance and lock the
+ * reviewer out mid-review. No inbox is needed — reviewers sign in with the
+ * password. The password is generated (32 base62 chars) unless --password is
+ * given (min 20 chars). Both are printed once; store them in the portal.
  */
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
@@ -44,15 +48,26 @@ function parseArgs(argv) {
   return out;
 }
 
-function randomPassword(length = 32) {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+function randomString(length, alphabet) {
+  // Rejection sampling keeps every character equally likely.
+  const ceiling = 256 - (256 % alphabet.length);
   let out = "";
   while (out.length < length) {
     for (const b of crypto.getRandomValues(new Uint8Array(length))) {
-      if (b < 248 && out.length < length) out += alphabet[b % 62];
+      if (b < ceiling && out.length < length) out += alphabet[b % alphabet.length];
     }
   }
   return out;
+}
+
+const randomPassword = (length = 32) =>
+  randomString(length, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789");
+
+/** `review-<directory>-<12 random [a-z0-9]>@brownmatter.ai` (~62 bits; unguessable). */
+export function reviewerAddress(directory) {
+  const slug = String(directory).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  if (!slug) throw new Error("--directory must contain letters or digits");
+  return `review-${slug}-${randomString(12, "abcdefghijklmnopqrstuvwxyz0123456789")}@brownmatter.ai`;
 }
 
 const sql = (v) => (v === null ? "NULL" : typeof v === "number" ? String(v) : `'${String(v).replace(/'/g, "''")}'`);
@@ -125,11 +140,13 @@ async function seedDemoVault(origin, email, password) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (!args.email || args.local === args.remote) {
-    console.error("usage: reviewer-account.mjs --email <email> (--local | --remote) [--persist-to DIR] [--password P] [--name N] [--seed ORIGIN]");
+  if ((!args.email && !args.directory) || args.local === args.remote) {
+    console.error(
+      "usage: reviewer-account.mjs (--directory <anthropic|openai|...> | --email <addr>) (--local | --remote) [--persist-to DIR] [--password P] [--name N] [--seed ORIGIN]",
+    );
     process.exit(2);
   }
-  const email = args.email.trim().toLowerCase();
+  const email = (args.email ?? reviewerAddress(args.directory)).trim().toLowerCase();
   const password = args.password ?? randomPassword();
   if (password.length < MIN_PASSWORD_LENGTH) {
     console.error(`password must be at least ${MIN_PASSWORD_LENGTH} characters`);
@@ -144,7 +161,7 @@ async function main() {
     console.error(res.stdout, res.stderr);
     process.exit(1);
   }
-  console.log(`reviewer account ready: ${email}`);
+  console.log(`reviewer account ready: ${email}${args.email ? "" : " (generated — store it with the password)"}`);
   if (!args.password) console.log(`password (shown once): ${password}`);
   if (args.seed) {
     const seeded = await seedDemoVault(args.seed.replace(/\/+$/, ""), email, password);

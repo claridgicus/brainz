@@ -10,7 +10,11 @@ import {
   throttleResponse,
 } from "$lib/server/magic-link-guard";
 import { isCrossSiteFormPost } from "$lib/server/oauth";
-import { gatePasswordSignIn, PASSWORD_SIGN_IN_PATH } from "$lib/server/reviewer-login";
+import {
+  gatePasswordSignIn,
+  PASSWORD_SIGN_IN_PATH,
+  recordPasswordFailure,
+} from "$lib/server/reviewer-login";
 import { resolveRateLimitIp } from "$lib/server/rate-limit";
 
 /**
@@ -86,8 +90,11 @@ export const handle: Handle = async ({ event, resolve }) => {
   }
 
   // Password sign-in is for operator-provisioned reviewer accounts only: the
-  // durable rate limit and the credential allow-list run BEFORE Better Auth,
-  // so random attempts never reach its scrypt (see $lib/server/reviewer-login).
+  // durable failure limit and the credential allow-list run BEFORE Better
+  // Auth, so random attempts never reach its scrypt; a rejection by Better
+  // Auth (wrong password) is recorded after it answers. Successes are never
+  // counted (see $lib/server/reviewer-login).
+  let passwordAttempt: { email: string; ip: string } | null = null;
   if (event.request.method === "POST" && event.url.pathname === PASSWORD_SIGN_IN_PATH) {
     const email = await readMagicLinkEmail(event.request);
     if (email) {
@@ -101,6 +108,7 @@ export const handle: Handle = async ({ event, resolve }) => {
         { email, ip: resolvedIp.ip },
       );
       if (blocked) return blocked;
+      passwordAttempt = { email, ip: resolvedIp.ip };
     }
   }
 
@@ -114,5 +122,9 @@ export const handle: Handle = async ({ event, resolve }) => {
     }
   }
 
-  return withFrameProtection(await svelteKitHandler({ event, resolve, auth, building }));
+  const response = await svelteKitHandler({ event, resolve, auth, building });
+  if (passwordAttempt && response.status >= 400) {
+    await recordPasswordFailure(guardDepsFromDb(createDb(event.platform.env.DB)), passwordAttempt);
+  }
+  return withFrameProtection(response);
 };

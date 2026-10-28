@@ -28,6 +28,7 @@ import {
   createAuthorizationCode,
   isLoopbackHttp,
   issuerFor,
+  touchClient,
   validateAuthorizeRequest,
   type AuthorizeValidation,
 } from "$lib/server/oauth";
@@ -69,7 +70,12 @@ export const load: PageServerLoad = async (event) => {
   }
 
   const { request } = result;
-  const db = createDb(requirePlatform(event).env.DB);
+  const platform = requirePlatform(event);
+  // Keep a DCR client that's still in use out of the 30-day idle purge.
+  if (request.client.kind === "dcr") {
+    platform.context.waitUntil(touchClient(platform.env.DB, request.client.clientId, new Date()).catch(() => {}));
+  }
+  const db = createDb(platform.env.DB);
   const vaults = await db
     .select({ id: schema.vault.id, name: schema.vault.name, role: schema.vaultMember.role })
     .from(schema.vaultMember)

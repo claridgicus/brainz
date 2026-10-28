@@ -350,6 +350,8 @@ export const oauthClient = sqliteTable("oauth_client", {
   redirectUris: text("redirect_uris").notNull(),
   tokenEndpointAuthMethod: text("token_endpoint_auth_method").notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  /** Last authorize-page use; grantless clients idle 30 days are purged. */
+  lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }),
 });
 
 /**
@@ -412,8 +414,16 @@ export const oauthToken = sqliteTable(
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
     usedAt: integer("used_at", { mode: "timestamp_ms" }),
+    /**
+     * Hash of the refresh token this pair was issued from (null for the
+     * code-exchange pair). A grace re-issue revokes the other pairs with the
+     * same parent, so the refresh family never splits into parallel chains.
+     */
+    parentHash: text("parent_hash"),
+    /** Set when a sibling pair superseded this one; presenting it later = reuse. */
+    revokedAt: integer("revoked_at", { mode: "timestamp_ms" }),
   },
-  (t) => [index("oauth_token_grant_id").on(t.grantId)],
+  (t) => [index("oauth_token_grant_id").on(t.grantId), index("oauth_token_parent_hash").on(t.parentHash)],
 );
 
 /**

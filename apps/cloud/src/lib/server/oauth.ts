@@ -61,6 +61,8 @@ export const AUTHORIZATION_CODE_TTL_SECONDS = 5 * 60;
  * without counting as theft: it gets a fresh pair instead of revoking the grant.
  */
 export const REFRESH_REUSE_GRACE_SECONDS = 60;
+/** Upper bound on the OAUTH_REFRESH_GRACE_SECONDS override. */
+export const MAX_REFRESH_REUSE_GRACE_SECONDS = 300;
 
 export const ACCESS_TOKEN_PREFIX = "bzat_";
 export const REFRESH_TOKEN_PREFIX = "bzrt_";
@@ -84,11 +86,16 @@ export const OAUTH_PATHS = {
  */
 export const CSRF_EXEMPT_PATHS: ReadonlySet<string> = new Set([OAUTH_PATHS.token, OAUTH_PATHS.revoke]);
 
-/** DCR: registrations per client IP per rolling hour (Anthropic's egress range is exempt). */
+/** DCR: registrations per client IP bucket (IPv6 /64) per rolling hour. */
 export const REGISTER_RATE_LIMIT = 20;
+/** DCR: registrations per rolling hour across ALL non-Anthropic traffic. */
+export const REGISTER_GLOBAL_LIMIT = 1000;
 const REGISTER_WINDOW_MS = 60 * 60 * 1000;
-/** DCR clients that never obtained a grant are purged after this long. */
-export const UNUSED_CLIENT_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * Grantless DCR clients idle (no authorize-page use) this long are purged.
+ * Long, because native clients such as Claude Code cache their client_id.
+ */
+export const UNUSED_CLIENT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const CIMD_TIMEOUT_MS = 5_000;
 const CIMD_MAX_BYTES = 16 * 1024;
@@ -290,31 +297,46 @@ export function isAnthropicEgress(ip: string): boolean {
 }
 
 /**
- * Durable per-IP limit on DCR (record-then-count, like signup_events): true
- * when this registration should be refused.
+ * Durable limits on DCR: true when this registration should be refused.
+ * `ip` is the rate-limit bucket (IPv6 already collapsed to its /64). Two caps:
+ * REGISTER_RATE_LIMIT per bucket and REGISTER_GLOBAL_LIMIT across all
+ * non-Anthropic traffic. A request against an already-full bucket is refused
+ * WITHOUT recording a row, so a flood can't grow the events table; otherwise
+ * it records first and re-counts inclusively (TOCTOU-safe, like signup_events).
  */
 export async function registrationThrottled(db: OAuthDb, ip: string, now: Date): Promise<boolean> {
   if (isAnthropicEgress(ip)) return false;
+  const since = now.getTime() - REGISTER_WINDOW_MS;
+  const counts = async () => {
+    const row = await db
+      .prepare(
+        `SELECT COUNT(*) AS total, SUM(CASE WHEN ip = ? THEN 1 ELSE 0 END) AS mine
+         FROM oauth_register_events WHERE created_at > ?`,
+      )
+      .bind(ip, since)
+      .first<{ total: number; mine: number | null }>();
+    return { total: row?.total ?? 0, mine: row?.mine ?? 0 };
+  };
+  const before = await counts();
+  if (before.mine >= REGISTER_RATE_LIMIT || before.total >= REGISTER_GLOBAL_LIMIT) return true;
   await db
     .prepare(`INSERT INTO oauth_register_events (id, ip, created_at) VALUES (?, ?, ?)`)
     .bind(crypto.randomUUID(), ip, now.getTime())
     .run();
-  const row = await db
-    .prepare(`SELECT COUNT(*) AS n FROM oauth_register_events WHERE ip = ? AND created_at > ?`)
-    .bind(ip, now.getTime() - REGISTER_WINDOW_MS)
-    .first<{ n: number }>();
-  return (row?.n ?? 0) > REGISTER_RATE_LIMIT;
+  const after = await counts();
+  return after.mine > REGISTER_RATE_LIMIT || after.total > REGISTER_GLOBAL_LIMIT;
 }
 
 /**
- * Housekeeping run alongside registration: drop DCR clients older than
- * UNUSED_CLIENT_TTL_MS that never obtained a grant (and have no pending code),
- * plus registration events past the rate window.
+ * Housekeeping run alongside registration: drop DCR clients with no grant
+ * (and no pending code) whose last authorize-page use — or registration, if
+ * never used — is older than UNUSED_CLIENT_TTL_MS, plus registration events
+ * past the rate window. Clients with a live grant are never purged.
  */
 export async function purgeUnusedClients(db: OAuthDb, now: Date): Promise<void> {
   await db
     .prepare(
-      `DELETE FROM oauth_client WHERE created_at < ?
+      `DELETE FROM oauth_client WHERE COALESCE(last_used_at, created_at) < ?
          AND NOT EXISTS (SELECT 1 FROM oauth_grant g WHERE g.client_id = oauth_client.client_id)
          AND NOT EXISTS (SELECT 1 FROM oauth_code c WHERE c.client_id = oauth_client.client_id AND c.expires_at > ?)`,
     )
@@ -491,6 +513,14 @@ export async function readCapped(res: Response, maxBytes: number): Promise<strin
   return new TextDecoder().decode(buf);
 }
 
+/** Stamp a DCR client's last authorize-page use (keeps it out of the purge). */
+export async function touchClient(db: OAuthDb, clientId: string, now: Date): Promise<void> {
+  await db
+    .prepare(`UPDATE oauth_client SET last_used_at = ? WHERE client_id = ?`)
+    .bind(now.getTime(), clientId)
+    .run();
+}
+
 /** Look a client up: a DCR row, else a CIMD URL (fetched). Null when unknown. */
 export async function resolveClient(
   db: OAuthDb,
@@ -645,7 +675,8 @@ export interface TokenDeps {
 /** Parse the OAUTH_REFRESH_GRACE_SECONDS override; falls back to the default. */
 export function refreshGraceFromEnv(raw: string | undefined): number {
   const n = Number(raw);
-  return raw !== undefined && raw !== "" && Number.isFinite(n) && n >= 0 ? n : REFRESH_REUSE_GRACE_SECONDS;
+  if (raw === undefined || raw === "" || !Number.isFinite(n) || n < 0) return REFRESH_REUSE_GRACE_SECONDS;
+  return Math.min(n, MAX_REFRESH_REUSE_GRACE_SECONDS);
 }
 
 export interface TokenHttpResult {
@@ -745,18 +776,43 @@ async function revokeGrant(db: OAuthDb, grantId: string, now: Date): Promise<voi
     .run();
 }
 
-async function issueTokenPair(db: OAuthDb, grantId: string, scope: string, now: Date): Promise<OAuthTokenResponse> {
+/**
+ * Issue an access + refresh pair. `parentHash` is the refresh token it was
+ * rotated from (null for the code exchange). With `supersedeSiblings`, every
+ * OTHER pair issued from the same parent is revoked afterwards, so a parent
+ * never has more than one live child chain (see rotateRefresh's grace path).
+ */
+async function issueTokenPair(
+  db: OAuthDb,
+  grantId: string,
+  scope: string,
+  now: Date,
+  parentHash: string | null = null,
+  supersedeSiblings = false,
+): Promise<OAuthTokenResponse> {
   const access = randomToken(ACCESS_TOKEN_PREFIX);
   const refresh = randomToken(REFRESH_TOKEN_PREFIX);
-  const insert = `INSERT INTO oauth_token (token_hash, grant_id, kind, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`;
+  const [accessHash, refreshHash] = [await sha256Hex(access), await sha256Hex(refresh)];
+  const insert = `INSERT INTO oauth_token (token_hash, grant_id, kind, created_at, expires_at, parent_hash) VALUES (?, ?, ?, ?, ?, ?)`;
   await db
     .prepare(insert)
-    .bind(await sha256Hex(access), grantId, "access", now.getTime(), now.getTime() + ACCESS_TOKEN_TTL_SECONDS * 1000)
+    .bind(accessHash, grantId, "access", now.getTime(), now.getTime() + ACCESS_TOKEN_TTL_SECONDS * 1000, parentHash)
     .run();
   await db
     .prepare(insert)
-    .bind(await sha256Hex(refresh), grantId, "refresh", now.getTime(), now.getTime() + REFRESH_TOKEN_TTL_SECONDS * 1000)
+    .bind(refreshHash, grantId, "refresh", now.getTime(), now.getTime() + REFRESH_TOKEN_TTL_SECONDS * 1000, parentHash)
     .run();
+  if (supersedeSiblings && parentHash !== null) {
+    // Insert-then-revoke-others: if two grace re-issues interleave, the worst
+    // case is both pairs revoked (the client re-authorizes), never two live.
+    await db
+      .prepare(
+        `UPDATE oauth_token SET revoked_at = ?
+         WHERE parent_hash = ? AND token_hash NOT IN (?, ?) AND revoked_at IS NULL`,
+      )
+      .bind(now.getTime(), parentHash, accessHash, refreshHash)
+      .run();
+  }
   return {
     access_token: access,
     token_type: "Bearer",
@@ -832,13 +888,29 @@ async function exchangeCode(deps: TokenDeps, client: ResolvedClient, form: Recor
   return issueTokenPair(db, grantId, row.scope, now);
 }
 
+/**
+ * Refresh-token rotation over a token FAMILY. Every refresh pair records its
+ * parent (the refresh token it was rotated from), so a parent has at most one
+ * live child chain:
+ * - first use of a token rotates it (used_at) and issues one child pair;
+ * - re-presenting a token rotated within the grace window (a concurrent
+ *   refresh, or a retry after a lost response) issues a NEW child and revokes
+ *   the earlier children (revoked_at) — allowed only while none of those
+ *   children has itself been used, i.e. the chain hasn't moved on yet;
+ * - anything else — a superseded (revoked) sibling, a rotated token past the
+ *   window, or one whose child already rotated — is reuse: the grant dies.
+ * So a thief replaying inside the window can at most displace the legitimate
+ * chain, and the legitimate client's next refresh (now a revoked sibling)
+ * trips reuse detection and revokes the grant.
+ */
 async function rotateRefresh(deps: TokenDeps, client: ResolvedClient, form: Record<string, string>) {
   const { db, now } = deps;
   if (!form.refresh_token) throw new OAuthError("invalid_request", "refresh_token is required");
   const tokenHash = await sha256Hex(form.refresh_token);
   const row = await db
     .prepare(
-      `SELECT t.expires_at, t.used_at, g.id AS grant_id, g.client_id, g.user_id, g.vault_id, g.scope, g.revoked_at
+      `SELECT t.expires_at, t.used_at, t.revoked_at AS token_revoked_at,
+              g.id AS grant_id, g.client_id, g.user_id, g.vault_id, g.scope, g.revoked_at
        FROM oauth_token t JOIN oauth_grant g ON g.id = t.grant_id
        WHERE t.token_hash = ? AND t.kind = 'refresh'`,
     )
@@ -846,6 +918,7 @@ async function rotateRefresh(deps: TokenDeps, client: ResolvedClient, form: Reco
     .first<{
       expires_at: number;
       used_at: number | null;
+      token_revoked_at: number | null;
       grant_id: string;
       client_id: string;
       user_id: string;
@@ -859,30 +932,40 @@ async function rotateRefresh(deps: TokenDeps, client: ResolvedClient, form: Reco
     throw new OAuthError("invalid_grant", "refresh token is invalid");
   }
   if (row.revoked_at !== null) throw new OAuthError("invalid_grant", "the grant was revoked");
+  const reuse = async (): Promise<never> => {
+    await revokeGrant(db, row.grant_id, now);
+    throw new OAuthError("invalid_grant", "refresh token was already used; the grant is revoked");
+  };
+  // A sibling superseded by a grace re-issue: its chain was displaced.
+  if (row.token_revoked_at !== null) return reuse();
   if (row.expires_at < now.getTime()) throw new OAuthError("invalid_grant", "refresh token expired");
   if (!(await memberRoleOf(db, row.vault_id, row.user_id))) {
     await revokeGrant(db, row.grant_id, now);
     throw new OAuthError("invalid_grant", "you no longer have access to that vault");
   }
+  const graceReissue = async () => {
+    const moved = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM oauth_token WHERE parent_hash = ? AND kind = 'refresh' AND used_at IS NOT NULL`,
+      )
+      .bind(tokenHash)
+      .first<{ n: number }>();
+    // The chain already moved past this token: replaying it is reuse.
+    if ((moved?.n ?? 0) > 0) return reuse();
+    return issueTokenPair(db, row.grant_id, row.scope, now, tokenHash, true);
+  };
   if (row.used_at !== null) {
-    // Same client, rotated moments ago: a concurrent refresh or a retry after
-    // a lost response, not theft. Answer with a fresh pair (only hashes are
-    // stored, so the earlier pair can't be replayed back verbatim).
     const grace = deps.refreshGraceSeconds ?? REFRESH_REUSE_GRACE_SECONDS;
-    if (now.getTime() - row.used_at <= grace * 1000) {
-      return issueTokenPair(db, row.grant_id, row.scope, now);
-    }
-    // Reuse of a rotated refresh token outside the window = probable theft.
-    await revokeGrant(db, row.grant_id, now);
-    throw new OAuthError("invalid_grant", "refresh token was already used; the grant is revoked");
+    if (now.getTime() - row.used_at <= grace * 1000) return graceReissue();
+    return reuse();
   }
-  // Rotate. If a concurrent refresh of the same token won this UPDATE, that is
-  // the race the grace window exists for, so this caller gets a pair as well.
-  await db
-    .prepare(`UPDATE oauth_token SET used_at = ? WHERE token_hash = ? AND used_at IS NULL`)
+  const consumed = await db
+    .prepare(`UPDATE oauth_token SET used_at = ? WHERE token_hash = ? AND used_at IS NULL RETURNING token_hash`)
     .bind(now.getTime(), tokenHash)
-    .run();
-  return issueTokenPair(db, row.grant_id, row.scope, now);
+    .first();
+  // Lost the race to a concurrent refresh of the same token: a grace re-issue.
+  if (!consumed) return graceReissue();
+  return issueTokenPair(db, row.grant_id, row.scope, now, tokenHash);
 }
 
 /** The token endpoint (RFC 6749 §3.2) — never throws; errors are RFC JSON. */
@@ -955,7 +1038,7 @@ export async function resolveAccessToken(db: OAuthDb, token: string, now: Date):
   if (!isAccessTokenFormat(token)) return { ok: false, reason: "invalid" };
   const row = await db
     .prepare(
-      `SELECT g.id AS grant_id, g.user_id, g.vault_id, g.revoked_at, t.expires_at,
+      `SELECT g.id AS grant_id, g.user_id, g.vault_id, g.revoked_at, t.expires_at, t.revoked_at AS token_revoked_at,
               v.owner_id, o.expires_at AS owner_expires_at, m.role
        FROM oauth_token t
        JOIN oauth_grant g ON g.id = t.grant_id
@@ -971,11 +1054,18 @@ export async function resolveAccessToken(db: OAuthDb, token: string, now: Date):
       vault_id: string;
       revoked_at: number | null;
       expires_at: number;
+      token_revoked_at: number | null;
       owner_id: string;
       owner_expires_at: number | null;
       role: VaultRole | null;
     }>();
-  if (!row || row.revoked_at !== null || row.expires_at < now.getTime() || !row.role) {
+  if (
+    !row ||
+    row.revoked_at !== null ||
+    row.token_revoked_at !== null ||
+    row.expires_at < now.getTime() ||
+    !row.role
+  ) {
     return { ok: false, reason: "invalid" };
   }
   if (isOwnerExpired(row.owner_expires_at === null ? null : new Date(row.owner_expires_at), now)) {

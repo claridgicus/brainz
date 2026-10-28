@@ -5,21 +5,30 @@
  * Auth runs scrypt on every attempt (unknown emails included) behind an
  * in-memory, per-isolate limiter. So hooks.server.ts runs this first:
  *
- * 1. the durable D1 guard magic links use (5/hour/email, 20/hour/IP,
- *    record-then-count, `magic_link_events`), in its OWN buckets: keys carry
- *    PASSWORD_BUCKET_PREFIX, so password attempts never eat an address's or
- *    IP's magic-link quota (or the reverse). Throttled → 429 before hashing;
+ * 1. FAILED-attempt limits on the durable `magic_link_events` table, in their
+ *    own `password:` buckets (so they never touch magic-link quota): 5 failures
+ *    per email and 20 per IP bucket per hour → 429 before any hashing. Only
+ *    failures are recorded (recordPasswordFailure, called by the hook when
+ *    Better Auth rejects, and here for non-reviewer emails), so a reviewer who
+ *    signs in successfully never burns their own allowance, and an attacker
+ *    would need the reviewer's unguessable address to lock it out.
  * 2. the allow-list: an email without a `credential` account row gets Better
  *    Auth's own generic 401 without Better Auth (and scrypt) ever running.
  */
 import { normalizeEmail } from "./email";
-import { guardMagicLinkRequest, throttleResponse, type GuardDeps } from "./magic-link-guard";
+import { throttleResponse, type GuardDeps } from "./magic-link-guard";
 import type { OAuthDb } from "./oauth";
+import { MAGIC_LINK_EMAIL_LIMIT, MAGIC_LINK_IP_LIMIT, rateWindowStart } from "./rate-limit";
 
 export const PASSWORD_SIGN_IN_PATH = "/api/auth/sign-in/email";
 
-/** Namespaces password-attempt rows in magic_link_events (separate buckets). */
+/** Namespaces password-failure rows in magic_link_events (separate buckets). */
 export const PASSWORD_BUCKET_PREFIX = "password:";
+
+const bucket = (args: { email: string; ip: string }) => ({
+  email: `${PASSWORD_BUCKET_PREFIX}${normalizeEmail(args.email)}`,
+  ip: `${PASSWORD_BUCKET_PREFIX}${args.ip}`,
+});
 
 /** Does this email belong to an operator-provisioned (credential) account? */
 export async function hasCredentialAccount(db: OAuthDb, email: string): Promise<boolean> {
@@ -41,16 +50,32 @@ export function invalidCredentialsResponse(): Response {
   );
 }
 
+/** Record one FAILED password attempt (never a success). */
+export async function recordPasswordFailure(guard: GuardDeps, args: { email: string; ip: string }): Promise<void> {
+  const b = bucket(args);
+  await guard.record({ email: b.email, ip: b.ip, at: guard.now() });
+}
+
+/** Has this email or IP bucket already used up its failure allowance? */
+async function failuresExhausted(guard: GuardDeps, args: { email: string; ip: string }): Promise<boolean> {
+  const b = bucket(args);
+  const since = rateWindowStart(guard.now());
+  const [byEmail, byIp] = await Promise.all([
+    guard.countRecentByEmail(b.email, since),
+    guard.countRecentByIp(b.ip, since),
+  ]);
+  return byEmail >= MAGIC_LINK_EMAIL_LIMIT || byIp >= MAGIC_LINK_IP_LIMIT;
+}
+
 /** Null = let Better Auth handle the attempt; otherwise the response to send instead. */
 export async function gatePasswordSignIn(
   deps: { db: OAuthDb; guard: GuardDeps },
   args: { email: string; ip: string },
 ): Promise<Response | null> {
-  const { throttled } = await guardMagicLinkRequest(deps.guard, {
-    email: `${PASSWORD_BUCKET_PREFIX}${args.email}`,
-    ip: `${PASSWORD_BUCKET_PREFIX}${args.ip}`,
-  });
-  if (throttled) return throttleResponse();
-  if (!(await hasCredentialAccount(deps.db, args.email))) return invalidCredentialsResponse();
+  if (await failuresExhausted(deps.guard, args)) return throttleResponse();
+  if (!(await hasCredentialAccount(deps.db, args.email))) {
+    await recordPasswordFailure(deps.guard, args);
+    return invalidCredentialsResponse();
+  }
   return null;
 }

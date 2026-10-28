@@ -276,12 +276,16 @@ lives in `src/lib/server/oauth.ts`, `src/routes/oauth/**` and
   a "Brainz demo" vault from `examples/demo-vault`:
 
   ```sh
-  node scripts/reviewer-account.mjs --email reviewer@brownmatter.ai --remote \
+  node scripts/reviewer-account.mjs --directory anthropic --remote \
     --seed https://brainz.brownmatter.ai
   ```
 
-  It prints a generated password once; enter it in the directory portal.
-  Re-run the script to rotate the password. Users can't create password
+  It prints a generated, unguessable address
+  (`review-<directory>-<random>@brownmatter.ai`) and password once; enter
+  both in the directory portal. Use one account per directory. Don't use a
+  guessable address such as `reviewer@`: anyone could spend its five
+  failed sign-ins per hour and lock the reviewer out. No inbox is needed.
+  Re-run with `--email <that address>` to rotate the password. Users can't create password
   accounts (`disableSignUp`).
 - **Before submitting**, make sure no Cloudflare WAF, bot-fight or rate-limit
   rule on the `brownmatter.ai` zone blocks Anthropic's egress range

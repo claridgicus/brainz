@@ -18,7 +18,9 @@ import {
   isAnthropicEgress,
   isCrossSiteFormPost,
   purgeUnusedClients,
+  REGISTER_GLOBAL_LIMIT,
   REGISTER_RATE_LIMIT,
+  touchClient,
   registrationThrottled,
   protectedResourceMetadata,
   readOAuthForm,
@@ -187,6 +189,26 @@ describe("dynamic client registration", () => {
     ).rejects.toMatchObject({ code: "invalid_client_metadata" });
   });
 
+  it("refuses an over-limit bucket without recording another row", async () => {
+    const d1 = fakeD1();
+    const now = new Date();
+    for (let i = 0; i <= REGISTER_RATE_LIMIT; i++) await registrationThrottled(d1, "198.51.100.1", now);
+    const rows = () => (d1.db.prepare(`SELECT COUNT(*) AS n FROM oauth_register_events`).get() as { n: number }).n;
+    const before = rows();
+    for (let i = 0; i < 50; i++) expect(await registrationThrottled(d1, "198.51.100.1", now)).toBe(true);
+    expect(rows()).toBe(before);
+  });
+
+  it("caps registrations globally across buckets (non-Anthropic)", async () => {
+    const d1 = fakeD1();
+    const now = new Date();
+    const insert = d1.db.prepare(`INSERT INTO oauth_register_events (id, ip, created_at) VALUES (?, ?, ?)`);
+    for (let i = 0; i < REGISTER_GLOBAL_LIMIT; i++) insert.run(`e${i}`, `bucket-${i}`, now.getTime());
+    expect(await registrationThrottled(d1, "192.0.2.200", now)).toBe(true);
+    // Anthropic's egress is never subject to it.
+    expect(await registrationThrottled(d1, "160.79.105.3", now)).toBe(false);
+  });
+
   it("limits registrations per IP, exempting Anthropic's egress range", async () => {
     const d1 = fakeD1();
     const now = new Date();
@@ -211,20 +233,31 @@ describe("dynamic client registration", () => {
     expect(isAnthropicEgress("local")).toBe(false);
   });
 
-  it("purges day-old clients that never got a grant, keeping connected ones", async () => {
+  it("purges grantless clients only after 30 idle days, counting authorize use", async () => {
     const d1 = setup();
-    const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
-    const unused = await registerClient(d1, { redirect_uris: [CLAUDE_CALLBACK], token_endpoint_auth_method: "none" }, old);
-    const { client: used } = await connect(d1, old);
-    const fresh = await registerClient(d1, { redirect_uris: [CLAUDE_CALLBACK], token_endpoint_auth_method: "none" }, new Date());
-    d1.db.prepare(`INSERT INTO oauth_register_events (id, ip, created_at) VALUES ('e1', '1.2.3.4', ?)`).run(old.getTime());
-    await purgeUnusedClients(d1, new Date());
+    const day = 24 * 60 * 60 * 1000;
+    const now = new Date();
+    const ago = (days: number) => new Date(now.getTime() - days * day);
+    const reg = (when: Date) =>
+      registerClient(d1, { redirect_uris: [CLAUDE_CALLBACK], token_endpoint_auth_method: "none" }, when);
+    const dayOld = await reg(ago(2)); // cached by e.g. Claude Code: must survive
+    const stale = await reg(ago(31));
+    const staleButUsed = await reg(ago(40));
+    await touchClient(d1, staleButUsed.client_id, ago(3));
+    const { client: connected } = await connect(d1, ago(45));
+    // A client whose only grant was cascade-deleted with its vault.
+    const orphaned = await reg(ago(10));
+    d1.db.prepare(`INSERT INTO oauth_register_events (id, ip, created_at) VALUES ('e1', '1.2.3.4', ?)`).run(ago(1).getTime());
+    await purgeUnusedClients(d1, now);
     const ids = (d1.db.prepare(`SELECT client_id FROM oauth_client`).all() as { client_id: string }[]).map((r) => r.client_id);
-    expect(ids).not.toContain(unused.client_id);
-    expect(ids).toContain(used.client_id);
-    expect(ids).toContain(fresh.client_id);
+    expect(ids).toContain(dayOld.client_id);
+    expect(ids).toContain(staleButUsed.client_id);
+    expect(ids).toContain(connected.client_id);
+    expect(ids).toContain(orphaned.client_id);
+    expect(ids).not.toContain(stale.client_id);
     expect(d1.db.prepare(`SELECT COUNT(*) AS n FROM oauth_register_events`).get()).toEqual({ n: 0 });
   });
+
 });
 
 describe("client ID metadata documents", () => {
@@ -445,34 +478,79 @@ describe("token endpoint", () => {
     }
   });
 
-  it("a just-rotated refresh token re-presented within 60 s is a race, not theft", async () => {
-    const d1 = setup();
-    const { client, tokens } = await connect(d1);
-    const t0 = Date.now();
-    const at = (ms: number) => ({ db: d1, now: new Date(t0 + ms), fetchImpl: noFetch });
-    const form = { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: client.client_id };
-    const first = await handleTokenRequest(at(0), form, null);
-    const retry = await handleTokenRequest(at(30_000), form, null);
-    expect(first.status).toBe(200);
-    expect(retry.status).toBe(200);
-    const a = first.body as OAuthTokenResponse;
-    const b = retry.body as OAuthTokenResponse;
-    // Both pairs live on the same, still-valid grant.
-    expect((await resolveAccessToken(d1, a.access_token, new Date(t0 + 30_000))).ok).toBe(true);
-    expect((await resolveAccessToken(d1, b.access_token, new Date(t0 + 30_000))).ok).toBe(true);
-    // Past the window, the same token is theft.
-    const late = await handleTokenRequest(at(61_000), form, null);
-    expect(late.body).toMatchObject({ error: "invalid_grant" });
-    expect((await resolveAccessToken(d1, b.access_token, new Date(t0 + 61_000))).ok).toBe(false);
+  describe("refresh grace window (token family)", () => {
+    async function family() {
+      const d1 = setup();
+      const { client, tokens } = await connect(d1);
+      const t0 = Date.now();
+      const at = (ms: number) => ({ db: d1, now: new Date(t0 + ms), fetchImpl: noFetch });
+      const refresh = (token: string, ms: number) =>
+        handleTokenRequest(at(ms), { grant_type: "refresh_token", refresh_token: token, client_id: client.client_id }, null);
+      const live = async (access: string, ms: number) => (await resolveAccessToken(d1, access, new Date(t0 + ms))).ok;
+      return { d1, tokens, refresh, live };
+    }
+
+    it("a retry inside the window gets a new pair and supersedes the first one", async () => {
+      const { tokens, refresh, live } = await family();
+      const a = (await refresh(tokens.refresh_token, 0)).body as OAuthTokenResponse;
+      const retry = await refresh(tokens.refresh_token, 30_000);
+      expect(retry.status).toBe(200);
+      const b = retry.body as OAuthTokenResponse;
+      // Exactly one live chain: the retry's pair. The first pair is superseded.
+      expect(await live(b.access_token, 30_000)).toBe(true);
+      expect(await live(a.access_token, 30_000)).toBe(false);
+      // The surviving chain keeps working.
+      expect((await refresh(b.refresh_token, 40_000)).status).toBe(200);
+    });
+
+    it("presenting a superseded sibling later is reuse and revokes the grant", async () => {
+      const { tokens, refresh, live } = await family();
+      const legit = (await refresh(tokens.refresh_token, 0)).body as OAuthTokenResponse;
+      // A thief replays the stolen parent inside the window…
+      const thief = (await refresh(tokens.refresh_token, 10_000)).body as OAuthTokenResponse;
+      expect(await live(thief.access_token, 10_000)).toBe(true);
+      // …and the legitimate client's next refresh trips reuse detection.
+      const next = await refresh(legit.refresh_token, 20_000);
+      expect(next.body).toMatchObject({ error: "invalid_grant" });
+      expect(await live(thief.access_token, 20_000)).toBe(false);
+      expect((await refresh(thief.refresh_token, 21_000)).body).toMatchObject({ error: "invalid_grant" });
+    });
+
+    it("no grace once the chain has moved on past the token", async () => {
+      const { tokens, refresh, live } = await family();
+      const a = (await refresh(tokens.refresh_token, 0)).body as OAuthTokenResponse;
+      const c = (await refresh(a.refresh_token, 5_000)).body as OAuthTokenResponse;
+      const replay = await refresh(tokens.refresh_token, 10_000);
+      expect(replay.body).toMatchObject({ error: "invalid_grant" });
+      expect(await live(c.access_token, 10_000)).toBe(false);
+    });
+
+    it("repeated retries never leave more than one live pair", async () => {
+      const { d1, tokens, refresh } = await family();
+      for (let i = 0; i < 5; i++) expect((await refresh(tokens.refresh_token, i * 1000)).status).toBe(200);
+      const liveRefresh = d1.db
+        .prepare(`SELECT COUNT(*) AS n FROM oauth_token WHERE kind = 'refresh' AND used_at IS NULL AND revoked_at IS NULL`)
+        .get() as { n: number };
+      expect(liveRefresh.n).toBe(1);
+    });
+
+    it("past the window, re-presenting the rotated token is theft", async () => {
+      const { tokens, refresh, live } = await family();
+      const a = (await refresh(tokens.refresh_token, 0)).body as OAuthTokenResponse;
+      expect((await refresh(tokens.refresh_token, 61_000)).body).toMatchObject({ error: "invalid_grant" });
+      expect(await live(a.access_token, 61_000)).toBe(false);
+    });
   });
 
-  it("reads the grace override from env, defaulting to 60 s", async () => {
+  it("reads the grace override from env, defaulting to 60 s and capped at 300 s", async () => {
     const { refreshGraceFromEnv } = await import("./oauth");
     expect(refreshGraceFromEnv(undefined)).toBe(60);
     expect(refreshGraceFromEnv("")).toBe(60);
     expect(refreshGraceFromEnv("nope")).toBe(60);
     expect(refreshGraceFromEnv("-1")).toBe(60);
     expect(refreshGraceFromEnv("3")).toBe(3);
+    // Clamped: a long window would make the family-split check meaningless.
+    expect(refreshGraceFromEnv("1000")).toBe(300);
   });
 
   it("rotates refresh tokens and treats reuse as theft", async () => {

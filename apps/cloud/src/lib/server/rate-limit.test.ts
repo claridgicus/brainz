@@ -11,6 +11,7 @@ import {
   magicLinkThrottled,
   RATE_WINDOW_MS,
   rateWindowStart,
+  rateLimitBucket,
   resolveRateLimitIp,
   SIGNUP_RATE_LIMIT,
 } from "./rate-limit";
@@ -108,5 +109,29 @@ describe("dedupeSlug", () => {
     expect(dedupeSlug("my-vault", new Set())).toBe("my-vault");
     expect(dedupeSlug("my-vault", new Set(["my-vault"]))).toBe("my-vault-2");
     expect(dedupeSlug("my-vault", new Set(["my-vault", "my-vault-2"]))).toBe("my-vault-3");
+  });
+});
+
+describe("rateLimitBucket (IPv6 by /64)", () => {
+  it("keeps IPv4 as-is", () => {
+    expect(rateLimitBucket("203.0.113.7")).toBe("203.0.113.7");
+  });
+
+  it("collapses every address in a /64 to one bucket", () => {
+    const a = rateLimitBucket("2001:db8:1:2:aaaa:bbbb:cccc:dddd");
+    expect(a).toBe("2001:db8:1:2::/64");
+    expect(rateLimitBucket("2001:0db8:0001:0002::1")).toBe(a);
+    expect(rateLimitBucket("2001:DB8:1:2:ffff::")).toBe(a);
+    expect(rateLimitBucket("2001:db8:1:3::1")).not.toBe(a);
+  });
+
+  it("handles ::, IPv4-mapped and scoped forms", () => {
+    expect(rateLimitBucket("::1")).toBe("0:0:0:0::/64");
+    expect(rateLimitBucket("::ffff:192.0.2.1")).toBe("0:0:0:0::/64");
+    expect(rateLimitBucket("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
+  });
+
+  it("is applied by resolveRateLimitIp", () => {
+    expect(resolveRateLimitIp("2001:db8:1:2::99", true)).toEqual({ ok: true, ip: "2001:db8:1:2::/64" });
   });
 });

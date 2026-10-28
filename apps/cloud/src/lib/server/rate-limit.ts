@@ -45,6 +45,39 @@ export function rateWindowStart(now: Date): Date {
 export const LOCAL_IP_BUCKET = "local";
 
 /**
+ * Expand an IPv6 address to its 8 hextets (lowercase, no zero-compression).
+ * Handles `::` and a trailing dotted IPv4 part. Null when it isn't IPv6.
+ */
+export function expandIpv6(ip: string): string[] | null {
+  if (!ip.includes(":")) return null;
+  let addr = ip.toLowerCase().replace(/^\[|\]$/g, "").split("%")[0];
+  const v4 = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(addr);
+  if (v4) {
+    const [a, b, c, d] = v4.slice(1).map(Number);
+    addr = addr.slice(0, v4.index) + ((a << 8) | b).toString(16) + ":" + ((c << 8) | d).toString(16);
+  }
+  const halves = addr.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0) return null;
+  const groups = [...head, ...Array<string>(fill).fill("0"), ...tail];
+  if (groups.length !== 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  return groups.map((g) => g.replace(/^0+(?=.)/, ""));
+}
+
+/**
+ * The bucket key for a client IP. IPv4 is the address itself; IPv6 is its /64
+ * (`2001:db8:1:2::/64`), because a single subscriber typically holds a whole
+ * /64 and could otherwise rotate addresses into unlimited fresh buckets.
+ */
+export function rateLimitBucket(ip: string): string {
+  const groups = expandIpv6(ip);
+  return groups ? `${groups.slice(0, 4).join(":")}::/64` : ip;
+}
+
+/**
  * Resolve the rate-limit bucket key from the cf-connecting-ip header, FAILING
  * CLOSED in production (audit LOW).
  *
@@ -56,13 +89,15 @@ export const LOCAL_IP_BUCKET = "local";
  * `{ ok: false }` and the caller rejects the request. Only a genuine local/dev
  * build (isProduction=false) falls back to the shared LOCAL_IP_BUCKET, which is
  * the intended convenience for `wrangler dev` / tests where no edge header
- * exists. Pure + exported for unit testing.
+ * exists. IPv6 addresses are bucketed by /64 (rateLimitBucket), which covers
+ * every guard keyed on this value (signup, public reads, magic links,
+ * password sign-in, DCR). Pure + exported for unit testing.
  */
 export function resolveRateLimitIp(
   cfConnectingIp: string | null,
   isProduction: boolean,
 ): { ok: true; ip: string } | { ok: false } {
-  if (cfConnectingIp) return { ok: true, ip: cfConnectingIp };
+  if (cfConnectingIp) return { ok: true, ip: rateLimitBucket(cfConnectingIp) };
   if (isProduction) return { ok: false };
   return { ok: true, ip: LOCAL_IP_BUCKET };
 }

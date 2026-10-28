@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { fakeD1 } from "./fake-d1.testutil";
 import type { GuardDeps } from "./magic-link-guard";
-import { gatePasswordSignIn, hasCredentialAccount } from "./reviewer-login";
+import { gatePasswordSignIn, hasCredentialAccount, recordPasswordFailure } from "./reviewer-login";
 
 function seed(d1: ReturnType<typeof fakeD1>) {
   const now = Date.now();
@@ -62,28 +62,39 @@ describe("reviewer password sign-in gate", () => {
     expect(await gatePasswordSignIn({ db: d1, guard: memoryGuard() }, { email: "reviewer@example.com", ip: "1.1.1.1" })).toBeNull();
   });
 
-  it("rate-limits durably per email and per IP, counting every attempt", async () => {
+  it("never counts successes: a reviewer who keeps signing in is never locked out", async () => {
     const d1 = fakeD1();
     seed(d1);
     const guard = memoryGuard();
-    const attempt = (email: string, ip: string) => gatePasswordSignIn({ db: d1, guard }, { email, ip });
-    for (let i = 0; i < 5; i++) expect(await attempt("reviewer@example.com", `10.0.0.${i}`)).toBeNull();
-    expect((await attempt("reviewer@example.com", "10.0.0.99"))?.status).toBe(429);
-    // Spraying unknown emails from one IP trips the IP limit too.
-    const spray = memoryGuard();
-    let last: Response | null = null;
-    for (let i = 0; i < 21; i++) {
-      last = await gatePasswordSignIn({ db: d1, guard: spray }, { email: `x${i}@example.com`, ip: "6.6.6.6" });
+    for (let i = 0; i < 20; i++) {
+      expect(await gatePasswordSignIn({ db: d1, guard }, { email: "reviewer@example.com", ip: "10.0.0.1" })).toBeNull();
     }
-    expect(last?.status).toBe(429);
-    expect(spray.events).toHaveLength(21);
+    expect(guard.events).toHaveLength(0);
   });
 
-  it("keeps password attempts out of the magic-link buckets", async () => {
+  it("blocks an email after 5 recorded failures, and an IP bucket after 20", async () => {
     const d1 = fakeD1();
     seed(d1);
     const guard = memoryGuard();
-    await gatePasswordSignIn({ db: d1, guard }, { email: "reviewer@example.com", ip: "1.1.1.1" });
-    expect(guard.events).toEqual([{ email: "password:reviewer@example.com", ip: "password:1.1.1.1" }]);
+    for (let i = 0; i < 5; i++) await recordPasswordFailure(guard, { email: "reviewer@example.com", ip: `10.0.0.${i}` });
+    expect((await gatePasswordSignIn({ db: d1, guard }, { email: "reviewer@example.com", ip: "10.9.9.9" }))?.status).toBe(429);
+    // Spraying unknown emails: each is a recorded failure; the IP trips at 20.
+    const spray = memoryGuard();
+    const statuses: number[] = [];
+    for (let i = 0; i < 21; i++) {
+      const res = await gatePasswordSignIn({ db: d1, guard: spray }, { email: `x${i}@example.com`, ip: "6.6.6.6" });
+      statuses.push(res?.status ?? 0);
+    }
+    expect(statuses.slice(0, 20).every((s) => s === 401)).toBe(true);
+    expect(statuses[20]).toBe(429);
+    expect(spray.events).toHaveLength(20);
+  });
+
+  it("keeps password failures out of the magic-link buckets", async () => {
+    const d1 = fakeD1();
+    seed(d1);
+    const guard = memoryGuard();
+    await gatePasswordSignIn({ db: d1, guard }, { email: "Human@Example.com", ip: "1.1.1.1" });
+    expect(guard.events).toEqual([{ email: "password:human@example.com", ip: "password:1.1.1.1" }]);
   });
 });
