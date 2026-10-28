@@ -63,6 +63,7 @@ import {
   syncCompleteOutputSchema,
   syncStatusOutputSchema,
   dreamOutputSchema,
+  accountDreamingSchema,
   upsertConceptOutputSchema,
   vaultSchema,
 } from "@brainz/contracts";
@@ -174,7 +175,8 @@ async function main() {
   console.log(`-- starting wrangler dev on :${PORT}…`);
   // --local: remote bindings (Workers AI) disabled so no Cloudflare login is
   // needed; the vault degrades to keyword-only search, which we assert.
-  const DEV_ARGS = ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", STATE_DIR, "--show-interactive-dev-session=false"];
+  // BYOK_ENCRYPTION_KEY: the dream-key round trip needs the secret.
+  const DEV_ARGS = ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", STATE_DIR, "--show-interactive-dev-session=false", "--var", "BYOK_ENCRYPTION_KEY:e2e-byok-secret"];
   let devLog = "";
   function startDev() {
     // detached → own process group, so stopDev can kill wrangler AND its
@@ -894,6 +896,15 @@ async function main() {
         typeof dreamStatusPayload.nextDreamAt === "string",
       JSON.stringify(dreamStatusPayload),
     );
+    step(
+      "dream status reports spend controls: provider, kill switch off, $1/day cap billed to the owner",
+      dreamStatusPayload.killSwitch === "off" &&
+        (dreamStatusPayload.provider === "workers-ai" || dreamStatusPayload.provider === null) &&
+        dreamStatusPayload.spend?.capUsd === 1 &&
+        dreamStatusPayload.spend?.remainingUsd <= 1 &&
+        /^\d{4}-\d{2}-\d{2}$/.test(dreamStatusPayload.spend?.day ?? ""),
+      JSON.stringify(dreamStatusPayload),
+    );
     const dreamRun = await mcp.callTool({ name: "dream", arguments: { action: "run" } });
     const dreamRunPayload = JSON.parse(dreamRun.content.find((c) => c.type === "text").text);
     step(
@@ -911,6 +922,53 @@ async function main() {
         dreamDiaryPayload.entries[0]?.id === dreamRunPayload.id,
       JSON.stringify(dreamDiaryPayload).slice(0, 300),
     );
+
+    // 9b-dream-byok. account dreaming: spend view, set a key (only a hint comes
+    // back), the vault's dreams switch to it, remove it again.
+    const dreamingView = await api("GET", "/api/account/dreaming");
+    step(
+      "GET /api/account/dreaming → spend vs cap, no key, kill switch off",
+      dreamingView.status === 200 &&
+        accountDreamingSchema.safeParse(dreamingView.json).success &&
+        dreamingView.json.key === null &&
+        dreamingView.json.spend.capUsd === 1 &&
+        dreamingView.json.killSwitch === "off",
+      dreamingView.text.slice(0, 300),
+    );
+    const byokPlain = "sk-ant-api03-e2e-not-a-real-key-WXYZ";
+    const setKey = await api("PUT", "/api/account/llm-key", {
+      body: { provider: "anthropic", apiKey: byokPlain },
+    });
+    step(
+      "PUT /api/account/llm-key stores the key and returns only its hint",
+      setKey.status === 200 &&
+        accountDreamingSchema.safeParse(setKey.json).success &&
+        setKey.json.provider === "byok:anthropic" &&
+        setKey.json.key?.hint === "sk-ant-…WXYZ" &&
+        !setKey.text.includes("e2e-not-a-real-key"),
+      setKey.text.slice(0, 300),
+    );
+    const byokStatus = JSON.parse(
+      (await mcp.callTool({ name: "dream", arguments: { action: "status" } })).content.find((c) => c.type === "text")
+        .text,
+    );
+    step(
+      "dream status now reports the owner's own key as the provider",
+      dreamOutputSchema.safeParse(byokStatus).success && byokStatus.provider === "byok:anthropic",
+      JSON.stringify(byokStatus).slice(0, 300),
+    );
+    const badOpenAi = await api("PUT", "/api/account/llm-key", {
+      body: { provider: "openai", apiKey: "sk-abcdefghijkl", baseUrl: "http://insecure.example.com" },
+    });
+    step("an OpenAI-compatible key without https base URL + model is rejected (400)", badOpenAi.status === 400, badOpenAi.text);
+    const delKey = await api("DELETE", "/api/account/llm-key");
+    step(
+      "DELETE /api/account/llm-key removes it (back on the capped default)",
+      delKey.status === 200 && delKey.json?.key === null && delKey.json?.provider !== "byok:anthropic",
+      delKey.text.slice(0, 300),
+    );
+    const anonDreaming = await api("GET", "/api/account/dreaming", { cookie: false });
+    step("account dreaming requires a session (401)", anonDreaming.status === 401, anonDreaming.text);
 
     // 9c. task tools: create → list → take (+ context bundle) → reject → complete
     const createdTask = await mcp.callTool({

@@ -103,6 +103,7 @@ Account-specific steps, in order:
    ```sh
    npx wrangler secret put BETTER_AUTH_SECRET   # openssl rand -base64 32
    npx wrangler secret put BETTER_AUTH_URL      # https://brainz.brownmatter.ai
+   npx wrangler secret put BYOK_ENCRYPTION_KEY  # openssl rand -base64 32 — encrypts users' dream LLM keys
    # optional GitHub OAuth:
    npx wrangler secret put GITHUB_CLIENT_ID
    npx wrangler secret put GITHUB_CLIENT_SECRET
@@ -162,6 +163,40 @@ Account-specific steps, in order:
 
 Config validation without an account: `npx wrangler deploy --dry-run`
 (run `npm run build` first).
+
+## Dreaming spend controls (operator)
+
+Nightly dreams call Workers AI on the operator's account. Three controls
+(SPEC-CLOUD "Dreaming → Spend controls"):
+
+- **Daily cap per account** — `DREAM_DAILY_USD_PER_ACCOUNT` in `wrangler.jsonc`
+  `vars` (default `"1"` USD per owner per UTC day, all their vaults combined).
+  Raise it by editing the var and redeploying. The ledger is D1 `dream_spend`:
+  ```sh
+  npx wrangler d1 execute brainz --remote --command \
+    "SELECT user_id, day, usd_micros / 1e6 AS usd, calls FROM dream_spend ORDER BY day DESC LIMIT 20"
+  ```
+- **Global kill switch** — no redeploy needed. `workers-ai` stops every
+  operator-paid dream LLM call (users with their own key keep dreaming);
+  `all` stops every dream LLM call. Sweeps keep running light-only and the
+  Dream Diary says why.
+  ```sh
+  # turn operator-paid dreaming OFF
+  npx wrangler d1 execute brainz --remote --command \
+    "INSERT INTO control_flag (key, value, updated_at) VALUES ('dreaming_kill_switch', 'workers-ai', unixepoch() * 1000) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
+  # stop ALL dream LLM calls, BYOK included: same command with 'all'
+  # back ON:
+  npx wrangler d1 execute brainz --remote --command \
+    "UPDATE control_flag SET value = 'off', updated_at = unixepoch() * 1000 WHERE key = 'dreaming_kill_switch'"
+  ```
+  The `DREAMING_AI_DISABLED` var (`workers-ai` | `all`) forces it from config;
+  the stronger of the var and the D1 flag wins. Check with
+  `dream {action: "status"}` → `killSwitch`.
+- **Bring your own key** — users add an Anthropic or OpenAI-compatible key in
+  vault settings → Dreaming; those dreams run outside the cap. Keys are
+  AES-GCM encrypted with `BYOK_ENCRYPTION_KEY` (rotating that secret makes
+  stored keys unreadable — their dreams then record `llm-error` until users
+  re-enter them).
 
 ## MCP discovery & registry publication
 

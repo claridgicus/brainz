@@ -20,6 +20,8 @@ import {
 } from "./domain.js";
 import {
   createTaskInputSchema,
+  dreamKillSwitchSchema,
+  dreamSpendSchema,
   getContextInputSchema,
   getRelatedOutputSchema,
   listConceptsOutputSchema,
@@ -242,6 +244,54 @@ export const apiKeyCreateResponseSchema = apiKeySchema.extend({ key: z.string() 
 
 /** GET .../keys response — never includes plaintext keys. */
 export const apiKeyListResponseSchema = z.object({ keys: z.array(apiKeySchema) });
+
+// ------------------------------------------- account dreaming (spend + BYOK)
+
+/** A bring-your-own dream LLM key provider: Anthropic, or any OpenAI-compatible endpoint. */
+export const llmKeyProviderSchema = z.enum(["anthropic", "openai"]);
+
+/** PUT /api/account/llm-key — set or replace the caller's dream LLM key. */
+export const llmKeyPutRequestSchema = z
+  .object({
+    provider: llmKeyProviderSchema,
+    apiKey: z.string().trim().min(8).max(512),
+    /** OpenAI-compatible only (required there): https base URL, `/chat/completions` is appended. */
+    baseUrl: z
+      .string()
+      .url()
+      .refine((u) => u.startsWith("https://"), "baseUrl must be https")
+      .optional(),
+    /** Model id; required for OpenAI-compatible, optional for Anthropic. */
+    model: z.string().trim().min(1).max(200).optional(),
+  })
+  .refine((b) => b.provider !== "openai" || (b.baseUrl !== undefined && b.model !== undefined), {
+    message: "an OpenAI-compatible key needs baseUrl and model",
+  });
+export type LlmKeyPutRequest = z.infer<typeof llmKeyPutRequestSchema>;
+
+/** A stored key as shown back: never the plaintext, only a hint (prefix + last 4). */
+export const llmKeyInfoSchema = z
+  .object({
+    provider: llmKeyProviderSchema,
+    hint: z.string(),
+    baseUrl: z.string().nullable(),
+    model: z.string().nullable(),
+    updatedAt: z.string(),
+  })
+  .strict();
+export type LlmKeyInfo = z.infer<typeof llmKeyInfoSchema>;
+
+/** GET /api/account/dreaming (and the PUT/DELETE llm-key responses). */
+export const accountDreamingSchema = z
+  .object({
+    /** `workers-ai` | `byok:<provider>` | null — what this account's dreams run on now. */
+    provider: z.string().nullable(),
+    key: llmKeyInfoSchema.nullable(),
+    spend: dreamSpendSchema,
+    killSwitch: dreamKillSwitchSchema,
+  })
+  .strict();
+export type AccountDreaming = z.infer<typeof accountDreamingSchema>;
 
 // ----------------------------------------------------- search/related/context
 

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
 	import type {
+		AccountDreaming,
 		ApiKey,
 		ConceptTypeEntry,
 		VaultInvite,
@@ -347,6 +348,51 @@
 
 	const publicMcpCli = (token: string) =>
 		`claude mcp add --transport http brainz-public ${MCP_URL} --header "Authorization: Bearer ${token}"`;
+
+	// -------------------------------------------------------------- dreaming
+	// The signed-in user's own account: their BYOK dream LLM key (only its hint
+	// is ever shown back) and today's operator-paid dream spend vs the cap.
+	// svelte-ignore state_referenced_locally
+	let dreaming = $state<AccountDreaming | null>(data.dreaming);
+	let llmProvider = $state<"anthropic" | "openai">("anthropic");
+	let llmApiKey = $state("");
+	let llmBaseUrl = $state("");
+	let llmModel = $state("");
+	let llmBusy = $state<null | "save" | "remove">(null);
+	let llmError = $state<string | null>(null);
+
+	const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
+
+	async function saveLlmKey(ev: SubmitEvent) {
+		ev.preventDefault();
+		llmBusy = "save";
+		llmError = null;
+		try {
+			dreaming = await api.setLlmKey({
+				provider: llmProvider,
+				apiKey: llmApiKey.trim(),
+				...(llmProvider === "openai" ? { baseUrl: llmBaseUrl.trim() } : {}),
+				...(llmModel.trim() ? { model: llmModel.trim() } : {}),
+			});
+			llmApiKey = "";
+		} catch (err) {
+			llmError = errMsg(err, "Failed to save the key.");
+		} finally {
+			llmBusy = null;
+		}
+	}
+
+	async function removeLlmKey() {
+		llmBusy = "remove";
+		llmError = null;
+		try {
+			dreaming = await api.removeLlmKey();
+		} catch (err) {
+			llmError = errMsg(err, "Failed to remove the key.");
+		} finally {
+			llmBusy = null;
+		}
+	}
 
 	// --------------------------------------------------------------- mcp docs
 	const MCP_URL = "https://brainz.brownmatter.ai/mcp";
@@ -805,6 +851,96 @@
 		{/if}
 	</section>
 	{/if}
+
+	<!-- ---------------------------------------------------------- dreaming -->
+	<section class="card">
+		<h2>Dreaming</h2>
+		<p class="muted">
+			Each night your vaults consolidate themselves ("dreaming"). The thinking step runs on Brainz's
+			Workers AI up to a small daily budget per account, or on your own LLM key with no cap. This
+			is your account's setting: it applies to every vault you own.
+		</p>
+
+		{#if !dreaming}
+			<p class="error-text" role="alert">Couldn't load dreaming settings — reload to try again.</p>
+		{:else}
+			{#if dreaming.killSwitch === "all" || (dreaming.killSwitch === "workers-ai" && !dreaming.key)}
+				<p class="muted note" role="status">
+					Dreaming on Brainz's AI is paused by the operator right now; vaults still tidy up, but
+					skip the thinking step{dreaming.killSwitch === "workers-ai" ? " unless you add your own key" : ""}.
+				</p>
+			{/if}
+
+			{#if dreaming.key}
+				<p class="ok-text" role="status">
+					Dreams run on your <strong>{dreaming.key.provider === "anthropic" ? "Anthropic" : "OpenAI-compatible"}</strong>
+					key <code>{dreaming.key.hint}</code>{#if dreaming.key.model} · <code>{dreaming.key.model}</code>{/if}{#if dreaming.key.baseUrl} · <code>{dreaming.key.baseUrl}</code>{/if}
+					— updated {fmtDate(dreaming.key.updatedAt)}. No daily cap applies.
+				</p>
+				<div class="row">
+					<button
+						type="button"
+						class="btn btn-danger btn-sm"
+						onclick={removeLlmKey}
+						disabled={llmBusy !== null}
+					>
+						{#if llmBusy === "remove"}<span class="spinner"></span>{/if}
+						Remove key
+					</button>
+				</div>
+			{:else}
+				<p class="muted" role="status">
+					Today's dream spend: <strong>{fmtUsd(dreaming.spend.usd)}</strong> of
+					{fmtUsd(dreaming.spend.capUsd)} (resets at 00:00 UTC).
+				</p>
+			{/if}
+
+			<form onsubmit={saveLlmKey}>
+				<div class="row">
+					<select class="select" bind:value={llmProvider} aria-label="LLM provider">
+						<option value="anthropic">Anthropic</option>
+						<option value="openai">OpenAI-compatible</option>
+					</select>
+					<input
+						class="input grow"
+						type="password"
+						bind:value={llmApiKey}
+						placeholder={dreaming.key ? "Replace with a new API key" : "Your API key"}
+						aria-label="LLM API key"
+						autocomplete="off"
+						required
+					/>
+				</div>
+				<div class="row">
+					{#if llmProvider === "openai"}
+						<input
+							class="input grow"
+							bind:value={llmBaseUrl}
+							placeholder="https://api.openai.com/v1"
+							aria-label="Base URL"
+							required
+						/>
+					{/if}
+					<input
+						class="input grow"
+						bind:value={llmModel}
+						placeholder={llmProvider === "anthropic" ? "Model (default claude-opus-5-5)" : "Model"}
+						aria-label="Model"
+						required={llmProvider === "openai"}
+					/>
+					<button type="submit" class="btn btn-primary" disabled={llmBusy !== null || !llmApiKey.trim()}>
+						{#if llmBusy === "save"}<span class="spinner"></span>{/if}
+						{dreaming.key ? "Replace key" : "Save key"}
+					</button>
+				</div>
+			</form>
+			<p class="muted note">
+				Keys are encrypted at rest and never shown again — only the last 4 characters. A key that
+				fails is recorded in the Dream Diary; dreams never fall back to Brainz's AI.
+			</p>
+		{/if}
+		{#if llmError}<p class="error-text" role="alert">{llmError}</p>{/if}
+	</section>
 
 	<!-- --------------------------------------------------------- mcp setup -->
 	<section class="card">

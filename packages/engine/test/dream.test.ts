@@ -167,6 +167,16 @@ describe("REM phase", () => {
     expect(entry.markdown).toContain("REM:** skipped");
   });
 
+  it("records the host's skip reason (spend cap / kill switch)", async () => {
+    const snap = seeded();
+    let state = startSweep({ id: "d", trigger: "alarm", now: NOW, since: null, snapshot: snap });
+    while (state.phase !== "deep") {
+      state = await advanceSweep(state, snap, { llm: null, skipReason: "budget: cap reached" });
+    }
+    expect(state.rem).toMatchObject({ status: "skipped", reason: "budget: cap reached", calls: 0 });
+    expect(diaryEntry(state, null, NOW).markdown).toContain("budget: cap reached");
+  });
+
   it("collects proposals and tolerates prose around the JSON", async () => {
     const llm = fakeLlm("Sure!\n```json\n" + JSON.stringify(PROPOSALS) + "\n```");
     const state = await runToDeep(seeded(), llm);

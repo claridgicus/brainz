@@ -38,7 +38,11 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "15"', () => {
+  it('is "16"', () => {
+    // 16: dreaming spend controls — dream status gains optional provider /
+    //     killSwitch / spend (dreamKillSwitchSchema, dreamSpendSchema); new
+    //     account dreaming REST shapes (llmKeyPutRequestSchema, llmKeyInfoSchema,
+    //     accountDreamingSchema). Additive.
     // 15: dreaming — new `dream` MCP tool (dreamInputSchema + dreamOutputSchema,
     //     dreamDiaryEntrySchema); vault_stats output gains optional lastDreamAt.
     //     Additive.
@@ -61,7 +65,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("15");
+    expect(CONTRACTS_VERSION).toBe("16");
   });
 });
 
@@ -675,6 +679,52 @@ describe("concept-type registry (Wave TR)", () => {
       graphResponseSchema.safeParse({
         nodes: [{ id: "a", title: "A", type: "totally-custom", tags: [], degree: 0 }],
         edges: [],
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe("dreaming spend controls", () => {
+  it("dream status accepts the cloud spend fields and stays strict", async () => {
+    const { dreamStatusOutputSchema } = await import("../src/index.js");
+    const base = {
+      enabled: true,
+      cadenceHours: 24,
+      lastDreamAt: null,
+      nextDreamAt: null,
+      inFlight: null,
+      llm: null,
+    };
+    expect(dreamStatusOutputSchema.safeParse(base).success).toBe(true);
+    expect(
+      dreamStatusOutputSchema.safeParse({
+        ...base,
+        provider: "workers-ai",
+        killSwitch: "off",
+        spend: { day: "2026-10-28", usd: 0.12, capUsd: 1, remainingUsd: 0.88 },
+      }).success,
+    ).toBe(true);
+    expect(dreamStatusOutputSchema.safeParse({ ...base, killSwitch: "maybe" }).success).toBe(false);
+  });
+
+  it("llm-key PUT requires baseUrl + model for OpenAI-compatible keys, https only", async () => {
+    const { llmKeyPutRequestSchema } = await import("../src/index.js");
+    expect(llmKeyPutRequestSchema.safeParse({ provider: "anthropic", apiKey: "sk-ant-abcdefgh" }).success).toBe(true);
+    expect(llmKeyPutRequestSchema.safeParse({ provider: "openai", apiKey: "sk-abcdefghij" }).success).toBe(false);
+    expect(
+      llmKeyPutRequestSchema.safeParse({
+        provider: "openai",
+        apiKey: "sk-abcdefghij",
+        baseUrl: "http://example.com/v1",
+        model: "gpt",
+      }).success,
+    ).toBe(false);
+    expect(
+      llmKeyPutRequestSchema.safeParse({
+        provider: "openai",
+        apiKey: "sk-abcdefghij",
+        baseUrl: "https://api.example.com/v1",
+        model: "gpt",
       }).success,
     ).toBe(true);
   });

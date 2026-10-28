@@ -6,7 +6,7 @@
  * The Better Auth tables follow the core schema from the Better Auth docs
  * (user / session / account / verification) for the drizzle sqlite adapter.
  */
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 // ------------------------------------------------------------ Better Auth
 
@@ -279,4 +279,57 @@ export const apiKey = sqliteTable("api_key", {
   keyPrefix: text("key_prefix").notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }),
+});
+
+// ------------------------------------------------ dreaming spend controls
+
+/**
+ * Per-account daily ledger of operator-paid (Workers AI) dream spend. One row
+ * per (vault owner, UTC day); `usd_micros` is integer micro-dollars so repeated
+ * adds never drift. Written by the VaultDO after each REM step; BYOK calls are
+ * never recorded. See $lib/server/dream-budget.
+ */
+export const dreamSpend = sqliteTable(
+  "dream_spend",
+  {
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    /** UTC `YYYY-MM-DD`. */
+    day: text("day").notNull(),
+    usdMicros: integer("usd_micros").notNull().default(0),
+    calls: integer("calls").notNull().default(0),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.day] })],
+);
+
+/**
+ * One bring-your-own dream LLM key per user. The key is AES-GCM ciphertext
+ * (BYOK_ENCRYPTION_KEY, user id as additional data); only `key_hint` is ever
+ * shown back. `base_url` is set for OpenAI-compatible providers.
+ */
+export const llmKey = sqliteTable("llm_key", {
+  userId: text("user_id")
+    .primaryKey()
+    .references(() => user.id, { onDelete: "cascade" }),
+  /** "anthropic" | "openai" (OpenAI-compatible). */
+  provider: text("provider").notNull(),
+  ciphertext: text("ciphertext").notNull(),
+  iv: text("iv").notNull(),
+  keyHint: text("key_hint").notNull(),
+  baseUrl: text("base_url"),
+  model: text("model"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+/**
+ * Operator flags flipped with `wrangler d1 execute` (no redeploy). Today:
+ * `dreaming_kill_switch` = off | workers-ai | all (see apps/cloud/README.md).
+ */
+export const controlFlag = sqliteTable("control_flag", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });

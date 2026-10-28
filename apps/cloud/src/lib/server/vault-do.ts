@@ -49,7 +49,6 @@ import type {
   ConceptType,
   DreamConcept,
   DreamDiaryEntry,
-  DreamLlm,
   DreamOptions,
   DreamPhase,
   DreamSnapshot,
@@ -71,8 +70,16 @@ import {
   matchSnippet,
   syntheticFilePath,
   tokenize,
+  VAULT_ID_HEADER,
 } from "./do-helpers";
-import { workersAiDreamLlm } from "./dream-llm";
+import {
+  chooseDreamProvider,
+  type D1Like,
+  type DreamProviderChoice,
+  type DreamSpendEnv,
+  type DreamSpendSummary,
+  type KillSwitch,
+} from "./dream-budget";
 
 const SCHEMA_VERSION = 7;
 const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
@@ -108,8 +115,10 @@ interface AiBinding {
   run(model: string, inputs: Record<string, unknown>): Promise<unknown>;
 }
 
-interface VaultDOEnv {
+interface VaultDOEnv extends DreamSpendEnv {
   AI?: AiBinding;
+  /** D1 control plane: dream spend ledger, BYOK keys, kill switch. */
+  DB?: D1Like;
 }
 
 /** Preimage of one concept a dream wrote: the full prior row (null ⇒ created) + the after-state fingerprint. */
@@ -138,6 +147,11 @@ export interface DreamStatusResult {
   inFlight: { id: string; phase: DreamPhase; startedAt: string } | null;
   llm: string | null;
   lastEntry?: DreamDiaryEntry;
+  /** `workers-ai` | `byok:<provider>` | null — what the next REM step would use. */
+  provider?: string | null;
+  killSwitch?: KillSwitch;
+  /** The vault owner's operator-paid dream spend today. */
+  spend?: DreamSpendSummary;
 }
 
 export interface DreamRunResult {
@@ -556,6 +570,8 @@ export class VaultDO {
   /** POST /<method> with a JSON args body; responses are JSON. */
   async fetch(request: Request): Promise<Response> {
     const method = new URL(request.url).pathname.replace(/^\//, "");
+    const vaultId = request.headers.get(VAULT_ID_HEADER);
+    if (vaultId && this.#metaGet("vault_id") !== vaultId) this.#metaSet("vault_id", vaultId);
     let args: Record<string, unknown> = {};
     if (request.method === "POST") {
       try {
@@ -1462,9 +1478,43 @@ export class VaultDO {
     return clampCadenceHours(raw === null ? DREAM_DEFAULT_CADENCE_HOURS : Number(raw));
   }
 
-  /** The REM provider: Workers AI when the binding exists, else none (light only). */
-  #dreamLlm(): DreamLlm | null {
-    return this.#env.AI ? workersAiDreamLlm(this.#env.AI) : null;
+  /** Test seam: the fetch BYOK providers use. */
+  dreamFetch: typeof fetch | undefined = undefined;
+
+  /** The account this vault's dreams bill to (its owner), or null when unknown. */
+  async #dreamOwner(): Promise<string | null> {
+    const db = this.#env.DB;
+    const vaultId = this.#metaGet("vault_id") ?? (this.#state.id as { name?: string } | undefined)?.name;
+    if (!db || !vaultId) return null;
+    const row = await db
+      .prepare(`SELECT owner_id FROM vault WHERE id = ?`)
+      .bind(vaultId)
+      .first<{ owner_id: string }>();
+    return row?.owner_id ?? null;
+  }
+
+  /**
+   * Which provider the next REM step may use (spend cap, kill switch, BYOK —
+   * see dream-budget.ts). A control-plane failure fails closed: no REM.
+   */
+  async #dreamChoice(): Promise<DreamProviderChoice> {
+    try {
+      return await chooseDreamProvider({
+        db: this.#env.DB,
+        env: this.#env,
+        ai: this.#env.AI,
+        ownerId: await this.#dreamOwner(),
+        fetchFn: this.dreamFetch,
+      });
+    } catch (err) {
+      console.error("dream provider selection failed:", err);
+      return {
+        llm: null,
+        provider: null,
+        killSwitch: "off",
+        skipReason: "budget: dream spend ledger unavailable",
+      };
+    }
   }
 
   #dreamCheckpoint(): DreamSweepState | null {
@@ -1556,20 +1606,26 @@ export class VaultDO {
       for (let n = 2; this.#sql.exec(`SELECT 1 FROM dream WHERE id = ?`, id).toArray().length > 0; n++) {
         id = `${dreamId(now)}-${n}`;
       }
-      state = startSweep({ id, trigger, now, since: this.#metaGet("last_dream_at"), snapshot });
+      // REM owed from a budget/disabled skip: re-stage the same material.
+      const backlog = this.#metaGet("dream_backlog_since");
+      const since = backlog === null ? this.#metaGet("last_dream_at") : backlog === "*" ? null : backlog;
+      state = startSweep({ id, trigger, now, since, snapshot });
       if (isEmptySweep(state)) {
         this.#metaSet("last_dream_at", now);
         return { status: "idle", id: null };
       }
     }
-    const llm = this.#dreamLlm();
-    // One light batch, or one bounded round of REM calls, per step.
-    if (state.phase !== "deep") {
-      state = await advanceSweep(state, snapshot, { llm, options: this.dreamOptions });
-    }
-    // Light finishing hands straight to REM within the same step when cheap.
-    if (state.phase === "rem") {
-      state = await advanceSweep(state, snapshot, { llm, options: this.dreamOptions });
+    // Spend controls are checked before every step that could reach REM.
+    const choice = await this.#dreamChoice();
+    const step = { llm: choice.llm, skipReason: choice.skipReason, options: this.dreamOptions };
+    try {
+      // One light batch, or one bounded round of REM calls, per step.
+      if (state.phase !== "deep") state = await advanceSweep(state, snapshot, step);
+      // Light finishing hands straight to REM within the same step when cheap.
+      if (state.phase === "rem") state = await advanceSweep(state, snapshot, step);
+    } finally {
+      // Record operator-paid spend after the step; the ledger never fails a sweep.
+      await choice.meter?.flush().catch((err) => console.error("dream spend not recorded:", err));
     }
     if (state.phase !== "deep") {
       this.#metaSet("dream_checkpoint", JSON.stringify(state));
@@ -1615,6 +1671,12 @@ export class VaultDO {
     );
     // The sweep's START is the next baseline, so edits made during it are seen next time.
     this.#metaSet("last_dream_at", state.startedAt);
+    // REM skipped by the spend controls stays owed: the next sweep re-stages from the same point.
+    if (state.rem.status === "skipped" && /^(budget|disabled):/.test(state.rem.reason ?? "")) {
+      this.#metaSet("dream_backlog_since", state.since ?? "*");
+    } else {
+      this.#metaDelete("dream_backlog_since");
+    }
     this.#metaDelete("dream_checkpoint");
     return entry;
   }
@@ -1705,14 +1767,18 @@ export class VaultDO {
     const alarm = enabled ? await this.#state.storage.getAlarm() : null;
     const flight = this.#dreamCheckpoint();
     const lastEntry = this.#latestEntry();
+    const choice = await this.#dreamChoice();
     return {
       enabled,
       cadenceHours: this.#dreamCadenceHours(),
       lastDreamAt: this.#metaGet("last_dream_at"),
       nextDreamAt: alarm === null ? null : new Date(alarm).toISOString(),
       inFlight: flight ? { id: flight.id, phase: flight.phase, startedAt: flight.startedAt } : null,
-      llm: this.#dreamLlm()?.name ?? null,
+      llm: choice.llm?.name ?? null,
       ...(lastEntry ? { lastEntry } : {}),
+      provider: choice.provider,
+      killSwitch: choice.killSwitch,
+      ...(choice.spend ? { spend: choice.spend } : {}),
     };
   }
 

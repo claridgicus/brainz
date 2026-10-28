@@ -17,6 +17,7 @@ import type {
   WireNeighbor,
   WireRelated,
 } from "./vault-do";
+import { VAULT_ID_HEADER } from "./do-helpers";
 import type {
   ConceptTypeCreateRequest,
   ConceptTypeEntry,
@@ -119,7 +120,8 @@ export function vaultClient(ns: DurableObjectNamespace, vaultId: string): VaultC
   async function call<T>(method: string, args: unknown = {}): Promise<T> {
     const res = await stub.fetch(`https://vault-do/${method}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      // The DO records its vault id so dream spend can be billed to the owner.
+      headers: { "content-type": "application/json", [VAULT_ID_HEADER]: vaultId },
       body: JSON.stringify(args ?? {}),
     });
     const data = (await res.json()) as T & { error?: string };

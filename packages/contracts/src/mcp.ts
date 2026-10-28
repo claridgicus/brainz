@@ -555,6 +555,20 @@ export const dreamDiaryEntrySchema = z
   })
   .strict();
 
+/** Global dreaming kill switch: off · workers-ai (no operator-paid calls; BYOK still runs) · all. */
+export const dreamKillSwitchSchema = z.enum(["off", "workers-ai", "all"]);
+
+/** An account's operator-paid (Workers AI) dream spend for one UTC day, in USD. */
+export const dreamSpendSchema = z
+  .object({
+    /** UTC day, `YYYY-MM-DD`. */
+    day: z.string(),
+    usd: z.number(),
+    capUsd: z.number(),
+    remainingUsd: z.number(),
+  })
+  .strict();
+
 /** `dream {action: "status" | "configure"}`. */
 export const dreamStatusOutputSchema = z
   .object({
@@ -571,6 +585,12 @@ export const dreamStatusOutputSchema = z
     /** The LLM provider REM would use, or null (REM/deep are skipped without one). */
     llm: z.string().nullable(),
     lastEntry: dreamDiaryEntrySchema.optional(),
+    /** Cloud: `workers-ai` | `byok:<provider>` | null — the provider the next REM step would use. */
+    provider: z.string().nullable().optional(),
+    /** Cloud: the global kill switch. */
+    killSwitch: dreamKillSwitchSchema.optional(),
+    /** Cloud: the vault owner's operator-paid dream spend today vs the daily cap. */
+    spend: dreamSpendSchema.optional(),
   })
   .strict();
 

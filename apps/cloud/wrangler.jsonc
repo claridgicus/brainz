@@ -43,5 +43,11 @@
   // send. Absent locally → the mailer falls back to DevMailer (logs the link).
   // See README-CLOUD "Deploy runbook → email".
   "send_email": [{ "name": "SEND_EMAIL" }],
+  // Dreaming spend controls (SPEC-CLOUD "Dreaming → Spend controls"):
+  // USD per account per UTC day for operator-paid Workers AI dreams. The kill
+  // switch lives in D1 (control_flag) — set DREAMING_AI_DISABLED here
+  // ("workers-ai" | "all") only to force it from config. BYOK_ENCRYPTION_KEY
+  // is a secret: wrangler secret put BYOK_ENCRYPTION_KEY.
+  "vars": { "DREAM_DAILY_USD_PER_ACCOUNT": "1" },
   "observability": { "enabled": true }
 }

@@ -607,14 +607,17 @@ export function parseRemResponse(text: string): RemProposals | null {
  * Advance a sweep by ONE bounded step and return the new state (the input is
  * not mutated): light scans up to `lightBatch` changed concepts for duplicates;
  * REM makes up to `maxLlmCallsPerStep` LLM calls. Deep is not a step — when
- * `phase === "deep"` call {@link planDeep}. With `llm: null` REM is skipped.
+ * `phase === "deep"` call {@link planDeep}. With `llm: null` REM is skipped,
+ * recording `skipReason` (default "no LLM provider available") — hosts pass
+ * e.g. a spend-cap or kill-switch reason.
  */
 export async function advanceSweep(
   input: DreamSweepState,
   snapshot: DreamSnapshot,
-  args: { llm: DreamLlm | null; options?: Partial<DreamOptions> },
+  args: { llm: DreamLlm | null; options?: Partial<DreamOptions>; skipReason?: string },
 ): Promise<DreamSweepState> {
   const o = opts(args.options);
+  const skipReason = args.skipReason ?? "no LLM provider available";
   const state = JSON.parse(JSON.stringify(input)) as DreamSweepState;
   if (state.phase === "light") {
     scanDuplicates(state, snapshot, o);
@@ -628,7 +631,7 @@ export async function advanceSweep(
       );
       if (!args.llm) {
         state.rem.status = "skipped";
-        state.rem.reason = "no LLM provider available";
+        state.rem.reason = skipReason;
         state.phase = "deep";
       }
     }
@@ -637,7 +640,7 @@ export async function advanceSweep(
   if (state.phase === "rem") {
     if (!args.llm) {
       state.rem.status = "skipped";
-      state.rem.reason = "no LLM provider available";
+      state.rem.reason = skipReason;
       state.phase = "deep";
       return state;
     }

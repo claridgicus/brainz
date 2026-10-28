@@ -10,6 +10,9 @@ import Database from "better-sqlite3";
 import { dreamOutputSchema } from "@brainz/contracts";
 import { describe, expect, it } from "vitest";
 import { VaultDO } from "./vault-do";
+import { VAULT_ID_HEADER } from "./do-helpers";
+import { KILL_SWITCH_FLAG, recordDreamSpend, saveLlmKey, utcDay } from "./dream-budget";
+import { fakeD1, seedOwner } from "./fake-d1.testutil";
 
 function fakeState() {
   const db = new Database(":memory:");
@@ -79,6 +82,10 @@ async function seededVault(env: unknown) {
   const fake = fakeState();
   const vault = new VaultDO(fake.state as never, env);
   await fake.ready();
+  // Worker → DO calls carry the vault id; the DO bills dreams to its owner.
+  await vault.fetch(
+    new Request("https://vault-do/stats", { method: "POST", headers: { [VAULT_ID_HEADER]: "v1" }, body: "{}" }),
+  );
   await vault.upsertConcept({ id: "auth", title: "Auth", type: "domain", body: "Authentication domain." });
   await vault.upsertConcept({
     id: "session-refresh",
@@ -111,6 +118,13 @@ async function seededVault(env: unknown) {
   return { vault, ...fake };
 }
 
+/** Env with a D1 control plane where u1 owns vault v1 (the seeded vault). */
+function billed(extra: Record<string, unknown> = {}) {
+  const d1 = fakeD1();
+  seedOwner(d1, "u1", "v1");
+  return { d1, env: { DB: d1, BYOK_ENCRYPTION_KEY: "test-secret", ...extra } };
+}
+
 /** Everything a revert must restore: concept rows + edges (embeddings/FTS are derived). */
 function dump(db: Database.Database) {
   return {
@@ -129,7 +143,7 @@ describe("VaultDO dreaming", () => {
   });
 
   it("one run merges duplicates, redirects edges, promotes an outcome; revert restores exactly", async () => {
-    const { vault, db } = await seededVault({ AI: fakeAi() });
+    const { vault, db } = await seededVault(billed({ AI: fakeAi() }).env);
     const before = dump(db);
 
     const run = await vault.dreamRun();
@@ -167,7 +181,7 @@ describe("VaultDO dreaming", () => {
   });
 
   it("refuses to revert over later edits", async () => {
-    const { vault } = await seededVault({ AI: fakeAi() });
+    const { vault } = await seededVault(billed({ AI: fakeAi() }).env);
     const run = await vault.dreamRun();
     await new Promise((r) => setTimeout(r, 2));
     await vault.upsertConcept({ id: "login-flow", title: "Login flow", body: "Rewritten by an agent." });
@@ -176,7 +190,7 @@ describe("VaultDO dreaming", () => {
   });
 
   it("rejects a sweep over the loss threshold and writes nothing", async () => {
-    const { vault, db } = await seededVault({ AI: fakeAi() });
+    const { vault, db } = await seededVault(billed({ AI: fakeAi() }).env);
     vault.dreamOptions = { minTouchAllowance: 1 };
     const before = dump(db).concepts;
     const run = await vault.dreamRun();
@@ -203,7 +217,7 @@ describe("VaultDO dreaming", () => {
 
   it("chunks a sweep across alarm invocations with a checkpoint", async () => {
     const ai = fakeAi();
-    const { vault } = await seededVault({ AI: ai });
+    const { vault } = await seededVault(billed({ AI: ai }).env);
     vault.dreamOptions = { lightBatch: 1 };
     await vault.alarm();
     const mid = await vault.dreamStatus();
@@ -221,5 +235,82 @@ describe("VaultDO dreaming", () => {
     expect(alarm()).toBeNull();
     const on = await vault.dreamConfigure({ enabled: true });
     expect(on.nextDreamAt).not.toBeNull();
+  });
+});
+
+describe("VaultDO dreaming spend controls", () => {
+  it("meters Workers AI spend to the owner's daily ledger and reports it in status", async () => {
+    const { d1, env } = billed({ AI: fakeAi() });
+    const { vault } = await seededVault(env);
+    const before = await vault.dreamStatus();
+    expect(dreamOutputSchema.safeParse(before).success).toBe(true);
+    expect(before).toMatchObject({
+      provider: "workers-ai",
+      killSwitch: "off",
+      spend: { usd: 0, capUsd: 1, remainingUsd: 1 },
+    });
+    const run = await vault.dreamRun();
+    expect(run.entry?.status).toBe("applied");
+    const row = d1.db.prepare(`SELECT usd_micros, calls FROM dream_spend WHERE user_id = 'u1'`).get() as {
+      usd_micros: number;
+      calls: number;
+    };
+    expect(row.calls).toBe(1);
+    expect(row.usd_micros).toBeGreaterThan(0);
+    expect((await vault.dreamStatus()).spend?.usd).toBeCloseTo(row.usd_micros / 1e6, 6);
+  });
+
+  it("over budget: light-only with reason budget, no LLM call, and REM is retried next sweep", async () => {
+    const ai = fakeAi();
+    const { d1, env } = billed({ AI: ai });
+    await recordDreamSpend(d1, "u1", utcDay(new Date()), 1, 10);
+    const { vault, db } = await seededVault(env);
+    const before = dump(db);
+    const run = await vault.dreamRun();
+    expect(run.entry).toMatchObject({ status: "light-only", rem: { status: "skipped", calls: 0 } });
+    expect(run.entry?.rem.reason).toMatch(/^budget: /);
+    expect(run.entry?.markdown).toContain("budget");
+    expect(ai.calls.filter((m) => !m.includes("bge"))).toEqual([]);
+    expect(dump(db)).toEqual(before);
+
+    // Nothing changed, but REM is owed: the next sweep re-stages the same material.
+    d1.db.prepare(`DELETE FROM dream_spend`).run();
+    const retry = await vault.dreamRun();
+    expect(retry.status).toBe("done");
+    expect(retry.entry).toMatchObject({ status: "applied", deep: { merged: 1, promoted: 1 } });
+    // Once REM ran, the backlog is cleared.
+    expect((await vault.dreamRun()).status).toBe("idle");
+  });
+
+  it("kill switch: REM skipped as disabled; status reports it", async () => {
+    const ai = fakeAi();
+    const { d1, env } = billed({ AI: ai });
+    d1.db.prepare(`INSERT INTO control_flag (key, value, updated_at) VALUES (?, 'workers-ai', 0)`).run(KILL_SWITCH_FLAG);
+    const { vault } = await seededVault(env);
+    expect(await vault.dreamStatus()).toMatchObject({ killSwitch: "workers-ai", provider: null, llm: null });
+    const run = await vault.dreamRun();
+    expect(run.entry?.rem.reason).toMatch(/^disabled: /);
+    expect(run.entry?.status).toBe("light-only");
+    expect(ai.calls.filter((m) => !m.includes("bge"))).toEqual([]);
+  });
+
+  it("BYOK: a failing key is recorded as llm-error and never falls back to Workers AI", async () => {
+    const ai = fakeAi();
+    const { d1, env } = billed({ AI: ai });
+    await saveLlmKey(d1, "test-secret", "u1", { provider: "anthropic", apiKey: "sk-ant-api03-badbadbadbad" });
+    const { vault } = await seededVault(env);
+    vault.dreamFetch = (async () =>
+      new Response(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    const status = await vault.dreamStatus();
+    expect(status.provider).toBe("byok:anthropic");
+    expect(dreamOutputSchema.safeParse(status).success).toBe(true);
+    const run = await vault.dreamRun();
+    expect(run.entry?.rem.status).toBe("skipped");
+    expect(run.entry?.rem.reason).toMatch(/^llm-error: /);
+    expect(ai.calls.filter((m) => !m.includes("bge"))).toEqual([]);
+    expect(d1.db.prepare(`SELECT COUNT(*) AS n FROM dream_spend`).get()).toEqual({ n: 0 });
   });
 });

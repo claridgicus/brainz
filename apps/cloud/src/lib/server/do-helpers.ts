@@ -178,3 +178,6 @@ export function buildGraphPayload(concepts: ConceptMeta[], edges: Edge[]): Graph
 
   return { nodes, edges };
 }
+
+/** Header every Worker → DO call carries, so the DO knows which vault (and owner) it is. */
+export const VAULT_ID_HEADER = "x-brainz-vault-id";

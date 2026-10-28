@@ -23,6 +23,12 @@ export interface CloudEnv {
   BETTER_AUTH_URL?: string;
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
+  /** Dreaming: USD per account per UTC day for operator-paid (Workers AI) dreams. Default 1. */
+  DREAM_DAILY_USD_PER_ACCOUNT?: string;
+  /** Dreaming kill-switch override: `1`/`true`/`workers-ai` or `all` (see README). */
+  DREAMING_AI_DISABLED?: string;
+  /** Secret the AES-GCM key for stored BYOK dream LLM keys is derived from. */
+  BYOK_ENCRYPTION_KEY?: string;
 }
 
 type Auth = ReturnType<typeof createAuth>;

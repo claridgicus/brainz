@@ -1,4 +1,4 @@
-import type { ConceptTypeEntry, VaultInvite, VaultMember } from "@brainz/contracts";
+import type { AccountDreaming, ConceptTypeEntry, VaultInvite, VaultMember } from "@brainz/contracts";
 import { createApi, roleOf } from "$lib/api";
 import type { PageServerLoad } from "./$types";
 
@@ -12,7 +12,9 @@ export const load: PageServerLoad = async ({ fetch, parent }) => {
   // best-effort — `null` renders an inline error instead of a 500 page.
   // Concept types are visible to every member (viewer+); best-effort so the
   // page still renders if a fetch hiccups.
-  const [keys, members, invites, publicStatus, types] = await Promise.all([
+  // Dreaming is about the signed-in user's own account (BYOK key + spend), so
+  // every member sees it; best-effort like the rest.
+  const [keys, members, invites, publicStatus, types, dreaming] = await Promise.all([
     isOwner ? api.listKeys(vault.id) : Promise.resolve([]),
     api.listMembers(vault.id).catch(() => null as VaultMember[] | null),
     isOwner
@@ -22,6 +24,7 @@ export const load: PageServerLoad = async ({ fetch, parent }) => {
       ? api.getPublicStatus(vault.id).catch(() => null)
       : Promise.resolve(null),
     api.listTypes(vault.id).catch(() => null as ConceptTypeEntry[] | null),
+    api.getAccountDreaming().catch(() => null as AccountDreaming | null),
   ]);
-  return { keys, members, invites, publicStatus, types };
+  return { keys, members, invites, publicStatus, types, dreaming };
 };

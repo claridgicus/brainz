@@ -6,6 +6,7 @@
  */
 import type { z } from "zod";
 import {
+  accountDreamingSchema,
   apiConceptSchema,
   apiErrorSchema,
   apiKeyCreateResponseSchema,
@@ -26,12 +27,14 @@ import {
   memberListResponseSchema,
   vaultMemberSchema,
   vaultSchema,
+  type AccountDreaming,
   type ApiConcept,
   type ApiKey,
   type ConceptTypeCreateRequest,
   type ConceptTypeEntry,
   type ConceptTypeUpdateRequest,
   type GraphPayload,
+  type LlmKeyPutRequest,
   type PublicEnableResponse,
   type PublicStatus,
   type TaskMeta,
@@ -315,6 +318,19 @@ export function createApi(fetchFn: Fetch) {
     },
     async revokeKey(keyId: string): Promise<void> {
       await expectNoContent(await fetchFn(`/api/keys/${enc(keyId)}`, { method: "DELETE" }));
+    },
+
+    // ---------------------------------------------- account dreaming / BYOK
+    /** The caller's dream provider, key hint, today's spend vs cap, kill switch. */
+    getAccountDreaming(): Promise<AccountDreaming> {
+      return request(accountDreamingSchema, "/api/account/dreaming");
+    },
+    /** Set or replace the caller's dream LLM key (the plaintext is never returned). */
+    setLlmKey(body: LlmKeyPutRequest): Promise<AccountDreaming> {
+      return request(accountDreamingSchema, "/api/account/llm-key", { method: "PUT", body });
+    },
+    removeLlmKey(): Promise<AccountDreaming> {
+      return request(accountDreamingSchema, "/api/account/llm-key", { method: "DELETE" });
     },
 
     // ------------------------------------------------------ public access
