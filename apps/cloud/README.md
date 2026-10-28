@@ -223,10 +223,20 @@ One-time setup before the first publish can succeed (needs brownmatter.ai DNS
 access; registry is in preview — see
 https://modelcontextprotocol.io/registry/remote-servers):
 
-1. Install the publisher CLI: `brew install mcp-publisher` (or download from
-   github.com/modelcontextprotocol/registry releases).
-2. Generate an ed25519 keypair and verify the `ai.brownmatter/*` namespace —
-   either DNS:
+1. Install the publisher CLI: `brew install mcp-publisher`, or on Linux the
+   release binary (verify it against `registry_<ver>_checksums.txt`):
+   ```sh
+   B=https://github.com/modelcontextprotocol/registry/releases/latest/download
+   curl -sL $B/mcp-publisher_linux_amd64.tar.gz | tar -xz -C ~/.local/bin mcp-publisher
+   ```
+2. Generate an ed25519 keypair (the maintainer's lives at
+   `~/.config/mcp-registry/brownmatter-ed25519.pem`, never in the repo):
+   ```sh
+   openssl genpkey -algorithm Ed25519 -out key.pem
+   PUB=$(openssl pkey -in key.pem -pubout -outform DER | tail -c 32 | base64)
+   HEX=$(openssl pkey -in key.pem -outform DER | tail -c 32 | xxd -p -c 64)
+   ```
+   and verify the `ai.brownmatter/*` namespace — either DNS:
    ```
    brownmatter.ai. IN TXT "v=MCPv1; k=ed25519; p=<PUBLIC_KEY>"
    mcp-publisher login dns --domain=brownmatter.ai --private-key=<HEX_KEY>
