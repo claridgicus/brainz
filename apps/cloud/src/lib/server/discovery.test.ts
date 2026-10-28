@@ -22,7 +22,9 @@ import { describe, expect, it, vi } from "vitest";
 // available outside the SvelteKit runtime, so stub it (same as auth.test.ts).
 vi.mock("$app/server", () => ({ getRequestEvent: () => ({}) }));
 import {
+  AGENT_MCP_PATH,
   CLOUD_MCP_TOOL_NAMES,
+  DIRECTORY_MCP_TOOL_NAMES,
   MCP_TOOL_NAMES,
   PUBLIC_MCP_TOOL_NAMES,
 } from "@brainz/contracts";
@@ -68,7 +70,7 @@ describe("MCP discovery documents", () => {
     expect((registryDoc.description as string).length).toBeLessThanOrEqual(100);
   });
 
-  it("advertises Authorization as optional + secret (public signup exists)", () => {
+  it("advertises Authorization as optional + secret (OAuth clients omit it)", () => {
     const [remote] = wellKnown.remotes as Array<{
       headers: Array<{ name: string; isRequired: boolean; isSecret: boolean }>;
     }>;
@@ -78,11 +80,16 @@ describe("MCP discovery documents", () => {
 
   it("tool lists in _meta match the contracts registries exactly", () => {
     const meta = (wellKnown._meta as Record<string, unknown>)["ai.brownmatter/brainz"] as {
-      unauthenticatedTools: string[];
-      authenticatedTools: string[];
+      oauthTools: string[];
+      apiKeyTools: string[];
+      agentEndpoint: string;
+      agentEndpointUnauthenticatedTools: string[];
     };
-    expect(meta.unauthenticatedTools).toEqual([...PUBLIC_MCP_TOOL_NAMES]);
-    expect(meta.authenticatedTools).toEqual([...MCP_TOOL_NAMES, ...CLOUD_MCP_TOOL_NAMES]);
+    expect(meta.oauthTools).toEqual([...DIRECTORY_MCP_TOOL_NAMES]);
+    expect(meta.apiKeyTools).toEqual([...MCP_TOOL_NAMES, ...CLOUD_MCP_TOOL_NAMES]);
+    // Agent self-signup (the in-chat API key) lives on /mcp/agent, never /mcp.
+    expect(meta.agentEndpoint).toBe(`${PRODUCTION_ORIGIN}${AGENT_MCP_PATH}`);
+    expect(meta.agentEndpointUnauthenticatedTools).toEqual([...PUBLIC_MCP_TOOL_NAMES]);
   });
 
   it("links the public privacy, terms and support pages directories require", () => {

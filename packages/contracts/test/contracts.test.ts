@@ -11,6 +11,9 @@ import {
   conceptTypeCreateRequestSchema,
   conceptTypeEntrySchema,
   CONTRACTS_VERSION,
+  AGENT_MCP_PATH,
+  DIRECTORY_HIDDEN_TOOL_NAMES,
+  DIRECTORY_MCP_TOOL_NAMES,
   slugifyTypeKey,
   MCP_TOOLS,
   MCP_TOOL_NAMES,
@@ -38,7 +41,11 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "18"', () => {
+  it('is "19"', () => {
+    // 19: directory policy — /mcp hands out no API keys (signup/sign_in move to
+    //     AGENT_MCP_PATH), DIRECTORY_HIDDEN_TOOL_NAMES / DIRECTORY_MCP_TOOL_NAMES
+    //     (session_hook off OAuth + the unauthenticated listing), and tool
+    //     descriptions reworded to describe rather than steer. Additive.
     // 18: OAuth 2.1 for remote MCP — new oauth.ts shapes (protected-resource +
     //     authorization-server metadata, client registration, token response,
     //     error body) and OAUTH_VAULT_SCOPE. Additive.
@@ -70,7 +77,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("18");
+    expect(CONTRACTS_VERSION).toBe("19");
   });
 });
 
@@ -216,7 +223,7 @@ describe("CLOUD_MCP_TOOLS registry (cloud-only authenticated surface)", () => {
     expect(claim.description).toMatch(/email/i);
     expect(claim.description).toMatch(/NEVER returned/i);
     expect(claim.description).toMatch(/human/i);
-    expect(claim.description).toMatch(/once/i);
+    expect(claim.description).toMatch(/one request per email/i);
   });
 
   it("claim input requires a valid email", () => {
@@ -732,5 +739,36 @@ describe("dreaming spend controls", () => {
         model: "gpt",
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("directory surfaces", () => {
+  it("hide exactly session_hook from the directory tool list", () => {
+    expect([...DIRECTORY_HIDDEN_TOOL_NAMES]).toEqual(["session_hook"]);
+    expect(DIRECTORY_MCP_TOOL_NAMES).toEqual(MCP_TOOL_NAMES.filter((n) => n !== "session_hook"));
+    expect(AGENT_MCP_PATH).toBe("/mcp/agent");
+  });
+
+  // Anthropic rejects descriptions that "tell Claude how to behave"; OpenAI
+  // rejects "overly broad triggering beyond the explicit user intent". These
+  // phrasings are the ones the directory policy review removed.
+  it("tool descriptions describe the tool instead of steering the model", () => {
+    const steering = [
+      /\bTHE tool\b/,
+      /\bevery (future )?session\b/i,
+      /don't wait to be asked/i,
+      /\bdo NOT\b/,
+      /\bStep 1\b/,
+      /before moving on/i,
+      /don't just read/i,
+      /THE CONTRACT/,
+      /\bUse this first\b/i,
+      /\bCall (this )?once\b/i,
+    ];
+    for (const tool of [...MCP_TOOLS, ...CLOUD_MCP_TOOLS]) {
+      for (const re of steering) {
+        expect(`${tool.name}: ${tool.description}`).not.toMatch(re);
+      }
+    }
   });
 });

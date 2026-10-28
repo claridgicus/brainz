@@ -23,8 +23,8 @@ import {
   computeCoverage,
   isSyncStale,
   onboardingPlaybook,
+  serverInstructions,
   sessionHookPlaybook,
-  sessionInstructions,
   syncPlaybook,
 } from "@brainz/engine";
 import { syntheticFilePath } from "./do-helpers";
@@ -100,19 +100,26 @@ export interface McpServerHooks {
    * surface). Omit for the full authenticated (editor-equivalent) surface.
    */
   only?: readonly McpToolName[];
+  /**
+   * Vault tools to leave unregistered (directory surfaces): OAuth connections
+   * pass DIRECTORY_HIDDEN_TOOL_NAMES so `session_hook` is never offered to a
+   * hosted chat client. Applied after `only`.
+   */
+  exclude?: readonly McpToolName[];
 }
 
 /** Build the MCP server for one vault (stateless: one per request). */
 export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): McpServer {
-  // `instructions` ride the initialize response, so every client that surfaces
-  // them starts each session already told to reach for Brainz by default. A
-  // viewer-scoped connection gets the read-only variant (no write-back advice).
+  // `instructions` ride the initialize response. Brainz Cloud sends the
+  // NEUTRAL description (serverInstructions), never the directive session
+  // primer: directory review rejects server text that steers the model. A
+  // viewer-scoped connection gets the read-only variant.
   const server = new McpServer(
     {
       name: hooks.only ? `${SERVER_NAME}-public-read` : SERVER_NAME,
       version: SERVER_VERSION,
     },
-    { instructions: sessionInstructions({ readOnly: hooks.only !== undefined }) },
+    { instructions: serverInstructions({ readOnly: hooks.only !== undefined }) },
   );
 
   const isOnboarded = async (): Promise<boolean> =>
@@ -614,8 +621,10 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
   // Public (viewer) connections register ONLY the read allow-list; the write
   // tools never enter the server, so viewer scope is enforced by absence.
   const allow = hooks.only ? new Set<McpToolName>(hooks.only) : null;
+  const exclude = new Set<McpToolName>(hooks.exclude ?? []);
   for (const tool of MCP_TOOLS as readonly McpToolDef[]) {
     if (allow && !allow.has(tool.name)) continue;
+    if (exclude.has(tool.name)) continue;
     const handler = handlers[tool.name] as (args: Record<string, unknown>) => Promise<ToolResult>;
     server.registerTool(
       tool.name,

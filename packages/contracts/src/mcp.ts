@@ -734,11 +734,10 @@ export const MCP_TOOLS = [
     name: "search_concepts",
     title: "Search concepts",
     description:
-      "Search the product knowledge vault by free-text query. Use this first, whenever you need product " +
-      "knowledge but don't yet know which concept ids exist — e.g. before planning work that touches a " +
-      "feature, decision, or constraint. Returns ranked hits (id, title, type, score, snippet) only; " +
-      "follow up with get_concept for one full note or get_context for an injectable bundle. " +
-      "Never errors on odd queries — an empty hit list just means nothing matched.",
+      "Search the product knowledge vault by free-text query. Useful when you need product knowledge " +
+      "but don't yet know which concept ids exist. Returns ranked hits (id, title, type, score, snippet) " +
+      "only; get_concept returns one full note and get_context an assembled briefing. An empty hit " +
+      "list means nothing matched.",
     inputSchema: searchConceptsInputSchema,
     outputSchema: searchConceptsOutputSchema,
     annotations: READ_ONLY_TOOL,
@@ -771,12 +770,11 @@ export const MCP_TOOLS = [
     name: "get_context",
     title: "Assemble context bundle",
     description:
-      "THE tool to call before delegating a coding task: assembles a ready-to-inject markdown briefing of " +
-      "the most relevant concepts (seeded by a search query and/or explicit ids, expanded through the " +
-      "graph) trimmed to a token budget. Paste the returned markdown straight into a subagent's prompt so " +
-      "it gets curated product knowledge without you relaying individual notes. The final JSON line " +
-      "reports which concept ids were included, whether the bundle was truncated, and its approximate " +
-      "token count. Provide at least one of `query` or `ids`.",
+      "Assemble a markdown briefing of the concepts most relevant to a query and/or explicit ids, " +
+      "expanded through the graph and trimmed to a token budget. The briefing is self-contained, so it " +
+      "can be handed to another agent or pasted into a prompt as-is. The final JSON line reports which " +
+      "concept ids were included, whether the bundle was truncated, and its approximate token count. " +
+      "Provide at least one of `query` or `ids`.",
     inputSchema: getContextInputSchema,
     outputSchema: getContextOutputSchema,
     annotations: READ_ONLY_TOOL,
@@ -833,9 +831,9 @@ export const MCP_TOOLS = [
     name: "vault_stats",
     title: "Vault stats",
     description:
-      "Cheap orientation call: counts of concepts and edges, the products and tags in use, a breakdown " +
-      "by concept type, and whether semantic search is available. Call once when connecting to an " +
-      "unfamiliar vault to calibrate how much knowledge is here and which product/tag filters exist.",
+      "Summarize the vault: counts of concepts and edges, the products and tags in use, a breakdown by " +
+      "concept type, and whether semantic search is available. Useful for gauging how much knowledge " +
+      "is here and which product/tag filters exist.",
     inputSchema: vaultStatsInputSchema,
     outputSchema: vaultStatsOutputSchema,
     annotations: READ_ONLY_TOOL,
@@ -844,19 +842,15 @@ export const MCP_TOOLS = [
     name: "onboard",
     title: "Onboard this vault",
     description:
-      "Step 1 on any new vault: onboarding turns an existing product's codebase into the knowledge graph " +
-      "your whole agent fleet shares. Call {action: \"start\"} to receive the onboarding playbook — " +
-      "instructions for fanning subagents out over the codebase and distilling product knowledge " +
-      "(domains, features, stories, specs, workflows, decisions, constraints) into concepts via " +
-      "upsert_concept, each anchored to the code with codeAreas. There is NO flat concept cap — size the " +
-      "effort from the codebase; for a large project expect 200–800+ concepts and do NOT stop at a few " +
-      "dozen. Onboarding is a LOOP: index an area, then call {action: \"status\", areaList} (you supply " +
-      "your repo's source areas — Brainz can't read the repo) to see covered vs uncovered areas; keep " +
-      "indexing the uncovered ones until coverage is broad. When it is, call {action: \"complete\", " +
-      "summary, areaList} to mark the vault onboarded and store the summary — complete is coverage-gated " +
-      "and rejects if too many areas are still uncovered. {action: \"status\"} reports onboarded state, " +
-      "concept counts, and (with areaList) coverage. Until onboarding completes, search_concepts and " +
-      "get_context results carry a reminder to run it.",
+      "Index an existing product's codebase into this vault. {action: \"start\"} returns the " +
+      "onboarding playbook: a method for surveying the codebase and recording its product knowledge " +
+      "(domains, features, stories, specs, workflows, decisions, constraints) as concepts via " +
+      "upsert_concept, each anchored to the code with codeAreas. {action: \"status\", areaList} " +
+      "reports onboarded state, concept counts and, given your repo's source areas (Brainz can't read " +
+      "the repo), which areas are covered or uncovered. {action: \"complete\", summary, areaList} marks " +
+      "the vault onboarded and stores the summary; it is rejected while too many areas are uncovered. " +
+      "Until onboarding completes, search_concepts and get_context results include a one-line note " +
+      "saying so.",
     inputSchema: onboardInputSchema,
     outputSchema: onboardOutputSchema,
     annotations: ADDITIVE_WRITE_TOOL,
@@ -865,17 +859,15 @@ export const MCP_TOOLS = [
     name: "sync",
     title: "Sync this vault to the current code",
     description:
-      "Re-onboard: keep the knowledge graph TRUE to the artifact as code changes. Onboarding is one-shot; " +
-      "`sync` is the supported path to re-index drift. Call {action: \"start\"} to receive the sync playbook — a " +
-      "DRIFT playbook (NOT the full onboarding one): it embeds a coverage map over your concepts' code_areas " +
-      "and instructs you to (a) diff the codebase since last_synced_at with git (you run git — Brainz can't " +
-      "read the repo — and pass back changedPaths + areaList), (b) fan out over the CHANGED areas only, (c) " +
-      "UPDATE stale concepts whose code_areas changed (in place, don't duplicate), (d) INDEX new/un-mapped work " +
-      "as new concepts and file tasks for incomplete work, (e) report coverage gaps. {action: \"status\", " +
-      "areaList} reports onboarded state, last sync time, staleness, concept counts, and coverage. When the " +
-      "changed areas are re-indexed call {action: \"complete\", summary, areaList} — it stamps last_synced_at " +
-      "and APPENDS your summary to the product-onboarding-summary concept (a running sync log). Past ~14 days " +
-      "without a sync, get_context and search results carry a staleness reminder to run it.",
+      "Re-index an onboarded vault after the code changes (drift). {action: \"start\"} returns the " +
+      "sync playbook: the vault's last_synced_at, a coverage map over the concepts' code_areas, and a method " +
+      "for re-indexing only what changed (you run git — Brainz can't read the repo — and pass back " +
+      "changedPaths + areaList): update stale concepts in place, add concepts or tasks for new work, " +
+      "and report coverage gaps. {action: \"status\", areaList} reports onboarded state, last sync " +
+      "time, staleness, concept counts and coverage. {action: \"complete\", summary, areaList} stamps " +
+      "last_synced_at and appends the summary to the product-onboarding-summary concept (a running " +
+      "sync log). After ~14 days without a sync, get_context and search results include a one-line " +
+      "note saying so.",
     inputSchema: syncInputSchema,
     outputSchema: syncOutputSchema,
     annotations: ADDITIVE_WRITE_TOOL,
@@ -884,13 +876,11 @@ export const MCP_TOOLS = [
     name: "session_hook",
     title: "Install the Brainz session hook",
     description:
-      "Make Brainz the default in EVERY future session, not just this one. Returns the session-hook " +
-      "playbook: a short primer (get_context before planning or delegating, take_task for work, " +
-      "upsert_concept to write back what changed) plus the exact steps to install it as a session-start " +
-      "hook in your own harness — a Claude Code SessionStart hook in .claude/settings.json, or a marked " +
-      "block in AGENTS.md / your client's rules file. Brainz can't write to your repo, so YOU apply the " +
-      "edits. Call this once per repository, right after connecting (or after onboarding); the steps are " +
-      "idempotent, so re-running refreshes the primer instead of duplicating it.",
+      "Return setup steps for adding a Brainz primer to a repository's agent configuration: the primer " +
+      "text plus the edits that install it, as a Claude Code SessionStart hook in .claude/settings.json " +
+      "or as a marked block in AGENTS.md / another rules file. Brainz can't write to the repo; the " +
+      "steps are for you to apply when your user wants that setup. Re-applying them replaces the " +
+      "previous primer rather than duplicating it.",
     inputSchema: sessionHookInputSchema,
     outputSchema: sessionHookOutputSchema,
     annotations: READ_ONLY_TOOL,
@@ -899,15 +889,15 @@ export const MCP_TOOLS = [
     name: "dream",
     title: "Dream (nightly consolidation)",
     description:
-      "Brainz dreams: an autonomous, unattended consolidation sweep that improves the graph between agent " +
-      "sessions. Light stages what changed since the last dream (near-duplicate concepts, finished task " +
-      "outcomes, hygiene counts); REM asks an LLM for proposals; deep applies the ones that pass threshold " +
-      "gates — merges duplicates (edges redirected, the other tombstoned), promotes outcome knowledge into " +
-      "concepts, adds missing links, and files a task for each contradiction instead of picking a side. A " +
-      "sweep that would touch too much of the vault is rejected; every applied dream keeps preimages and can " +
-      "be reverted. {action: \"status\"} shows schedule + last dream; {action: \"run\"} dreams now; " +
-      "{action: \"diary\"} reads the Dream Diary; {action: \"revert\", id} undoes one dream; " +
-      "{action: \"configure\", enabled?, cadenceHours?} sets it up. Without an LLM only light runs.",
+      "Dreaming: a scheduled consolidation sweep over this vault. Light stages what changed since the " +
+      "last dream (near-duplicate concepts, finished task outcomes, hygiene counts); REM asks an LLM for " +
+      "proposals; deep applies the ones that pass threshold gates: merges duplicates (edges redirected, " +
+      "the other tombstoned), promotes outcome knowledge into concepts, adds missing links, and files a " +
+      "task for each contradiction. A sweep that would touch too much of the vault is rejected; every " +
+      "applied dream keeps preimages and can be reverted. {action: \"status\"} shows schedule + last " +
+      "dream; {action: \"run\"} dreams now; {action: \"diary\"} reads the Dream Diary; " +
+      "{action: \"revert\", id} undoes one dream; {action: \"configure\", enabled?, cadenceHours?} " +
+      "sets it up. Without an LLM only light runs.",
     inputSchema: dreamInputSchema,
     outputSchema: dreamOutputSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
@@ -917,9 +907,8 @@ export const MCP_TOOLS = [
     title: "List tasks",
     description:
       "List the vault's work pile: `task`-type concepts with their lifecycle (open/taken/done), oldest " +
-      "first. Call to survey what's outstanding before claiming work, to check what a teammate agent is " +
-      "already doing (taskStatus \"taken\" with takenBy), or to audit completed work. Filter by taskStatus " +
-      "or by the domain the tasks are part_of. To actually pick up work, use take_task — don't just read.",
+      "first, including who has taken each one (takenBy). Filter by taskStatus or by the domain the " +
+      "tasks are part_of. Read-only; take_task is what claims a task.",
     inputSchema: listTasksInputSchema,
     outputSchema: listTasksOutputSchema,
     annotations: READ_ONLY_TOOL,
@@ -928,14 +917,11 @@ export const MCP_TOOLS = [
     name: "take_task",
     title: "Take a task off the pile",
     description:
-      "Claim a unit of work and get briefed in one call. Pass an `id` to claim a specific task, or omit it " +
-      "to claim THE next open task (deterministic: oldest open by createdAt then id) — safe to call " +
-      "repeatedly to drain the pile. Atomically flips the task to \"taken\" and records takenBy/takenAt; " +
-      "errors if it's already taken or done. Returns the task AND an auto-assembled get_context-grade " +
-      "briefing for its part_of domain plus the concepts it realizes / is governed_by (with code_areas) — " +
-      "paste that straight into your implementation. THE CONTRACT: after implementing, verify the artifact " +
-      "matches every spec that governs the task; fix or file a new task for any discrepancy; then index the " +
-      "new/changed knowledge via upsert_concept and call complete_task.",
+      "Claim a task and get its briefing in one call. Pass an `id` to claim a specific task, or omit it " +
+      "to claim the next open task (oldest open by createdAt then id). Atomically flips the task to " +
+      "\"taken\" and records takenBy/takenAt; errors if it's already taken or done. Returns the task " +
+      "and a get_context-style briefing for its part_of domain plus the concepts it realizes / is " +
+      "governed_by (with code_areas). complete_task marks it done.",
     inputSchema: takeTaskInputSchema,
     outputSchema: takeTaskOutputSchema,
     annotations: ADDITIVE_WRITE_TOOL,
@@ -944,9 +930,8 @@ export const MCP_TOOLS = [
     name: "complete_task",
     title: "Complete a task",
     description:
-      "Mark a task done once the work is in the artifact. Sets taskStatus=done + doneAt and appends your " +
-      "`outcome` to the task body as an Outcome section. The result reminds you to index what changed via " +
-      "upsert_concept so the knowledge graph stays true to the codebase — do that before moving on.",
+      "Mark a task done. Sets taskStatus=done + doneAt and appends `outcome` to the task body as an " +
+      "Outcome section. The result notes that upsert_concept can record what changed.",
     inputSchema: completeTaskInputSchema,
     outputSchema: completeTaskOutputSchema,
     annotations: ADDITIVE_WRITE_TOOL,
@@ -1093,8 +1078,8 @@ export const CLOUD_MCP_TOOLS = [
     description:
       "Make this provisional workspace permanent by attaching it to your human's email. The " +
       "approval link is EMAILED to the human — it is NEVER returned to you, so do not ask for it " +
-      "or try to open it; tell your human to check their inbox and approve. Call this ONCE with " +
-      "your human's email, then wait: the result only confirms the email was sent (`expiresAt` is " +
+      "or try to open it; the human approves from their inbox. One request per email is enough: " +
+      "the result only confirms the email was sent (`expiresAt` is " +
       "the approval link's 24-hour deadline). Until the human approves, the workspace still " +
       "expires on its 7-day signup schedule. Errors if the workspace is already claimed.",
     inputSchema: claimInputSchema,
@@ -1148,6 +1133,32 @@ export const PUBLIC_VAULT_READ_TOOL_NAMES = [
 ] as const satisfies readonly McpToolName[];
 
 export type PublicVaultReadToolName = (typeof PUBLIC_VAULT_READ_TOOL_NAMES)[number];
+
+/**
+ * DIRECTORY_HIDDEN_TOOL_NAMES — vault tools Brainz Cloud leaves OFF its
+ * directory surfaces: OAuth (`bzat_`) connections and the unauthenticated
+ * `/mcp` lazy-auth listing, which is what Claude / ChatGPT directory clients
+ * see. `session_hook` hands back steps for installing a persistent primer in
+ * the caller's harness, which a hosted chat client has no repo for and which
+ * directory review reads as steering the model. `bz_` key connections and the
+ * local stdio server keep it.
+ */
+export const DIRECTORY_HIDDEN_TOOL_NAMES = [
+  "session_hook",
+] as const satisfies readonly McpToolName[];
+
+/** MCP_TOOL_NAMES minus DIRECTORY_HIDDEN_TOOL_NAMES, in registry order. */
+export const DIRECTORY_MCP_TOOL_NAMES = MCP_TOOL_NAMES.filter(
+  (n) => !(DIRECTORY_HIDDEN_TOOL_NAMES as readonly string[]).includes(n),
+) as readonly McpToolName[];
+
+/**
+ * The cloud endpoint for agent self-signup: unauthenticated callers get the
+ * PUBLIC_MCP_TOOLS (`signup`, `sign_in`) there, and `bz_` keys work there as
+ * on `/mcp`. `/mcp` itself is the directory endpoint (OAuth + lazy auth) and
+ * hands out no API keys.
+ */
+export const AGENT_MCP_PATH = "/mcp/agent";
 
 /** Look up a registry entry by name, preserving its concrete schema types. */
 export function getMcpTool<N extends McpToolName>(name: N): Extract<McpTool, { name: N }> {

@@ -354,7 +354,7 @@ export async function chooseDreamProvider(args: {
       provider: null,
       killSwitch,
       spend,
-      skipReason: "disabled: operator-paid dreaming is switched off — add your own LLM key in settings",
+      skipReason: "disabled: operator-paid dreaming is switched off; only an owner-configured LLM key runs REM",
     };
   }
   if (!args.ai) return { llm: null, provider: null, killSwitch, spend, skipReason: "no LLM provider available" };
@@ -364,7 +364,7 @@ export async function chooseDreamProvider(args: {
       provider: "workers-ai",
       killSwitch,
       spend,
-      skipReason: `budget: today's dream budget is spent (${fmtUsd(spent)} of ${fmtUsd(cap)}); retries tomorrow, or add your own LLM key`,
+      skipReason: `budget: today's dream budget is spent (${fmtUsd(spent)} of ${fmtUsd(cap)}); REM retries tomorrow`,
     };
   }
   const meter = {

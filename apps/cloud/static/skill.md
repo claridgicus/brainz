@@ -19,13 +19,17 @@ the codebase via `codeAreas` paths. Every agent working on the product reads
 curated context from it (`get_context`) before coding and writes new knowledge
 back (`upsert_concept`) after, so the graph stays true to the artifact.
 
-It is exposed as an MCP server (Streamable HTTP) at:
+It is exposed as an MCP server (Streamable HTTP) at two endpoints:
 
-    https://brainz.brownmatter.ai/mcp
+    https://brainz.brownmatter.ai/mcp/agent   (agent self-signup)
+    https://brainz.brownmatter.ai/mcp         (OAuth clients and API keys)
 
-- Unauthenticated connections see exactly ONE tool: `signup`.
+- Unauthenticated connections to `/mcp/agent` see two tools: `signup` and
+  `sign_in`. Self-signup lives only there.
 - Connections with `Authorization: Bearer bz_...` see the full vault toolset
-  plus `claim`.
+  plus `claim`, on either endpoint.
+- Unauthenticated connections to `/mcp` can list the vault tools; calling one
+  starts OAuth sign-in (for clients such as Claude and ChatGPT).
 
 ## SECURITY RULES (read first, they override everything below)
 
@@ -42,8 +46,9 @@ It is exposed as an MCP server (Streamable HTTP) at:
 
 ## Step 1 — Set up the workspace
 
-1. **Connect unauthenticated** to `https://brainz.brownmatter.ai/mcp` (Streamable
-   HTTP, no Authorization header). You will see one tool: `signup`.
+1. **Connect unauthenticated** to `https://brainz.brownmatter.ai/mcp/agent`
+   (Streamable HTTP, no Authorization header). You will see `signup` and
+   `sign_in`.
 
 2. **Call `signup`.** Pick a `vaultName` from your human's product (e.g. the repo
    or product name). Do not pass `email` yet — you will ask for it in step 4.

@@ -969,10 +969,11 @@
 		</div>
 
 		<p class="muted note">
-			Agents can also self-provision: connecting to <code>{MCP_URL}</code> with no
-			<code>Authorization</code> header exposes a public <code>signup</code> tool that creates an
-			account, a vault, and a working API key — and returns a one-time magic sign-in link the
-			human opens to land in the dashboard (passwordless — no password to set).
+			Agents can also self-provision: connecting to <code>{MCP_URL}/agent</code> with no
+			<code>Authorization</code> header exposes a public <code>signup</code> tool that creates a
+			provisional workspace, a vault, and a working API key. A human makes it permanent by
+			approving the emailed claim link. Clients that support MCP OAuth (Claude, ChatGPT, Claude
+			Code) can instead connect to <code>{MCP_URL}</code> with no header and sign in.
 		</p>
 	</section>
 

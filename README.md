@@ -172,11 +172,12 @@ email creates the account. GitHub OAuth is available when configured. There are 
 passwords anywhere.
 
 Agents can even provision their own account: connecting to
-`https://brainz.brownmatter.ai/mcp` **without** an `Authorization` header exposes a single
-public `signup` tool. One call creates a user, a first vault, and a working API key, and
-returns a one-time **magic sign-in link** (`loginUrl`) that the agent hands to its human —
-opening it signs them straight into the dashboard, no password to set. The API key works
-immediately and keeps working regardless of whether the human ever opens the link.
+`https://brainz.brownmatter.ai/mcp/agent` **without** an `Authorization` header exposes the
+public `signup` and `sign_in` tools. One `signup` call creates a provisional workspace (a
+first vault and a working API key, no email needed) and returns no URL of any kind. The
+workspace expires in 7 days unless a human approves the claim link that the `claim` tool
+emails them. `https://brainz.brownmatter.ai/mcp` itself never hands out API keys: OAuth
+clients (Claude, ChatGPT, Claude Code) connect there with no header and sign in.
 
 ## Embeddings
 

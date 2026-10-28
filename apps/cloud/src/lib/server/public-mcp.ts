@@ -1,14 +1,18 @@
 /**
- * PUBLIC MCP server — what an /mcp connection with NO Authorization header
- * gets: two callable tools, `signup` and `sign_in` (PUBLIC_MCP_TOOLS in
- * @brainz/contracts). A present-but-invalid bearer never reaches this server;
- * it still 401s.
+ * The two servers a connection with NO Authorization header gets. A
+ * present-but-invalid bearer never reaches either; it still 401s.
  *
- * Lazy authentication (Wave OA): the server also LISTS every vault tool
- * (MCP_TOOLS), so directory clients know they exist. Calling one never reaches
- * these handlers — the /mcp route answers a gated `tools/call` without a token
- * with an HTTP 401 OAuth challenge before the SDK runs (callsGatedTool in
- * $lib/server/oauth). The handlers registered here are a fallback only.
+ * - `/mcp/agent` (AGENT_MCP_PATH) → buildPublicMcpServer: two callable tools,
+ *   `signup` and `sign_in` (PUBLIC_MCP_TOOLS in @brainz/contracts). This is the
+ *   agent self-signup surface; it is the only place an API key is handed out.
+ * - `/mcp` (the directory endpoint) → buildDirectoryListingMcpServer: no
+ *   callable tools at all. Lazy authentication (Wave OA): it LISTS the
+ *   directory vault tools (DIRECTORY_MCP_TOOL_NAMES) so Claude / ChatGPT know
+ *   they exist, and the route answers every `tools/call` without a token with
+ *   an HTTP 401 OAuth challenge before the SDK runs (callsGatedTool in
+ *   $lib/server/oauth). The handlers registered there are a fallback only.
+ *   Directory policy: OpenAI forbids plugins that "collect, solicit, or
+ *   process" API keys, so signup/sign_in are not on /mcp.
  *
  * Signup v2 (Wave G — agent self-signup guardrails): `signup` provisions an
  * ANONYMOUS, PROVISIONAL workspace — a Better Auth-compatible user row with a
@@ -43,6 +47,7 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
+  DIRECTORY_MCP_TOOL_NAMES,
   MCP_TOOLS,
   PUBLIC_MCP_TOOLS,
   signInInputSchema,
@@ -54,7 +59,7 @@ import {
   type SignupInput,
   type SignupOutput,
 } from "@brainz/contracts";
-import { slugify } from "@brainz/engine";
+import { serverInstructions, slugify } from "@brainz/engine";
 import { count, eq, gt, and } from "drizzle-orm";
 import { generateApiKey, hashApiKey, keyPrefixOf } from "./api-keys";
 import { placeholderEmail, SIGNUP_EXPIRY_MS, UNCLAIMED_WORKSPACE_NAME } from "./claim";
@@ -281,7 +286,7 @@ export async function handleSignIn(
 
 // ------------------------------------------------------------------ server
 
-/** Build the public MCP server: registers PUBLIC_MCP_TOOLS only. */
+/** Build the agent self-signup server (`/mcp/agent`, no auth): PUBLIC_MCP_TOOLS only. */
 export function buildPublicMcpServer(deps: SignupDeps): McpServer {
   const server = new McpServer({ name: `${SERVER_NAME}-public`, version: SERVER_VERSION });
 
@@ -307,10 +312,23 @@ export function buildPublicMcpServer(deps: SignupDeps): McpServer {
     );
   }
 
-  // Advertise the gated vault tools (lazy auth). The route 401s a call to any
-  // of them before the SDK runs; this handler only answers if that gate is
-  // ever bypassed.
+  return server;
+}
+
+/**
+ * Build the unauthenticated DIRECTORY listing (`/mcp`, no auth): the directory
+ * vault tools, listed for lazy authentication, with the neutral server
+ * instructions. The route 401s every `tools/call` before the SDK runs; the
+ * handlers here only answer if that gate is ever bypassed.
+ */
+export function buildDirectoryListingMcpServer(): McpServer {
+  const server = new McpServer(
+    { name: SERVER_NAME, version: SERVER_VERSION },
+    { instructions: serverInstructions() },
+  );
+  const listed = new Set<string>(DIRECTORY_MCP_TOOL_NAMES);
   for (const tool of MCP_TOOLS as readonly McpToolDef[]) {
+    if (!listed.has(tool.name)) continue;
     server.registerTool(
       tool.name,
       {
@@ -322,7 +340,6 @@ export function buildPublicMcpServer(deps: SignupDeps): McpServer {
       async () => fail(`sign in required: connect Brainz with OAuth to use ${tool.name}`),
     );
   }
-
   return server;
 }
 

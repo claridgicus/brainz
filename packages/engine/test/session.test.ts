@@ -5,6 +5,7 @@ import {
   SESSION_PRIMER_PATH,
   claudeCodeSessionHook,
   sessionHookPlaybook,
+  serverInstructions,
   sessionInstructions,
 } from "../src/session.js";
 
@@ -61,5 +62,23 @@ describe("sessionHookPlaybook", () => {
     expect(JSON.parse(json!)).toEqual(claudeCodeSessionHook());
     // No matcher → fires on startup, resume, clear, and compact.
     expect(claudeCodeSessionHook().hooks.SessionStart[0]).not.toHaveProperty("matcher");
+  });
+});
+
+describe("serverInstructions (neutral, Brainz Cloud)", () => {
+  it("describes the tools without directing when or how often to use them", () => {
+    for (const text of [serverInstructions(), serverInstructions({ readOnly: true })]) {
+      expect(text).toContain("get_context");
+      expect(text).not.toMatch(/every session|don't wait|by default|before planning|skip brainz/i);
+    }
+  });
+
+  it("names no write or task tools on a read-only connection", () => {
+    const text = serverInstructions({ readOnly: true });
+    expect(text).toContain("read-only");
+    for (const tool of ["upsert_concept", "take_task", "onboard", "session_hook"]) {
+      expect(text).not.toContain(tool);
+    }
+    expect(serverInstructions()).not.toContain("session_hook");
   });
 });

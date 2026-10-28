@@ -56,6 +56,8 @@ import {
   inviteCreateResponseSchema,
   inviteListResponseSchema,
   MCP_TOOL_NAMES,
+  AGENT_MCP_PATH,
+  DIRECTORY_MCP_TOOL_NAMES,
   memberListResponseSchema,
   onboardCompleteOutputSchema,
   onboardStatusOutputSchema,
@@ -1093,18 +1095,38 @@ async function main() {
     });
     step("revoked bearer on /mcp → 401", afterRevoke.status === 401, `status ${afterRevoke.status}`);
 
-    // 12. PUBLIC signup: absent auth serves a public MCP server (signup only)
-    const pubTransport = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`));
+    // 12. Unauthenticated /mcp is the DIRECTORY listing: the directory vault
+    // tools (lazy auth), never signup/sign_in/session_hook/claim, and the
+    // neutral server instructions.
+    const dirTransport = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`));
+    const dir = new Client({ name: "brainz-e2e-directory", version: "0.0.0" });
+    await dir.connect(dirTransport);
+    const dirNames = (await dir.listTools()).tools.map((t) => t.name);
+    step(
+      "unauthenticated /mcp tools/list is the directory vault tools only (no API-key handout)",
+      JSON.stringify(dirNames) === JSON.stringify([...DIRECTORY_MCP_TOOL_NAMES]) &&
+        !["signup", "sign_in", "session_hook", "claim"].some((n) => dirNames.includes(n)),
+      dirNames.join(", "),
+    );
+    const dirInstructions = dir.getInstructions() ?? "";
+    step(
+      "/mcp sends the neutral server instructions (no 'every session' steering)",
+      dirInstructions.includes("get_context") && !/every session|don't wait/i.test(dirInstructions),
+      dirInstructions.slice(0, 60),
+    );
+    await dir.close();
+
+    // 12a. PUBLIC signup lives on /mcp/agent: absent auth serves signup + sign_in.
+    const pubTransport = new StreamableHTTPClientTransport(new URL(`${BASE}${AGENT_MCP_PATH}`));
     const pub = new Client({ name: "brainz-e2e-public", version: "0.0.0" });
     await pub.connect(pubTransport);
-    step("MCP initialize WITHOUT auth succeeds (public server)", true);
+    step("MCP initialize WITHOUT auth on /mcp/agent succeeds (public server)", true);
 
     const pubTools = await pub.listTools();
     const pubNames = pubTools.tools.map((t) => t.name);
     step(
-      "unauthenticated tools/list is [signup, sign_in, ...vault tools] (lazy auth) — never claim",
-      JSON.stringify(pubNames) === JSON.stringify(["signup", "sign_in", ...MCP_TOOL_NAMES]) &&
-        !pubNames.includes("claim"),
+      "unauthenticated /mcp/agent tools/list is exactly [signup, sign_in]",
+      JSON.stringify(pubNames) === JSON.stringify(["signup", "sign_in"]),
       pubNames.join(", "),
     );
 
@@ -1205,6 +1227,18 @@ async function main() {
     await agentMcp.connect(agentTransport);
     const agentStats = await agentMcp.callTool({ name: "vault_stats", arguments: {} });
     const agentStatsPayload = JSON.parse(agentStats.content.find((c) => c.type === "text").text);
+    const agentPathTransport = new StreamableHTTPClientTransport(new URL(`${BASE}${AGENT_MCP_PATH}`), {
+      requestInit: { headers: { authorization: `Bearer ${signupPayload.apiKey}` } },
+    });
+    const agentPathMcp = new Client({ name: "brainz-e2e-agent-path", version: "0.0.0" });
+    await agentPathMcp.connect(agentPathTransport);
+    const agentPathNames = (await agentPathMcp.listTools()).tools.map((t) => t.name);
+    step(
+      "the signup apiKey also works on /mcp/agent (full vault toolset + claim)",
+      JSON.stringify([...agentPathNames].sort()) === JSON.stringify([...MCP_TOOL_NAMES, "claim"].sort()),
+      `${agentPathNames.length} tools`,
+    );
+    await agentPathMcp.close();
     step(
       "signup apiKey unlocks vault_stats over /mcp with bearer",
       agentStats.isError !== true &&
@@ -2442,8 +2476,20 @@ async function main() {
         !challenge.includes("error="),
       `status ${gated.status} — ${challenge} — issuer ${issuer}`,
     );
-    const publicCall = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "sign_in", arguments: { email: "nobody@example.com" } } });
-    step("unauthenticated PUBLIC tool call still answers 200", publicCall.status === 200, `status ${publicCall.status}`);
+    const signupOnDirectory = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "signup", arguments: {} } });
+    step(
+      "unauthenticated signup on /mcp → 401 challenge (no API key is handed out on the directory endpoint)",
+      signupOnDirectory.status === 401,
+      `status ${signupOnDirectory.status}`,
+    );
+    const agentRpc = (body, headers = {}) =>
+      fetch(`${BASE}${AGENT_MCP_PATH}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
+        body: JSON.stringify(body),
+      });
+    const publicCall = await agentRpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "sign_in", arguments: { email: "nobody@example.com" } } });
+    step("unauthenticated PUBLIC tool call on /mcp/agent answers 200", publicCall.status === 200, `status ${publicCall.status}`);
     const badBearer = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" }, { authorization: `Bearer bzat_${"x".repeat(40)}` });
     step(
       "a dead OAuth access token → 401 carrying the challenge with error=\"invalid_token\"",
@@ -2628,9 +2674,15 @@ async function main() {
     await oauthMcp.connect(oauthTransport);
     const oauthTools = (await oauthMcp.listTools()).tools.map((t) => t.name);
     step(
-      "MCP over the OAuth token: full vault toolset, no claim",
-      MCP_TOOL_NAMES.every((n) => oauthTools.includes(n)) && !oauthTools.includes("claim"),
+      "MCP over the OAuth token: the directory vault toolset — no claim, no session_hook",
+      JSON.stringify(oauthTools) === JSON.stringify([...DIRECTORY_MCP_TOOL_NAMES]),
       oauthTools.length + " tools",
+    );
+    const oauthOnAgent = await agentRpc({ jsonrpc: "2.0", id: 5, method: "tools/list" }, { authorization: `Bearer ${live.json?.access_token}` });
+    step(
+      "an OAuth access token on /mcp/agent → 401 (tokens are bound to the /mcp resource)",
+      oauthOnAgent.status === 401 && !(oauthOnAgent.headers.get("www-authenticate") ?? "").includes("resource_metadata"),
+      `status ${oauthOnAgent.status}`,
     );
     const probe = await oauthMcp.callTool({ name: "get_concept", arguments: { id: "oauth-probe" } });
     step(

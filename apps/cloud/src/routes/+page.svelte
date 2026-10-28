@@ -33,8 +33,10 @@
 		<pre><code>claude mcp add --transport http brainz https://brainz.brownmatter.ai/mcp \
   --header "Authorization: Bearer bz_..."</code></pre>
 		<p class="mcp-note muted">
-			No account yet? Connect <em>without</em> the header — the public <code>signup</code> tool
-			provisions a workspace on the spot. Full wiring in the
+			Claude, ChatGPT and Claude Code can also connect <em>without</em> the header and sign in
+			with OAuth. Agents with no account yet can self-provision at
+			<code>https://brainz.brownmatter.ai/mcp/agent</code> (the <code>signup</code> tool). Full
+			wiring in the
 			<a href="https://brownmatter.ai/docs" rel="noopener">docs</a>.
 		</p>
 	</section>

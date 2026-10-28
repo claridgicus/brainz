@@ -12,7 +12,7 @@
       "headers": [
         {
           "name": "Authorization",
-          "description": "Bearer bz_... vault API key (optional: clients that support MCP OAuth sign in instead). Omit it to reach the public tools; gated tools then answer with an OAuth 401 challenge.",
+          "description": "Bearer bz_... vault API key (optional: clients that support MCP OAuth sign in instead). Without it, tools/list works and every tool call answers with an OAuth 401 challenge.",
           "isRequired": false,
           "isSecret": true
         }

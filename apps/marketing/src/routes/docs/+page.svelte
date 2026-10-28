@@ -1,6 +1,6 @@
 <script lang="ts">
 	import Seo from "$lib/components/Seo.svelte";
-	import { MCP_URL, SIGNUP_URL, SITE_URL, SKILL_URL } from "$lib/links";
+	import { AGENT_MCP_URL, MCP_URL, SIGNUP_URL, SITE_URL, SKILL_URL } from "$lib/links";
 
 	const title = "Docs — Get started with Brainz";
 	const description =
@@ -19,7 +19,7 @@
 	const claudeMcpAdd = `claude mcp add --transport http brainz ${MCP_URL} \\
   --header "Authorization: Bearer bz_..."`;
 
-	const agentSignupSnippet = `# 1. connect UNAUTHENTICATED — no Authorization header
+	const agentSignupSnippet = `# 1. connect UNAUTHENTICATED to ${AGENT_MCP_URL} — no Authorization header
 #    initialize → tools/list shows two public tools: signup and sign_in
 
 # 2. provision a workspace — no email, no human action required
@@ -65,11 +65,10 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 			name: "search_concepts",
 			title: "Search concepts",
 			description:
-				"Search the product knowledge vault by free-text query. Use this first, whenever you need product " +
-				"knowledge but don't yet know which concept ids exist — e.g. before planning work that touches a " +
-				"feature, decision, or constraint. Returns ranked hits (id, title, type, score, snippet) only; " +
-				"follow up with get_concept for one full note or get_context for an injectable bundle. " +
-				"Never errors on odd queries — an empty hit list just means nothing matched.",
+				"Search the product knowledge vault by free-text query. Useful when you need product knowledge " +
+				"but don't yet know which concept ids exist. Returns ranked hits (id, title, type, score, " +
+				"snippet) only; get_concept returns one full note and get_context an assembled briefing. An " +
+				"empty hit list means nothing matched.",
 		},
 		{
 			name: "get_concept",
@@ -77,55 +76,56 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 			description:
 				"Fetch one concept by exact id: full markdown body, metadata, and its direct graph neighbors " +
 				"(each with the relation that connects it). Use after search_concepts or when another note " +
-				"wiki-links an id you need in full. The neighbors list tells you what to fetch next. " +
-				"If you don't know the id, use search_concepts instead.",
+				"wiki-links an id you need in full. The neighbors list tells you what to fetch next. If you " +
+				"don't know the id, use search_concepts instead.",
 		},
 		{
 			name: "get_related",
 			title: "Get related concepts",
 			description:
 				"Walk the knowledge graph outward from a concept and return everything within `depth` hops, with " +
-				"distance and the edge path that reached it. Use to map the blast radius before changing a feature " +
-				"(what depends on it, what constrains it, which decisions apply) or to discover structure that " +
-				"keyword search misses. Filter by relation names (e.g. depends_on) to follow only one kind of edge.",
+				"distance and the edge path that reached it. Use to map the blast radius before changing a " +
+				"feature (what depends on it, what constrains it, which decisions apply) or to discover " +
+				"structure that keyword search misses. Filter by relation names (e.g. depends_on) to follow only " +
+				"one kind of edge.",
 		},
 		{
 			name: "get_context",
 			title: "Assemble context bundle",
 			description:
-				"THE tool to call before delegating a coding task: assembles a ready-to-inject markdown briefing of " +
-				"the most relevant concepts (seeded by a search query and/or explicit ids, expanded through the " +
-				"graph) trimmed to a token budget. Paste the returned markdown straight into a subagent's prompt so " +
-				"it gets curated product knowledge without you relaying individual notes. The final JSON line " +
-				"reports which concept ids were included, whether the bundle was truncated, and its approximate " +
-				"token count. Provide at least one of `query` or `ids`.",
+				"Assemble a markdown briefing of the concepts most relevant to a query and/or explicit ids, " +
+				"expanded through the graph and trimmed to a token budget. The briefing is self-contained, so it " +
+				"can be handed to another agent or pasted into a prompt as-is. The final JSON line reports which " +
+				"concept ids were included, whether the bundle was truncated, and its approximate token count. " +
+				"Provide at least one of `query` or `ids`.",
 		},
 		{
 			name: "upsert_concept",
 			title: "Create or update concept",
 			description:
-				"Write a concept note into the vault (creates or overwrites the markdown file, then reindexes it). " +
-				"Use to capture new product knowledge discovered during a task — a decision made, a constraint hit, " +
-				"a pattern adopted — so future agents can find it. Omit `id` to derive a slug from the title; pass " +
-				"an existing id to update that note. Body is markdown; [[wiki-links]] to other concept ids create " +
-				"graph edges. Returns the saved concept's metadata.",
+				"Write a concept note into the vault (creates or overwrites the markdown file, then reindexes " +
+				"it). Use to capture new product knowledge discovered during a task — a decision made, a " +
+				"constraint hit, a pattern adopted — so future agents can find it. Omit `id` to derive a slug " +
+				"from the title; pass an existing id to update that note. Body is markdown; [[wiki-links]] to " +
+				"other concept ids create graph edges. Returns the saved concept's metadata.",
 		},
 		{
 			name: "delete_concept",
 			title: "Delete concept",
 			description:
-				"Remove a concept from the vault and all of its outgoing edges. Use to clear a note that is wrong, " +
-				"obsolete, or junk (e.g. a probe or test node that shouldn't be in the graph). Idempotent: deleting " +
-				"an id that doesn't exist is a no-op success (deleted:false), not an error. Deletion is permanent — " +
-				"prefer upsert_concept to correct a note you want to keep. Returns { deleted, id }.",
+				"Remove a concept from the vault and all of its outgoing edges. Use to clear a note that is " +
+				"wrong, obsolete, or junk (e.g. a probe or test node that shouldn't be in the graph). " +
+				"Idempotent: deleting an id that doesn't exist is a no-op success (deleted:false), not an error. " +
+				"Deletion is permanent — prefer upsert_concept to correct a note you want to keep. Returns { " +
+				"deleted, id }.",
 		},
 		{
 			name: "link_concepts",
 			title: "Link concepts",
 			description:
-				"Add a typed, directed edge between two existing concepts by editing the `from` note's frontmatter " +
-				"(e.g. lead-scoring depends_on contact-model). Use when you notice a relationship the vault is " +
-				"missing. Both concepts should already exist; use upsert_concept first if not.",
+				"Add a typed, directed edge between two existing concepts by editing the `from` note's " +
+				"frontmatter (e.g. lead-scoring depends_on contact-model). Use when you notice a relationship " +
+				"the vault is missing. Both concepts should already exist; use upsert_concept first if not.",
 		},
 		{
 			name: "list_concepts",
@@ -133,109 +133,102 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 			description:
 				"Enumerate concept metadata (no bodies), optionally filtered by product, type, or a single tag. " +
 				"Use to get the lay of the land in an unfamiliar vault, to audit what exists (e.g. all decisions " +
-				"for a product), or when search vocabulary isn't matching. For content, follow up with get_concept " +
-				"or get_context.",
+				"for a product), or when search vocabulary isn't matching. For content, follow up with " +
+				"get_concept or get_context.",
 		},
 		{
 			name: "vault_stats",
 			title: "Vault stats",
 			description:
-				"Cheap orientation call: counts of concepts and edges, the products and tags in use, a breakdown " +
-				"by concept type, and whether semantic search is available. Call once when connecting to an " +
-				"unfamiliar vault to calibrate how much knowledge is here and which product/tag filters exist.",
+				"Summarize the vault: counts of concepts and edges, the products and tags in use, a breakdown by " +
+				"concept type, and whether semantic search is available. Useful for gauging how much knowledge " +
+				"is here and which product/tag filters exist.",
 		},
 		{
 			name: "onboard",
 			title: "Onboard this vault",
 			description:
-				"Step 1 on any new vault: onboarding turns an existing product's codebase into the knowledge graph " +
-				"your whole agent fleet shares. Call {action: \"start\"} to receive the onboarding playbook — " +
-				"instructions for fanning subagents out over the codebase and distilling product knowledge " +
-				"(domains, features, stories, specs, workflows, decisions, constraints) into concepts via " +
-				"upsert_concept, each anchored to the code with codeAreas. There is NO flat concept cap — size the " +
-				"effort from the codebase; for a large project expect 200–800+ concepts and do NOT stop at a few " +
-				"dozen. Onboarding is a LOOP: index an area, then call {action: \"status\", areaList} (you supply " +
-				"your repo's source areas — Brainz can't read the repo) to see covered vs uncovered areas; keep " +
-				"indexing the uncovered ones until coverage is broad. When it is, call {action: \"complete\", " +
-				"summary, areaList} to mark the vault onboarded and store the summary — complete is coverage-gated " +
-				"and rejects if too many areas are still uncovered. {action: \"status\"} reports onboarded state, " +
-				"concept counts, and (with areaList) coverage. Until onboarding completes, search_concepts and " +
-				"get_context results carry a reminder to run it.",
+				"Index an existing product's codebase into this vault. {action: \"start\"} returns the onboarding " +
+				"playbook: a method for surveying the codebase and recording its product knowledge (domains, " +
+				"features, stories, specs, workflows, decisions, constraints) as concepts via upsert_concept, " +
+				"each anchored to the code with codeAreas. {action: \"status\", areaList} reports onboarded state, " +
+				"concept counts and, given your repo's source areas (Brainz can't read the repo), which areas " +
+				"are covered or uncovered. {action: \"complete\", summary, areaList} marks the vault onboarded and " +
+				"stores the summary; it is rejected while too many areas are uncovered. Until onboarding " +
+				"completes, search_concepts and get_context results include a one-line note saying so.",
 		},
 		{
 			name: "sync",
 			title: "Sync this vault to the current code",
 			description:
-				"Re-onboard: keep the knowledge graph true to the artifact as code changes. Onboarding is one-shot; " +
-				"sync is the supported path to re-index drift. Call {action: \"start\"} for the sync playbook — a drift " +
-				"playbook (not the full onboarding one): diff the codebase since last_synced_at (you run git and pass " +
-				"back changedPaths + areaList), fan out over the CHANGED areas, update stale concepts in place, index " +
-				"new/un-mapped work, and report coverage gaps. {action: \"complete\", summary, areaList} stamps " +
-				"last_synced_at and appends your summary to the product-onboarding-summary concept (a running sync log). " +
-				"{action: \"status\"} reports last sync time and staleness. Past ~14 days without a sync, get_context and " +
-				"search results carry a staleness reminder to run it.",
+				"Re-index an onboarded vault after the code changes (drift). {action: \"start\"} returns the sync " +
+				"playbook: the vault's last_synced_at, a coverage map over the concepts' code_areas, and a " +
+				"method for re-indexing only what changed (you run git — Brainz can't read the repo — and pass " +
+				"back changedPaths + areaList): update stale concepts in place, add concepts or tasks for new " +
+				"work, and report coverage gaps. {action: \"status\", areaList} reports onboarded state, last sync " +
+				"time, staleness, concept counts and coverage. {action: \"complete\", summary, areaList} stamps " +
+				"last_synced_at and appends the summary to the product-onboarding-summary concept (a running " +
+				"sync log). After ~14 days without a sync, get_context and search results include a one-line " +
+				"note saying so.",
 		},
 		{
 			name: "list_tasks",
 			title: "List tasks",
 			description:
 				"List the vault's work pile: `task`-type concepts with their lifecycle (open/taken/done), oldest " +
-				"first. Call to survey what's outstanding before claiming work, to check what a teammate agent is " +
-				"already doing (taskStatus \"taken\" with takenBy), or to audit completed work. Filter by taskStatus " +
-				"or by the domain the tasks are part_of. To actually pick up work, use take_task — don't just read.",
+				"first, including who has taken each one (takenBy). Filter by taskStatus or by the domain the " +
+				"tasks are part_of. Read-only; take_task is what claims a task.",
 		},
 		{
 			name: "take_task",
 			title: "Take a task off the pile",
 			description:
-				"Claim a unit of work and get briefed in one call. Pass an `id` to claim a specific task, or omit it " +
-				"to claim THE next open task (deterministic: oldest open by createdAt then id) — safe to call " +
-				"repeatedly to drain the pile. Atomically flips the task to \"taken\" and records takenBy/takenAt; " +
-				"errors if it's already taken or done. Returns the task AND an auto-assembled get_context-grade " +
-				"briefing for its part_of domain plus the concepts it realizes / is governed_by (with code_areas) — " +
-				"paste that straight into your implementation. THE CONTRACT: after implementing, verify the artifact " +
-				"matches every spec that governs the task; fix or file a new task for any discrepancy; then index the " +
-				"new/changed knowledge via upsert_concept and call complete_task.",
+				"Claim a task and get its briefing in one call. Pass an `id` to claim a specific task, or omit " +
+				"it to claim the next open task (oldest open by createdAt then id). Atomically flips the task to " +
+				"\"taken\" and records takenBy/takenAt; errors if it's already taken or done. Returns the task and " +
+				"a get_context-style briefing for its part_of domain plus the concepts it realizes / is " +
+				"governed_by (with code_areas). complete_task marks it done.",
 		},
 		{
 			name: "complete_task",
 			title: "Complete a task",
 			description:
-				"Mark a task done once the work is in the artifact. Sets taskStatus=done + doneAt and appends your " +
-				"`outcome` to the task body as an Outcome section. The result reminds you to index what changed via " +
-				"upsert_concept so the knowledge graph stays true to the codebase — do that before moving on.",
+				"Mark a task done. Sets taskStatus=done + doneAt and appends `outcome` to the task body as an " +
+				"Outcome section. The result notes that upsert_concept can record what changed.",
 		},
 		{
 			name: "session_hook",
 			title: "Install the Brainz session hook",
 			description:
-				"Make Brainz the default in every future session, not just this one. Returns the session-hook " +
-				"playbook: a short primer (get_context before planning or delegating, take_task for work, " +
-				"upsert_concept to write back what changed) plus the exact steps to install it as a session-start " +
-				"hook in your own harness — a Claude Code SessionStart hook in .claude/settings.json, or a marked " +
-				"block in AGENTS.md / your client's rules file. Brainz can't write to your repo, so the agent " +
-				"applies the edits. Call once per repository; the steps are idempotent.",
+				"Return setup steps for adding a Brainz primer to a repository's agent configuration: the primer " +
+				"text plus the edits that install it, as a Claude Code SessionStart hook in " +
+				".claude/settings.json or as a marked block in AGENTS.md / another rules file. Brainz can't " +
+				"write to the repo; the steps are for you to apply when your user wants that setup. Re-applying " +
+				"them replaces the previous primer rather than duplicating it.",
 		},
 		{
 			name: "dream",
 			title: "Dream (nightly consolidation)",
 			description:
-				"Brainz dreams: an unattended nightly sweep that improves the graph between agent sessions. Light " +
-				"stages what changed (near-duplicates, finished task outcomes); REM asks an LLM for proposals; deep " +
-				"applies the ones that pass threshold gates — merges duplicates with edges redirected, promotes " +
-				"outcome knowledge into concepts, adds missing links, and files a task for each contradiction. " +
-				"Sweeps that would touch too much of the vault are rejected, and every dream can be reverted. " +
-				"Actions: status, run, diary, revert {id}, configure {enabled?, cadenceHours?}.",
+				"Dreaming: a scheduled consolidation sweep over this vault. Light stages what changed since the " +
+				"last dream (near-duplicate concepts, finished task outcomes, hygiene counts); REM asks an LLM " +
+				"for proposals; deep applies the ones that pass threshold gates: merges duplicates (edges " +
+				"redirected, the other tombstoned), promotes outcome knowledge into concepts, adds missing " +
+				"links, and files a task for each contradiction. A sweep that would touch too much of the vault " +
+				"is rejected; every applied dream keeps preimages and can be reverted. {action: \"status\"} shows " +
+				"schedule + last dream; {action: \"run\"} dreams now; {action: \"diary\"} reads the Dream Diary; " +
+				"{action: \"revert\", id} undoes one dream; {action: \"configure\", enabled?, cadenceHours?} sets it " +
+				"up. Without an LLM only light runs.",
 		},
 		{
 			name: "create_task",
 			title: "Create a task",
 			description:
-				"Turn a finding into first-class work: creates a `task`-type concept with taskStatus=open and the " +
-				"given relations — part_of a domain, `realizes` stories/features, `governed_by` specs — plus " +
-				"codeAreas pointing at where the work lands. Use when you discover work that isn't reflected in the " +
-				"codebase yet (a gap, a needed fix, a follow-up). The task then shows up in list_tasks / take_task " +
-				"and on the Kanban board.",
+				"Turn a finding into first-class work: creates a `task`-type concept with taskStatus=open and " +
+				"the given relations — part_of a domain, `realizes` stories/features, `governed_by` specs — plus " +
+				"codeAreas pointing at where the work lands. Use when you discover work that isn't reflected in " +
+				"the codebase yet (a gap, a needed fix, a follow-up). The task then shows up in list_tasks / " +
+				"take_task and on the Kanban board.",
 		},
 	];
 </script>
@@ -289,10 +282,11 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 
 	<h3 id="agent-signup">Agent-driven signup: human in the loop, not in the way</h3>
 	<p>
-		An orchestrator doesn't need a pre-made account. Point it at <code>{MCP_URL}</code>
+		An orchestrator doesn't need a pre-made account. Point it at <code>{AGENT_MCP_URL}</code>
 		<em>without</em> an <code>Authorization</code> header and it gets a public MCP server exposing
-		two tools — <code>signup</code> and <code>sign_in</code> (the seventeen vault tools stay behind
-		authentication):
+		two tools — <code>signup</code> and <code>sign_in</code> (the vault tools stay behind
+		authentication). The key it gets works on <code>{MCP_URL}</code> too. <code>{MCP_URL}</code>
+		itself never hands out keys: there, clients such as Claude and ChatGPT sign in with OAuth.
 	</p>
 	<pre><code>{agentSignupSnippet}</code></pre>
 	<p>

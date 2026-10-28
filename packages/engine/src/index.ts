@@ -53,12 +53,14 @@ export {
   SESSION_HOOK_CLIENTS,
   SESSION_PRIMER_PATH,
   claudeCodeSessionHook,
+  serverInstructions,
   sessionHookPlaybook,
   sessionInstructions,
 } from "./session.js";
 export type {
   SessionHookClient,
   SessionHookPlaybookOptions,
+  ServerInstructionsOptions,
   SessionInstructionsOptions,
 } from "./session.js";
 

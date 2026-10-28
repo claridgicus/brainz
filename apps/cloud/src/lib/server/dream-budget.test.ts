@@ -176,6 +176,8 @@ describe("chooseDreamProvider", () => {
     const choice = await chooseDreamProvider({ db: d1, env, ai, ownerId: "u1", now: NOW });
     expect(choice.llm).toBeNull();
     expect(choice.skipReason).toMatch(/^budget: /);
+    // Directory policy: tool-visible text never upsells or asks for a key.
+    expect(choice.skipReason).not.toMatch(/add your own|upgrade|subscri|plan\b/i);
     expect(choice.spend).toMatchObject({ usd: 1, remainingUsd: 0 });
     // A raised cap lets it run again.
     const raised = await chooseDreamProvider({
@@ -194,6 +196,7 @@ describe("chooseDreamProvider", () => {
     const off = await chooseDreamProvider({ db: plain, env, ai: chatAi(), ownerId: "u1", now: NOW });
     expect(off).toMatchObject({ llm: null, killSwitch: "workers-ai" });
     expect(off.skipReason).toMatch(/^disabled: /);
+    expect(off.skipReason).not.toMatch(/add your own|upgrade|subscri|plan\b/i);
 
     const byok = await setup({ kill: "workers-ai", byok: "anthropic" });
     const on = await chooseDreamProvider({ db: byok, env, ai: chatAi(), ownerId: "u1", now: NOW });
@@ -206,6 +209,7 @@ describe("chooseDreamProvider", () => {
     const choice = await chooseDreamProvider({ db: d1, env, ai: chatAi(), ownerId: "u1", now: NOW });
     expect(choice).toMatchObject({ llm: null, provider: null, killSwitch: "all" });
     expect(choice.skipReason).toMatch(/^disabled: /);
+    expect(choice.skipReason).not.toMatch(/add your own|upgrade|subscri|plan\b/i);
     const viaVar = await chooseDreamProvider({
       db: await setup(),
       env: { ...env, DREAMING_AI_DISABLED: "1" },

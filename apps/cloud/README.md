@@ -24,9 +24,12 @@ create a vault, point any orchestrator at `https://brainz.brownmatter.ai/mcp`.
   hardenings are folded in: a D1-backed magic-link request limiter
   (5/hour/email, 20/hour/IP) and a fail-closed `BETTER_AUTH_SECRET` (missing in
   production ⇒ `createAuth` throws).
-- **Remote MCP** (`/mcp`): stateless Streamable HTTP via `@hono/mcp`, tools
-  iterated from `MCP_TOOLS` in `@brainz/contracts` (same registry as the
-  stdio server).
+- **Remote MCP** (`/mcp`, `/mcp/agent`): stateless Streamable HTTP via
+  `@hono/mcp`, tools iterated from `MCP_TOOLS` in `@brainz/contracts` (same
+  registry as the stdio server). `/mcp` is the directory endpoint (OAuth + lazy
+  auth, `bz_` keys) and never hands out an API key; `/mcp/agent` serves the
+  unauthenticated `signup` / `sign_in` agent self-signup tools and accepts
+  `bz_` keys. Shared handler: `src/lib/server/mcp-endpoint.ts`.
 - **Embeddings**: Workers AI `@cf/baai/bge-base-en-v1.5` on content-hash
   change; failures never fail writes — vaults degrade to keyword-only
   (`stats.embeddings: "unavailable"`). Keyword search uses **FTS5 in DO
@@ -206,7 +209,8 @@ sync (`src/lib/server/discovery.test.ts` enforces it):
 - `static/.well-known/mcp.json` — well-known discovery document (server-card /
   SEP-2127 lineage), served at `https://brainz.brownmatter.ai/.well-known/mcp.json`.
   Uses the MCP Registry `server.json` schema plus a namespaced `_meta` block
-  listing the public (`signup`, `sign_in`) and authenticated toolsets.
+  listing the OAuth and API-key toolsets and the `/mcp/agent` self-signup
+  endpoint with its unauthenticated tools (`signup`, `sign_in`).
 - `static/.well-known/mcp/server-card.json` — identical content at the
   SEP-1649 alias path some clients probe.
 - `server.json` (this directory) — the MCP Registry publish artifact

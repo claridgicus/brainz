@@ -9,6 +9,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   claimOutputSchema,
   CLOUD_MCP_TOOLS,
+  DIRECTORY_HIDDEN_TOOL_NAMES,
+  DIRECTORY_MCP_TOOL_NAMES,
   getMcpTool,
   MCP_TOOL_NAMES,
   PUBLIC_VAULT_READ_TOOL_NAMES,
@@ -746,11 +748,19 @@ describe("onboard tool + nudge", () => {
 });
 
 describe("session defaults", () => {
-  it("sends the use-Brainz-by-default instructions on initialize", async () => {
+  it("sends the NEUTRAL server instructions on initialize (directory policy)", async () => {
     const client = await connect();
     const instructions = client.getInstructions() ?? "";
-    expect(instructions).toContain("every session");
     expect(instructions).toContain("`upsert_concept`");
+    expect(instructions).not.toMatch(/every session|don't wait|by default|skip brainz/i);
+  });
+
+  it("an OAuth (directory) connection never registers session_hook", async () => {
+    const client = await connect(fakeVault(), { exclude: DIRECTORY_HIDDEN_TOOL_NAMES });
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).toEqual([...DIRECTORY_MCP_TOOL_NAMES]);
+    const call = await client.callTool({ name: "session_hook", arguments: {} });
+    expect(call.isError).toBe(true);
   });
 
   it("a viewer-scoped (public) connection gets read-only instructions", async () => {

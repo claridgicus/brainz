@@ -1,8 +1,9 @@
 /**
  * Public MCP server tests over fake SignupDeps, exercised through a real MCP
- * client via the SDK's InMemoryTransport — proves the unauthenticated /mcp
- * surface CALLS only PUBLIC_MCP_TOOLS (signup + sign_in) while listing the
- * gated vault tools for lazy auth (Wave OA), that signup v2
+ * client via the SDK's InMemoryTransport — proves the unauthenticated
+ * /mcp/agent surface offers only PUBLIC_MCP_TOOLS (signup + sign_in), that the
+ * unauthenticated /mcp directory listing offers the directory vault tools for
+ * lazy auth (Wave OA) and never signup/sign_in/session_hook, that signup v2
  * (Wave G) provisions an ANONYMOUS provisional account (placeholder identity,
  * 7-day expiry), returns NO URL of any kind, fires the claim request when an
  * email is supplied, and enforces the per-IP rate limit with the TOCTOU-safe
@@ -13,7 +14,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
-  MCP_TOOL_NAMES,
+  DIRECTORY_MCP_TOOL_NAMES,
   MCP_TOOLS,
   PUBLIC_MCP_TOOLS,
   PUBLIC_MCP_TOOL_NAMES,
@@ -24,7 +25,12 @@ import { describe, expect, it } from "vitest";
 import { hashApiKey } from "./api-keys";
 import { isPlaceholderEmail, SIGNUP_EXPIRY_MS, UNCLAIMED_WORKSPACE_NAME } from "./claim";
 import { SIGNUP_RATE_LIMIT } from "./rate-limit";
-import { buildPublicMcpServer, type ProvisionedSignup, type SignupDeps } from "./public-mcp";
+import {
+  buildDirectoryListingMcpServer,
+  buildPublicMcpServer,
+  type ProvisionedSignup,
+  type SignupDeps,
+} from "./public-mcp";
 
 const NOW = new Date("2026-07-10T00:00:00.000Z");
 
@@ -55,8 +61,8 @@ function fakeDeps(overrides: Partial<SignupDeps> = {}) {
   return { deps, persisted, claimRequests, signInRequests, attempts };
 }
 
-async function connect(deps: SignupDeps): Promise<Client> {
-  const server = buildPublicMcpServer(deps);
+async function connect(deps: SignupDeps | "directory"): Promise<Client> {
+  const server = deps === "directory" ? buildDirectoryListingMcpServer() : buildPublicMcpServer(deps);
   const client = new Client({ name: "test-client", version: "0.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -75,27 +81,46 @@ function allText(result: Awaited<ReturnType<Client["callTool"]>>): string {
     .join("\n");
 }
 
-describe("public MCP server (unauthenticated surface)", () => {
-  it("lists signup + sign_in plus every vault tool (lazy auth), never claim", async () => {
-    const client = await connect(fakeDeps().deps);
+describe("directory listing (unauthenticated /mcp)", () => {
+  it("lists the directory vault tools only: no signup, sign_in, session_hook or claim", async () => {
+    const client = await connect("directory");
     const { tools } = await client.listTools();
     // Wave OA: the gated vault tools are LISTED so directory clients know they
     // exist; calling one is answered by the /mcp route's 401 OAuth challenge.
-    expect(tools.map((t) => t.name)).toEqual([...PUBLIC_MCP_TOOL_NAMES, ...MCP_TOOL_NAMES]);
-    // Every listed tool — public AND gated — carries its contract annotations.
-    for (const contract of [...PUBLIC_MCP_TOOLS, ...MCP_TOOLS]) {
-      const tool = tools.find((t) => t.name === contract.name)!;
+    expect(tools.map((t) => t.name)).toEqual([...DIRECTORY_MCP_TOOL_NAMES]);
+    for (const name of ["signup", "sign_in", "session_hook", "claim"]) {
+      expect(tools.map((t) => t.name)).not.toContain(name);
+    }
+    for (const tool of tools) {
+      const contract = MCP_TOOLS.find((t) => t.name === tool.name)!;
       expect(tool.annotations).toEqual({ title: contract.title, ...contract.annotations });
     }
-    // The cloud-only claim tool is NOT on the public surface.
-    expect(tools.map((t) => t.name)).not.toContain("claim");
+  });
+
+  it("sends the neutral server instructions, not the directive session primer", async () => {
+    const client = await connect("directory");
+    const instructions = client.getInstructions() ?? "";
+    expect(instructions).toContain("get_context");
+    expect(instructions).not.toMatch(/every session|don't wait|by default/i);
   });
 
   it("a gated tool that slips past the route's 401 gate is an isError, never vault data", async () => {
-    const client = await connect(fakeDeps().deps);
+    const client = await connect("directory");
     const result = await client.callTool({ name: "search_concepts", arguments: { query: "x" } });
     expect(result.isError).toBe(true);
     expect(text(result)).toMatch(/sign in required/);
+  });
+});
+
+describe("agent self-signup server (unauthenticated /mcp/agent)", () => {
+  it("lists exactly signup + sign_in with their contract annotations", async () => {
+    const client = await connect(fakeDeps().deps);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toEqual([...PUBLIC_MCP_TOOL_NAMES]);
+    for (const contract of PUBLIC_MCP_TOOLS) {
+      const tool = tools.find((t) => t.name === contract.name)!;
+      expect(tool.annotations).toEqual({ title: contract.title, ...contract.annotations });
+    }
   });
 
   it("anonymous signup provisions a provisional user + vault + key — no email needed", async () => {

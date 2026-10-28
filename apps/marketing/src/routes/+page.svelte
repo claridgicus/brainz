@@ -1,7 +1,7 @@
 <script lang="ts">
 	import GraphMotif from "$lib/components/GraphMotif.svelte";
 	import Seo from "$lib/components/Seo.svelte";
-	import { APP_URL, GITHUB_URL, MCP_URL, SIGNUP_URL } from "$lib/links";
+	import { AGENT_MCP_URL, APP_URL, GITHUB_URL, MCP_URL, SIGNUP_URL } from "$lib/links";
 
 	const title = "Brownmatter — Brainz gives your agent fleet a shared brain";
 	const description =
@@ -44,7 +44,7 @@ relations:
 Scores leads 0-100. Recomputed on every
 [[contact-model]] change; see [[scoring-decision]].`;
 
-	const signupSnippet = `# connect to ${MCP_URL} with NO auth header → two public tools
+	const signupSnippet = `# connect to ${AGENT_MCP_URL} with NO auth header → two public tools
 → tools/call signup { "vaultName": "Acme brain" }
 ← { "apiKey": "bz_…", "vaultSlug": "acme-brain",
     "expiresAt": "…", "claimEmailSent": false }
@@ -160,7 +160,7 @@ Scores leads 0-100. Recomputed on every
 			<div class="card feature wide">
 				<h3>No signup form required — your agent does it</h3>
 				<p>
-					An orchestrator can provision its own brain: hit <code>{MCP_URL}</code> with no
+					An orchestrator can provision its own brain: hit <code>{AGENT_MCP_URL}</code> with no
 					credentials and the endpoint exposes two public tools — <code>signup</code> and
 					<code>sign_in</code>. One <code>signup</code> call creates a provisional workspace: a
 					first vault and an API key that works immediately, no email required. The response

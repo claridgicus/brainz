@@ -63,6 +63,39 @@ export function sessionInstructions(opts: SessionInstructionsOptions = {}): stri
   return lines.join("\n");
 }
 
+export interface ServerInstructionsOptions {
+  /** Viewer-scoped connection: name the read tools only. */
+  readOnly?: boolean;
+}
+
+/**
+ * The NEUTRAL server `instructions` Brainz Cloud sends on every /mcp
+ * connection: what the server holds and which tool does what, with no advice
+ * on when or how often to use it. Directory review (Anthropic: descriptions
+ * must not "tell Claude how to behave"; OpenAI: no "overly broad triggering")
+ * rules out the directive `sessionInstructions()` primer on a hosted surface;
+ * the local stdio server and `brainz hook`, which the user installs, keep it.
+ */
+export function serverInstructions(opts: ServerInstructionsOptions = {}): string {
+  const lines = [
+    "# Brainz — shared product knowledge graph",
+    "",
+    "This server is one Brainz vault: a product's features, specs, decisions, constraints and tasks, stored as linked markdown concepts.",
+    "",
+    "- `search_concepts`, `list_concepts`, `get_concept` and `get_related` find and read concepts; `get_context` assembles a token-budgeted briefing on a topic; `vault_stats` summarizes the vault.",
+  ];
+  if (opts.readOnly) {
+    lines.push("", "This connection is read-only.");
+    return lines.join("\n");
+  }
+  lines.push(
+    "- `upsert_concept`, `link_concepts` and `delete_concept` edit the graph.",
+    "- `list_tasks`, `create_task`, `take_task` and `complete_task` manage the vault's task pile.",
+    "- `onboard` and `sync` return playbooks for indexing a codebase into the vault; `dream` runs or configures the consolidation sweep.",
+  );
+  return lines.join("\n");
+}
+
 /** Clients the hook playbook has specific install steps for. */
 export const SESSION_HOOK_CLIENTS = ["claude-code", "other"] as const;
 export type SessionHookClient = (typeof SESSION_HOOK_CLIENTS)[number];
