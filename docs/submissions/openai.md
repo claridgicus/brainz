@@ -25,7 +25,7 @@ No secrets are in this file or in `openai-plugin/`. The reviewer credentials liv
 |---|---|---|---|
 | 1 | Verify the OpenAI Platform org (business: Plutocracy Pty Ltd, or individual) | **gap** (takes days, start first) | `james-verify-the-openai-platform-organization-for-the-brainz-listing` |
 | 2 | Serve the domain-verification token at `/.well-known/openai-apps-challenge` (it 404s today) | **code done, needs deploy + secret** (route returns `OPENAI_APPS_CHALLENGE` as text/plain, 404 while unset) | `serve-the-openai-domain-verification-token-at-well-known-openai-apps-challenge` |
-| 3 | Run the 8 test cases in ChatGPT (developer mode) as the OpenAI reviewer | **gap** (read cases verified over curl) | `james-live-client-tests-claude-ai-claude-code-and-chatgpt-against-production` |
+| 3 | Run the 8 test cases in ChatGPT (developer mode) as the OpenAI reviewer | **gap** (read cases verified over curl; not run in ChatGPT on 2026-10-29, as the live run stopped before ChatGPT. The UI path is now Plugins → Add → **Add custom MCP server** (auth OAuth / No authentication / Mixed), with no separate Developer-mode toggle. The ChatGPT redirect URI is still unrecorded) | `james-live-client-tests-claude-ai-claude-code-and-chatgpt-against-production` |
 | 4 | Record and host the demo video; add its URL to `plugin.json` | **gap** | `james-record-and-host-the-openai-review-demo-video` |
 | 5 | No Cloudflare WAF/bot rule blocks ChatGPT's egress | **unknown** | `james-confirm-no-cloudflare-waf-bot-rule-blocks-claude-or-chatgpt-on-brainz-brownmatter-ai` |
 | 6 | support@brownmatter.ai monitored (review feedback arrives by email) | **unknown** | `james-make-support-brownmatter-ai-a-monitored-inbox` |

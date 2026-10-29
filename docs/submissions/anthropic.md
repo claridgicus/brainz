@@ -27,7 +27,7 @@ portal's **Test & launch** step.
 | 1 | Setup docs for connecting from Claude on brownmatter.ai/docs ("required by your publish date") | **gap** | `docs-add-connect-from-claude-and-connect-from-chatgpt-setup-sections` |
 | 2 | No Cloudflare WAF/bot rule blocks `160.79.104.0/21` | **unknown** (operator check) | `james-confirm-no-cloudflare-waf-bot-rule-blocks-claude-or-chatgpt-on-brainz-brownmatter-ai` |
 | 3 | support@brownmatter.ai is monitored | **unknown** | `james-make-support-brownmatter-ai-a-monitored-inbox` |
-| 4 | Every tool run once from claude.ai as a custom connector (the portal asks you to confirm this) | **gap** (curl run done, see Evidence) | `james-live-client-tests-claude-ai-claude-code-and-chatgpt-against-production` |
+| 4 | Every tool run once from claude.ai as a custom connector (the portal asks you to confirm this) | **partial** (2026-10-29: claude.ai connect, consent, `vault_stats`, multi-vault `list_vaults` + required `vault`, and Claude Code passed live; the other tools only over curl. See Evidence) | `james-live-client-tests-claude-ai-claude-code-and-chatgpt-against-production` |
 | 5 | Privacy policy discloses OAuth connector data | **gap** (advised) | `privacy-policy-disclose-oauth-connector-data-needs-james-s-approval` |
 | 6 | Onboard/sync notices in tool results are neutral | **gap** (advised; reviewer vault unaffected) | `make-the-onboard-sync-notices-in-tool-results-neutral-on-directory-surfaces` |
 
@@ -243,7 +243,7 @@ go to `mcp-review@anthropic.com`.
 | Privacy policy URL | **pass** (URL live), **gap** (OAuth disclosure, item 5) | `https://brownmatter.ai/privacy` |
 | Support contact | **unknown** | Item 3 |
 | Icon | **pass** | `assets/brainz-tile-512.png` (spec **UNCONFIRMED**) |
-| Tested as a custom connector in Claude | **gap** | Item 4 (the curl run below doesn't count as a Claude client) |
+| Tested as a custom connector in Claude | **partial pass** | claude.ai and Claude Code, live 2026-10-29 (see Evidence); not every tool has run from a Claude client yet (item 4) |
 | MCP App screenshots / allowed link URIs | **n/a** | No UI, no `ui/open-link` |
 
 ## Evidence: live run against production, 2026-10-28
@@ -260,7 +260,27 @@ only):
 - `vault_stats`, `search_concepts`, `get_concept`, `get_related`, `get_context`, `list_concepts`, `list_tasks` and `onboard status` → 200 OK; unknown id → actionable `isError`
 - `POST /oauth/revoke` → 200, then `tools/call` → 401
 
+## Evidence: live client run, 2026-10-29
+
+Signed in to claude.ai and to Brainz as James, against production. The custom connector and
+the `brainz-test` server were removed afterwards.
+
+- **claude.ai custom connector.** Customize → Connectors → Add custom connector, name "Brainz", URL `https://brainz.brownmatter.ai/mcp`, OAuth client "Use Claude's published identity" (CIMD `https://claude.ai/oauth/mcp-oauth-client-metadata`). **pass**
+  - claude.ai's add dialog **auto-detects "No sign-in"**, because anonymous `initialize` returns 200. Pick **Sign in when needed** by hand. In the portal, Step 6's answer still applies.
+  - The tool list showed before sign-in: 7 read-only + 9 write/delete tools, all titled.
+  - Lazy auth: the first `vault_stats` call showed "Authorization required … A connector needs your permission to continue" with **Connect**. After consent the call ran again and returned the vault's stats (226 concepts, 765 edges).
+  - Consent page: "Connect claude.ai to Brainz", the account email, the can/can't box, a vault picker (first vault pre-ticked, plus "All my vaults…"), "+ New vault", and sends you back to `claude.ai`.
+- **Multi-vault (two vaults ticked).** **pass**. The grant was stored as `selected` with 2 `oauth_grant_vault` rows. claude.ai re-fetched the tools (17, including `list_vaults`). `list_vaults` returned both vaults with role `owner`, `includesFutureVaults: false`. `vault_stats` without `vault` failed with `MCP error -32602: Input validation error: Invalid arguments for tool vault_stats: … "path": ["vault"], "message": "Required"`. `vault_stats {vault: "brainz"}` succeeded.
+- **Duplicate consent submits (found live, fix in progress).** Allow was posted more than once per consent: 3 codes in the first flow and 2 in the second, a few seconds apart, each a separate `?/approve` POST. claude.ai exchanged the **first** code and dropped the rest. In the second flow the first code was `single` (only the pre-ticked vault) and the later code was `selected`, so the connection silently got one vault instead of two. A clean retry with one click gave the right `selected` grant. Nothing is broken (each code is single-use, and the unused ones expire after 5 minutes), but the consent should not mint a code per click.
+- **Claude Code.** **pass**. `claude mcp add --transport http --scope local brainz-test https://brainz.brownmatter.ai/mcp` → `claude mcp list` shows "✔ Connected" (anonymous handshake). A headless `claude -p` call to `vault_stats` returned `MCP server "brainz-test" needs you to sign in again (run /mcp to re-authenticate)`. In an interactive session, `/mcp` → Authenticate used CIMD `https://claude.ai/oauth/claude-code-client-metadata` with redirect `http://localhost:<port>/callback`. The consent page showed the loopback warning ("This app runs on your own computer…") and, per the CIMD rule, named the client by host ("claude.ai", not "Claude Code"). After Allow came "Authentication successful. Connected to brainz-test.", then `vault_stats` returned 232 concepts and 780 edges. Removed with `claude mcp remove brainz-test`.
+- **Not run:** every remaining tool from a Claude client. The task was stopped once the goal was clarified as the public directory listing, not a custom connector.
+
 ## Screenshots
+
+`screens/claude-ai-tool-list.png`: the claude.ai connector page listing the 16 tools (7 read-only, 9
+write/delete) with their titles, captured 2026-10-29. It has no account or vault data. Other captures
+from that run (the consent page, tool results) show James's account and vault names and are kept out
+of the repo.
 
 Not required: Brainz is not an MCP App, so there is no carousel. The demo video in the OpenAI
 packet covers the flow. Optional captures for marketing or docs: the consent screen with the
