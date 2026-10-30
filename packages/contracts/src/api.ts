@@ -370,3 +370,43 @@ export type GraphPayload = z.infer<typeof graphResponseSchema>;
 
 /** GET .../stats response — same shape as the vault_stats tool output. */
 export const statsResponseSchema = vaultStatsOutputSchema;
+
+// ------------------------------------------------------------ support inbox
+
+/**
+ * POST /api/support/replies body (SPEC-CLOUD "Support inbox"). Replies on a
+ * support task's thread from support@brownmatter.ai. `mode: "draft"` (the
+ * default) logs a draft on the task for a human to approve; `mode: "send"`
+ * sends it, threaded with In-Reply-To/References. `fromDraft` sends the
+ * task's latest draft instead of `text`. REST only — deliberately not an MCP
+ * tool.
+ */
+export const supportReplyRequestSchema = z
+  .object({
+    taskId: z.string().min(1),
+    text: z.string().trim().min(1).max(20_000).optional(),
+    mode: z.enum(["draft", "send"]).default("draft"),
+    fromDraft: z.boolean().optional(),
+  })
+  .strict()
+  .refine((r) => r.text !== undefined || (r.mode === "send" && r.fromDraft === true), {
+    message: "text is required unless sending with fromDraft: true",
+  });
+export type SupportReplyRequest = z.infer<typeof supportReplyRequestSchema>;
+
+/** POST /api/support/replies response. `messageId` is set once sent. */
+export const supportReplyResponseSchema = z
+  .object({
+    taskId: z.string(),
+    mode: z.enum(["draft", "send"]),
+    to: z.string(),
+    subject: z.string(),
+    /** Bare Message-ID of the sent reply. */
+    messageId: z.string().optional(),
+    inReplyTo: z.string().optional(),
+    /** False when no send_email binding exists (local dev): logged, not delivered. */
+    delivered: z.boolean(),
+    at: z.string(),
+  })
+  .strict();
+export type SupportReplyResponse = z.infer<typeof supportReplyResponseSchema>;

@@ -33,6 +33,14 @@ export interface CloudEnv {
   OAUTH_REFRESH_GRACE_SECONDS?: string;
   /** OpenAI plugin-portal domain-verification token served at `/.well-known/openai-apps-challenge` (unset → 404). */
   OPENAI_APPS_CHALLENGE?: string;
+  /** Support inbox: vault id whose tasks hold support@ threads (unset → every message is forwarded). */
+  SUPPORT_VAULT_ID?: string;
+  /** Support inbox escalation destination (a verified Email Routing address; default james@plutocracy.io). */
+  SUPPORT_ESCALATE_TO?: string;
+  /** Support inbox auto-send policy: comma list of categories agents may send for (only `howto` is honored). Unset = off. */
+  SUPPORT_AUTOSEND_CATEGORIES?: string;
+  /** Optional R2 bucket for raw support mail + attachments (absent → raw MIME ≤256 KB in D1, attachments metadata-only). */
+  SUPPORT_MAIL?: import("@cloudflare/workers-types").R2Bucket;
 }
 
 type Auth = ReturnType<typeof createAuth>;

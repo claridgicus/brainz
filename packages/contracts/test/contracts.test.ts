@@ -50,7 +50,9 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "20"', () => {
+  it('is "21"', () => {
+    // 21: support inbox — supportReplyRequestSchema / supportReplyResponseSchema
+    //     for POST /api/support/replies (REST only, not an MCP tool). Additive.
     // 20: multi-vault OAuth grants — MULTI_VAULT_MCP_TOOLS (`list_vaults`) and
     //     the required `vault` routing arg (vaultRoutingArgSchema,
     //     withVaultRoutingArg) on multi-vault connections. Additive: every
@@ -90,7 +92,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("20");
+    expect(CONTRACTS_VERSION).toBe("21");
   });
 });
 

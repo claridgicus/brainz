@@ -12,7 +12,7 @@
 
 <Seo {title} {description} path="/privacy" type="article" />
 
-<LegalPage kicker="Legal" heading="Privacy Policy" updated="29 October 2026">
+<LegalPage kicker="Legal" heading="Privacy Policy" updated="30 October 2026">
 	<p>
 		Brainz is a hosted knowledge graph for AI agents, run by Plutocracy Pty Ltd ("Brownmatter",
 		"we"). This policy covers <code>brainz.brownmatter.ai</code> (the dashboard, REST API and the
@@ -74,6 +74,13 @@
 			and the time, for the same purpose.
 		</li>
 		<li>
+			<strong>Support email:</strong> when you email support@brownmatter.ai we store your message
+			(sender, subject, text and attachments), our replies, and the results of the sender checks
+			(SPF, DKIM, DMARC) your mail arrived with. An AI agent reads and sorts support email and drafts
+			replies. A person reviews anything about privacy, legal matters or account deletion, and every
+			reply except routine how-to answers taken from our docs.
+		</li>
+		<li>
 			<strong>Request logs:</strong> Cloudflare Workers Logs record requests and errors for operating
 			and debugging the service.
 		</li>
@@ -95,12 +102,17 @@
 	<ul>
 		<li>
 			<strong>Cloudflare</strong> hosts the whole service (Workers, D1, Durable Objects), sends our
-			email (Cloudflare Email Service, from <code>no-reply@brownmatter.ai</code>) and runs Workers AI,
+			email (Cloudflare Email Service, from <code>no-reply@brownmatter.ai</code>), receives and stores
+			support email (Email Routing, D1, R2) and runs Workers AI,
 			which computes embeddings of your concept text and, for dreaming without your own key, runs the
 			dreaming model over excerpts of your vault content. Data is stored on Cloudflare's network; we
 			do not currently pin it to a region.
 		</li>
 		<li><strong>GitHub</strong>, only if you choose "Continue with GitHub".</li>
+		<li>
+			<strong>Anthropic:</strong> our support agent runs on Anthropic's Claude, so the content of
+			support emails you send us is processed by Anthropic to sort them and draft replies.
+		</li>
 		<li>
 			<strong>Your LLM provider:</strong> if you add your own key, dreaming sends excerpts of your
 			vault content to the provider you chose (Anthropic, or the OpenAI-compatible endpoint you
@@ -152,6 +164,10 @@
 			is deleted at the next daily run. Apps that registered automatically are deleted after 30
 			days if they have no connection and have not been used on the consent screen. OAuth
 			registration rate-limit records are deleted after an hour.
+		</li>
+		<li>
+			Support email: kept so we can follow up on your request. We do not yet delete it
+			automatically; email us to have your support messages deleted.
 		</li>
 		<li>Deleted data can remain in Cloudflare's point-in-time recovery for up to 30 days.</li>
 	</ul>

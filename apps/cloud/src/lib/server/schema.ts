@@ -489,3 +489,52 @@ export const oauthRegisterEvent = sqliteTable(
   },
   (t) => [index("oauth_register_events_ip_created_at").on(t.ip, t.createdAt)],
 );
+
+// ----------------------------------------------------------- support inbox
+
+/**
+ * One row per support-inbox message (SPEC-CLOUD "Support inbox"): inbound
+ * mail received by the Worker's `email` handler, outbound replies sent from
+ * support@brownmatter.ai, and agent drafts awaiting approval. `message_id`
+ * (bare RFC 5322 id) threads replies onto `task_id`, the support task in the
+ * support vault's DO. Raw MIME and attachments live in R2 when the
+ * SUPPORT_MAIL bucket is bound (`raw_key`); otherwise raw MIME up to 256 KB
+ * is kept here base64-encoded (`raw_b64`). The (direction, created_at) and
+ * (from_addr, created_at) indexes back the inbound/outbound rate limits.
+ */
+export const supportMessage = sqliteTable(
+  "support_message",
+  {
+    id: text("id").primaryKey(),
+    /** "in" | "out" | "draft" */
+    direction: text("direction").notNull(),
+    messageId: text("message_id"),
+    taskId: text("task_id"),
+    fromAddr: text("from_addr").notNull(),
+    toAddr: text("to_addr").notNull(),
+    /** Inbound Reply-To when it differs from From: replies go there. */
+    replyTo: text("reply_to"),
+    subject: text("subject").notNull().default(""),
+    category: text("category"),
+    /** in: task | escalated | dropped | rejected | stored · out: sent | failed · draft: draft | sent */
+    disposition: text("disposition").notNull(),
+    /** Drop/reject reason, or the classifier's reason. */
+    note: text("note"),
+    authJson: text("auth_json"),
+    attachmentsJson: text("attachments_json").notNull().default("[]"),
+    rawKey: text("raw_key"),
+    rawB64: text("raw_b64"),
+    /** Outbound/draft body (plain text). */
+    bodyText: text("body_text"),
+    /** Who sent or drafted it (user email, or "api key <name>"). */
+    actor: text("actor"),
+    size: integer("size").notNull().default(0),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => [
+    index("support_message_message_id").on(t.messageId),
+    index("support_message_task_id").on(t.taskId, t.createdAt),
+    index("support_message_from_created_at").on(t.fromAddr, t.createdAt),
+    index("support_message_direction_created_at").on(t.direction, t.createdAt),
+  ],
+);
