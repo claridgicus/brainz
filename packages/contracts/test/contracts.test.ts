@@ -52,7 +52,12 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "22"', () => {
+  it('is "23"', () => {
+    // 23: per-vault dreaming settings — dreamSettingsSchema /
+    //     dreamSettingsPatchSchema; `dream configure` takes runHourUtc, mode,
+    //     phases, thresholds, caps, lossRail, llm; status gains `settings`; new
+    //     `apply` action (dreamApplyOutputSchema) for propose mode; diary
+    //     entries gain status proposed/dismissed, mode, proposals, decidedAt.
     // 22: `create_vault` — OAUTH_MCP_TOOLS (OAuth connections; the new vault
     //     joins the grant) and AGENT_KEY_MCP_TOOLS (bz_ keys on /mcp/agent;
     //     returns a new key), createVaultInput/OutputSchema. Additive.
@@ -97,7 +102,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("22");
+    expect(CONTRACTS_VERSION).toBe("23");
   });
 });
 
@@ -719,9 +724,11 @@ describe("concept-type registry (Wave TR)", () => {
 describe("dreaming spend controls", () => {
   it("dream status accepts the cloud spend fields and stays strict", async () => {
     const { dreamStatusOutputSchema } = await import("../src/index.js");
+    const { DREAM_SETTINGS_DEFAULTS } = await import("@brainz/engine");
     const base = {
       enabled: true,
       cadenceHours: 24,
+      settings: DREAM_SETTINGS_DEFAULTS,
       lastDreamAt: null,
       nextDreamAt: null,
       inFlight: null,
@@ -759,6 +766,81 @@ describe("dreaming spend controls", () => {
         model: "gpt",
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("per-vault dreaming settings", () => {
+  it("engine defaults are a valid settings object", async () => {
+    const { dreamSettingsSchema } = await import("../src/index.js");
+    const { DREAM_SETTINGS_DEFAULTS } = await import("@brainz/engine");
+    expect(dreamSettingsSchema.safeParse(DREAM_SETTINGS_DEFAULTS).success).toBe(true);
+  });
+
+  it("wire bounds match the engine's DREAM_SETTINGS_BOUNDS", async () => {
+    const { dreamSettingsPatchSchema } = await import("../src/index.js");
+    const { DREAM_SETTINGS_BOUNDS: B } = await import("@brainz/engine");
+    const ok = (patch: unknown) => dreamSettingsPatchSchema.safeParse(patch).success;
+    const edges: [string, (v: number) => unknown, readonly [number, number], number][] = [
+      ["cadenceHours", (v) => ({ cadenceHours: v }), B.cadenceHours, 1],
+      ["runHourUtc", (v) => ({ runHourUtc: v }), B.runHourUtc, 1],
+      ["merge", (v) => ({ thresholds: { merge: v } }), B.threshold, 0.01],
+      ["contradiction", (v) => ({ thresholds: { contradiction: v } }), B.threshold, 0.01],
+      ["maxMerges", (v) => ({ caps: { maxMerges: v } }), B.maxMerges, 1],
+      ["maxPromotions", (v) => ({ caps: { maxPromotions: v } }), B.maxPromotions, 1],
+      ["maxLinks", (v) => ({ caps: { maxLinks: v } }), B.maxLinks, 1],
+      ["maxContradictions", (v) => ({ caps: { maxContradictions: v } }), B.maxContradictions, 1],
+      ["maxTouchFraction", (v) => ({ lossRail: { maxTouchFraction: v } }), B.maxTouchFraction, 0.001],
+      ["minTouchAllowance", (v) => ({ lossRail: { minTouchAllowance: v } }), B.minTouchAllowance, 1],
+    ];
+    for (const [name, make, [lo, hi], step] of edges) {
+      expect(ok(make(lo)), `${name} min`).toBe(true);
+      expect(ok(make(hi)), `${name} max`).toBe(true);
+      expect(ok(make(lo - step)), `${name} below`).toBe(false);
+      expect(ok(make(hi + step)), `${name} above`).toBe(false);
+    }
+  });
+
+  it("rejects unknown fields, bad modes and model ids; accepts null clears", async () => {
+    const { dreamSettingsPatchSchema, dreamInputSchema } = await import("../src/index.js");
+    const ok = (patch: unknown) => dreamSettingsPatchSchema.safeParse(patch).success;
+    expect(ok({ mode: "propose", runHourUtc: null, llm: { provider: "byok", model: null } })).toBe(true);
+    expect(ok({ mode: "dream-harder" })).toBe(false);
+    expect(ok({ phases: { naps: true } })).toBe(false);
+    expect(ok({ llm: { model: "has spaces" } })).toBe(false);
+    expect(ok({ llm: { provider: "gemini" } })).toBe(false);
+    expect(ok({ surprise: 1 })).toBe(false);
+    expect(
+      dreamInputSchema.safeParse({ action: "configure", mode: "light-only", caps: { maxLinks: 3 } }).success,
+    ).toBe(true);
+    expect(dreamInputSchema.safeParse({ action: "apply", id: "dream-1", proposals: [0, 2] }).success).toBe(true);
+    expect(dreamInputSchema.safeParse({ action: "apply", id: "dream-1", proposals: [-1] }).success).toBe(false);
+  });
+
+  it("dream apply output and proposed diary entries validate", async () => {
+    const { dreamApplyOutputSchema, dreamOutputSchema } = await import("../src/index.js");
+    const entry = {
+      id: "dream-1",
+      trigger: "manual",
+      startedAt: "2026-10-30T03:00:00.000Z",
+      finishedAt: "2026-10-30T03:00:01.000Z",
+      status: "applied",
+      mode: "propose",
+      light: { changed: 2, duplicates: 1, outcomes: 0, orphans: 0, pendingLinks: 0, missingCodeAreas: 0 },
+      rem: { status: "ok", calls: 1, proposals: 1, themes: [] },
+      deep: { status: "applied", touched: 2, allowance: 3, merged: 1, promoted: 0, linked: 0, contradictions: 0 },
+      applied: [{ kind: "merge", id: "a", summary: "merged b into a" }],
+      rejected: {},
+      proposals: [{ n: 0, kind: "merge", id: "a", summary: "merged b into a", decision: "approved" }],
+      decidedAt: "2026-10-30T04:00:00.000Z",
+      markdown: "## Dream dream-1 — applied\n",
+    };
+    const out = { id: "dream-1", status: "applied", applied: 1, rejected: 0, entry };
+    expect(dreamApplyOutputSchema.safeParse(out).success).toBe(true);
+    expect(dreamOutputSchema.safeParse(out).success).toBe(true);
+    expect(
+      dreamApplyOutputSchema.safeParse({ ...out, entry: { ...entry, proposals: [{ n: 0, decision: "maybe" }] } })
+        .success,
+    ).toBe(false);
   });
 });
 

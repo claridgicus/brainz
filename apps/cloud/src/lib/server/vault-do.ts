@@ -26,17 +26,21 @@ import {
   advanceSweep,
   assembleContext,
   bfsRelated,
-  clampCadenceHours,
   cosineSim,
-  DREAM_DEFAULT_CADENCE_HOURS,
+  decideEntry,
   diaryEntry,
   dreamId,
+  dreamOptionsFromSettings,
   extractWikiLinks,
   isEmptySweep,
+  nextDreamDue,
+  normalizeDreamSettings,
+  patchDreamSettings,
   packVector,
   planDeep,
   renderDiaryEntry,
   rrfFuse,
+  selectProposals,
   slugify,
   startSweep,
   TASK_COMPLETE_REMINDER,
@@ -52,6 +56,9 @@ import type {
   DreamDiaryEntry,
   DreamOptions,
   DreamPhase,
+  DreamPlan,
+  DreamSettings,
+  DreamSettingsPatch,
   DreamSnapshot,
   DreamSweepState,
   DreamTrigger,
@@ -82,7 +89,7 @@ import {
   type KillSwitch,
 } from "./dream-budget";
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
 
 /**
@@ -138,11 +145,14 @@ interface DreamRow {
   diary_json: string;
   preimage_json: string;
   reverted_at: string | null;
+  /** Propose mode: the held sweep state (staged material + accepted proposals) until decided. */
+  pending_json: string | null;
 }
 
 export interface DreamStatusResult {
   enabled: boolean;
   cadenceHours: number;
+  settings: DreamSettings;
   lastDreamAt: string | null;
   nextDreamAt: string | null;
   inFlight: { id: string; phase: DreamPhase; startedAt: string } | null;
@@ -160,6 +170,14 @@ export interface DreamRunResult {
   id: string | null;
   phase?: DreamPhase;
   entry?: DreamDiaryEntry;
+}
+
+export interface DreamApplyResult {
+  id: string;
+  status: "applied" | "nothing-applied" | "rejected" | "dismissed";
+  applied: number;
+  rejected: number;
+  entry: DreamDiaryEntry;
 }
 
 export interface DreamRevertResult {
@@ -314,6 +332,15 @@ export class VaultDO {
         // dream_* settings are meta KV entries with defaults (on, 24h).
         this.#createDreamTable();
       }
+      if (version < 8) {
+        // v7 → v8: per-vault dreaming settings (meta `dream_settings`, JSON;
+        // absent ⇒ defaults) and propose mode's held sweep state (additive
+        // nullable column). v6 vaults just got the column from v7's CREATE.
+        const cols = this.#sql.exec<{ name: string }>(`PRAGMA table_info(dream)`).toArray();
+        if (!cols.some((c) => c.name === "pending_json")) {
+          this.#sql.exec(`ALTER TABLE dream ADD COLUMN pending_json TEXT`);
+        }
+      }
     }
     // Idempotent seed: if the registry table exists but is empty (fresh vault or
     // just-backfilled), populate the built-ins. Safe to run every init.
@@ -347,7 +374,8 @@ export class VaultDO {
       status TEXT NOT NULL,
       diary_json TEXT NOT NULL,
       preimage_json TEXT NOT NULL,
-      reverted_at TEXT
+      reverted_at TEXT,
+      pending_json TEXT
     )`);
   }
 
@@ -655,8 +683,13 @@ export class VaultDO {
         case "dreamRevert":
           return json(await this.dreamRevert(String(args.id ?? "")));
         case "dreamConfigure":
+          return json(await this.dreamConfigure(args as DreamSettingsPatch));
+        case "dreamApply":
           return json(
-            await this.dreamConfigure(args as { enabled?: boolean; cadenceHours?: number }),
+            await this.dreamApply(
+              String(args.id ?? ""),
+              Array.isArray(args.proposals) ? (args.proposals as number[]) : undefined,
+            ),
           );
         case "destroy":
           return json(await this.destroy());
@@ -1466,16 +1499,34 @@ export class VaultDO {
 
   // ----------------------------------------------------------------- dreaming
 
-  /** Test seam: override engine dream options (thresholds, batch sizes). */
+  /** Test seam: override engine dream options (thresholds, batch sizes) on top of the vault's settings. */
   dreamOptions: Partial<DreamOptions> = {};
 
   #dreamEnabled(): boolean {
     return this.#metaGet("dream_enabled") !== "false";
   }
 
-  #dreamCadenceHours(): number {
-    const raw = this.#metaGet("dream_cadence_hours");
-    return clampCadenceHours(raw === null ? DREAM_DEFAULT_CADENCE_HOURS : Number(raw));
+  /**
+   * The vault's dreaming settings: `dream_enabled` / `dream_cadence_hours`
+   * (kept from v7) plus the rest in `dream_settings` JSON, clamped to bounds.
+   */
+  #dreamSettings(): DreamSettings {
+    let rest: unknown = {};
+    try {
+      rest = JSON.parse(this.#metaGet("dream_settings") ?? "{}");
+    } catch {
+      rest = {};
+    }
+    const cadence = this.#metaGet("dream_cadence_hours");
+    return normalizeDreamSettings({
+      ...(rest && typeof rest === "object" ? rest : {}),
+      enabled: this.#dreamEnabled(),
+      ...(cadence === null ? {} : { cadenceHours: Number(cadence) }),
+    });
+  }
+
+  #dreamEngineOptions(settings = this.#dreamSettings()): Partial<DreamOptions> {
+    return { ...dreamOptionsFromSettings(settings), ...this.dreamOptions };
   }
 
   /** Test seam: the fetch BYOK providers use. */
@@ -1497,7 +1548,7 @@ export class VaultDO {
    * Which provider the next REM step may use (spend cap, kill switch, BYOK —
    * see dream-budget.ts). A control-plane failure fails closed: no REM.
    */
-  async #dreamChoice(): Promise<DreamProviderChoice> {
+  async #dreamChoice(settings = this.#dreamSettings()): Promise<DreamProviderChoice> {
     try {
       return await chooseDreamProvider({
         db: this.#env.DB,
@@ -1505,6 +1556,7 @@ export class VaultDO {
         ai: this.#env.AI,
         ownerId: await this.#dreamOwner(),
         fetchFn: this.dreamFetch,
+        preference: settings.llm,
       });
     } catch (err) {
       console.error("dream provider selection failed:", err);
@@ -1540,8 +1592,7 @@ export class VaultDO {
       return;
     }
     const last = this.#metaGet("last_dream_at");
-    const base = last ? Date.parse(last) : now;
-    const due = (Number.isFinite(base) ? base : now) + this.#dreamCadenceHours() * 3_600_000;
+    const due = nextDreamDue(last ? Date.parse(last) : null, now, this.#dreamSettings());
     await this.#state.storage.setAlarm(Math.max(due, now + 60_000));
   }
 
@@ -1615,9 +1666,14 @@ export class VaultDO {
         return { status: "idle", id: null };
       }
     }
-    // Spend controls are checked before every step that could reach REM.
-    const choice = await this.#dreamChoice();
-    const step = { llm: choice.llm, skipReason: choice.skipReason, options: this.dreamOptions };
+    // Spend controls are checked before every step that could reach REM;
+    // light-only mode never picks a provider at all.
+    const settings = this.#dreamSettings();
+    const choice: Pick<DreamProviderChoice, "llm" | "skipReason" | "meter"> =
+      settings.mode === "light-only"
+        ? { llm: null, skipReason: "light-only mode" }
+        : await this.#dreamChoice(settings);
+    const step = { llm: choice.llm, skipReason: choice.skipReason, options: this.#dreamEngineOptions(settings) };
     try {
       // One light batch, or one bounded round of REM calls, per step.
       if (state.phase !== "deep") state = await advanceSweep(state, snapshot, step);
@@ -1631,32 +1687,45 @@ export class VaultDO {
       this.#metaSet("dream_checkpoint", JSON.stringify(state));
       return { status: "in-progress", id: state.id, phase: state.phase };
     }
-    return { status: "done", id: state.id, entry: await this.#finishDream(state, snapshot) };
+    return { status: "done", id: state.id, entry: await this.#finishDream(state, snapshot, settings) };
   }
 
-  async #finishDream(state: DreamSweepState, snapshot: DreamSnapshot): Promise<DreamDiaryEntry> {
+  /** Apply a plan's ops, returning the preimage of each touched concept. */
+  async #applyDreamPlan(plan: DreamPlan): Promise<DreamPreimage[]> {
+    const preimages: DreamPreimage[] = [];
+    for (const op of plan.ops) {
+      const before = this.#getRow(op.id);
+      if (op.after) await this.#writeDreamConcept(op.after);
+      else this.deleteConcept(op.id);
+      const after = this.#getRow(op.id);
+      preimages.push({
+        id: op.id,
+        before,
+        afterUpdatedAt: after?.updated_at ?? null,
+        afterHash: after?.hash ?? null,
+      });
+    }
+    return preimages;
+  }
+
+  async #finishDream(
+    state: DreamSweepState,
+    snapshot: DreamSnapshot,
+    settings: DreamSettings,
+  ): Promise<DreamDiaryEntry> {
     const now = new Date().toISOString();
     const plan =
-      state.rem.status === "ok" ? planDeep(state, snapshot, { now, options: this.dreamOptions }) : null;
-    const preimages: DreamPreimage[] = [];
-    if (plan?.status === "apply") {
-      for (const op of plan.ops) {
-        const before = this.#getRow(op.id);
-        if (op.after) await this.#writeDreamConcept(op.after);
-        else this.deleteConcept(op.id);
-        const after = this.#getRow(op.id);
-        preimages.push({
-          id: op.id,
-          before,
-          afterUpdatedAt: after?.updated_at ?? null,
-          afterHash: after?.hash ?? null,
-        });
-      }
-    }
-    const entry = diaryEntry(state, plan, new Date().toISOString());
+      state.rem.status === "ok"
+        ? planDeep(state, snapshot, { now, options: this.#dreamEngineOptions(settings) })
+        : null;
+    // Propose mode writes nothing: it keeps the staged material + accepted proposals.
+    const proposing = settings.mode === "propose" && plan?.status === "apply";
+    const preimages = plan?.status === "apply" && !proposing ? await this.#applyDreamPlan(plan) : [];
+    const entry = diaryEntry(state, plan, new Date().toISOString(), { mode: settings.mode });
+    const pending = proposing ? { ...state, rem: { ...state.rem, proposals: plan.accepted } } : null;
     this.#sql.exec(
-      `INSERT INTO dream (id, started_at, finished_at, trigger, status, diary_json, preimage_json, reverted_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+      `INSERT INTO dream (id, started_at, finished_at, trigger, status, diary_json, preimage_json, reverted_at, pending_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
       entry.id,
       entry.startedAt,
       entry.finishedAt,
@@ -1664,6 +1733,7 @@ export class VaultDO {
       entry.status,
       JSON.stringify(entry),
       JSON.stringify(preimages),
+      pending ? JSON.stringify(pending) : null,
     );
     this.#sql.exec(
       `DELETE FROM dream WHERE id NOT IN (SELECT id FROM dream ORDER BY started_at DESC, id DESC LIMIT ?)`,
@@ -1763,20 +1833,24 @@ export class VaultDO {
   }
 
   async dreamStatus(): Promise<DreamStatusResult> {
-    const enabled = this.#dreamEnabled();
+    const settings = this.#dreamSettings();
+    const enabled = settings.enabled;
     const alarm = enabled ? await this.#state.storage.getAlarm() : null;
     const flight = this.#dreamCheckpoint();
     const lastEntry = this.#latestEntry();
-    const choice = await this.#dreamChoice();
+    const choice = await this.#dreamChoice(settings);
+    const lightOnly = settings.mode === "light-only";
     return {
       enabled,
-      cadenceHours: this.#dreamCadenceHours(),
+      cadenceHours: settings.cadenceHours,
+      settings,
       lastDreamAt: this.#metaGet("last_dream_at"),
       nextDreamAt: alarm === null ? null : new Date(alarm).toISOString(),
       inFlight: flight ? { id: flight.id, phase: flight.phase, startedAt: flight.startedAt } : null,
-      llm: choice.llm?.name ?? null,
+      // Light-only mode never calls an LLM, whatever would be available.
+      llm: lightOnly ? null : (choice.llm?.name ?? null),
       ...(lastEntry ? { lastEntry } : {}),
-      provider: choice.provider,
+      provider: lightOnly ? null : choice.provider,
       killSwitch: choice.killSwitch,
       ...(choice.spend ? { spend: choice.spend } : {}),
     };
@@ -1815,6 +1889,9 @@ export class VaultDO {
     if (rows.length === 0) throw new NotFoundError(`no dream with id "${id}"`);
     const row = rows[0];
     if (row.reverted_at) throw new Error(`dream "${id}" was already reverted`);
+    if (row.status === "proposed") {
+      throw new Error(`dream "${id}" is still proposed — nothing was written; decide it with apply`);
+    }
     const preimages = JSON.parse(row.preimage_json) as DreamPreimage[];
     const conflicts: string[] = [];
     for (const p of preimages) {
@@ -1845,11 +1922,54 @@ export class VaultDO {
     return { id, reverted: true, restored: preimages.length, conflicts: [] };
   }
 
-  async dreamConfigure(args: { enabled?: boolean; cadenceHours?: number }): Promise<DreamStatusResult> {
-    if (args.enabled !== undefined) this.#metaSet("dream_enabled", args.enabled ? "true" : "false");
-    if (args.cadenceHours !== undefined) {
-      this.#metaSet("dream_cadence_hours", String(clampCadenceHours(Number(args.cadenceHours))));
+  /**
+   * Decide a `proposed` dream: approve `proposals` (positions; omitted ⇒ all),
+   * reject the rest. Approved ones are re-gated against the vault as it is
+   * NOW and applied with preimages, so the dream stays revertible.
+   */
+  async dreamApply(id: string, proposals?: number[]): Promise<DreamApplyResult> {
+    const rows = this.#sql.exec<DreamRow>(`SELECT * FROM dream WHERE id = ?`, id).toArray();
+    if (rows.length === 0) throw new NotFoundError(`no dream with id "${id}"`);
+    const row = rows[0];
+    if (row.status !== "proposed" || !row.pending_json) {
+      throw new Error(`dream "${id}" has no pending proposals (status ${row.status})`);
     }
+    const entry = JSON.parse(row.diary_json) as DreamDiaryEntry;
+    const pending = JSON.parse(row.pending_json) as DreamSweepState;
+    const all = (entry.proposals ?? []).map((p) => p.n);
+    const selected = proposals === undefined ? all : all.filter((n) => proposals.includes(n));
+    const now = new Date().toISOString();
+    let plan: DreamPlan | null = null;
+    let preimages: DreamPreimage[] = [];
+    if (selected.length > 0) {
+      const state = { ...pending, rem: { ...pending.rem, proposals: selectProposals(pending.rem.proposals, selected) } };
+      plan = planDeep(state, this.#dreamSnapshot(), { now, options: this.#dreamEngineOptions() });
+      if (plan.status === "apply") preimages = await this.#applyDreamPlan(plan);
+    }
+    const decided = decideEntry(entry, plan, selected, now);
+    this.#sql.exec(
+      `UPDATE dream SET status = ?, diary_json = ?, preimage_json = ?, pending_json = NULL WHERE id = ?`,
+      decided.status,
+      JSON.stringify(decided),
+      JSON.stringify(preimages),
+      id,
+    );
+    const applied = plan?.status === "apply" ? plan.applied.length : 0;
+    return {
+      id,
+      status: decided.status as DreamApplyResult["status"],
+      applied,
+      rejected: all.length - applied,
+      entry: decided,
+    };
+  }
+
+  async dreamConfigure(patch: DreamSettingsPatch): Promise<DreamStatusResult> {
+    const next = patchDreamSettings(this.#dreamSettings(), patch);
+    const { enabled, cadenceHours, ...rest } = next;
+    this.#metaSet("dream_enabled", enabled ? "true" : "false");
+    this.#metaSet("dream_cadence_hours", String(cadenceHours));
+    this.#metaSet("dream_settings", JSON.stringify(rest));
     // Turning dreaming off also abandons any sweep in flight.
     if (!this.#dreamEnabled()) this.#metaDelete("dream_checkpoint");
     await this.#scheduleDream();

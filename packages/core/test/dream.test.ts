@@ -144,4 +144,83 @@ describe("Vault.dream (local)", () => {
     await vault.configureDreaming({ enabled: false, cadenceHours: 500 });
     expect(vault.dreamConfig()).toEqual({ enabled: false, cadenceHours: 168 });
   });
+
+  it("persists the full settings in brainz.config.json, clamped", async () => {
+    const { vault, dir } = await makeVault();
+    await vault.configureDreaming({
+      mode: "propose",
+      runHourUtc: 4,
+      phases: { contradictions: false },
+      caps: { maxLinks: 2 },
+      lossRail: { maxTouchFraction: 0.5 },
+    });
+    const config = JSON.parse(await readFile(path.join(dir, "brainz.config.json"), "utf8"));
+    expect(config.dreaming).toMatchObject({
+      mode: "propose",
+      runHourUtc: 4,
+      phases: { merges: true, contradictions: false },
+      caps: { maxLinks: 2, maxMerges: 5 },
+      // The loss rail can only be tightened.
+      lossRail: { maxTouchFraction: 0.2 },
+    });
+    const reopened = await Vault.open(dir);
+    cleanups.push(async () => reopened.close());
+    expect(reopened.dreamSettings().mode).toBe("propose");
+  });
+
+  it("light-only mode never calls the LLM", async () => {
+    const { vault, dir } = await makeVault();
+    const before = await snapshotFiles(dir);
+    let calls = 0;
+    await vault.configureDreaming({ mode: "light-only" });
+    const run = await vault.dream({ llm: { name: "spy", complete: async () => (calls++, "{}") } });
+    expect(calls).toBe(0);
+    expect(run.entry).toMatchObject({ status: "light-only", mode: "light-only" });
+    expect(run.entry?.rem.reason).toBe("light-only mode");
+    expect(await snapshotFiles(dir)).toEqual(before);
+  });
+
+  it("settings flow into the engine: a phase that is off is not applied", async () => {
+    const { vault } = await makeVault();
+    await vault.configureDreaming({ phases: { merges: false } });
+    const run = await vault.dream({ llm });
+    expect(run.entry?.deep).toMatchObject({ merged: 0, promoted: 1 });
+    expect(run.entry?.rejected["phase-off"]).toBe(1);
+    expect(vault.getConcept("session-refreshing")).not.toBeNull();
+  });
+
+  it("propose mode writes nothing until apply, then applies the approved subset (revertible)", async () => {
+    const { vault, dir } = await makeVault();
+    const before = await snapshotFiles(dir);
+    await vault.configureDreaming({ mode: "propose" });
+    const run = await vault.dream({ llm });
+    expect(run.entry?.status).toBe("proposed");
+    expect(run.entry?.proposals?.map((p) => [p.n, p.kind, p.decision])).toEqual([
+      [0, "merge", "pending"],
+      [1, "promote", "pending"],
+    ]);
+    expect(await snapshotFiles(dir)).toEqual(before);
+    await expect(vault.revertDream(run.id!)).rejects.toThrow(/still proposed/);
+
+    const res = await vault.applyDream(run.id!, [1]);
+    expect(res).toMatchObject({ status: "applied", applied: 1, rejected: 1 });
+    expect(res.entry.proposals?.map((p) => p.decision)).toEqual(["rejected", "approved"]);
+    expect(vault.getConcept("signup-rate-limit")?.type).toBe("constraint");
+    expect(vault.getConcept("session-refreshing")).not.toBeNull();
+    expect((await vault.dreamDiary())[0].status).toBe("applied");
+    await expect(vault.applyDream(run.id!)).rejects.toThrow(/no pending proposals/);
+
+    expect(await vault.revertDream(run.id!)).toMatchObject({ reverted: true, restored: 1 });
+    expect(await snapshotFiles(dir)).toEqual(before);
+  });
+
+  it("apply with no proposals dismisses the dream", async () => {
+    const { vault, dir } = await makeVault();
+    const before = await snapshotFiles(dir);
+    await vault.configureDreaming({ mode: "propose" });
+    const run = await vault.dream({ llm });
+    const res = await vault.applyDream(run.id!, []);
+    expect(res).toMatchObject({ status: "dismissed", applied: 0, rejected: 2 });
+    expect(await snapshotFiles(dir)).toEqual(before);
+  });
 });

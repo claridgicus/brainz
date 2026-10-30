@@ -4,6 +4,8 @@
 		AccountDreaming,
 		ApiKey,
 		ConceptTypeEntry,
+		DreamSettingsWire,
+		VaultDreaming,
 		VaultInvite,
 		VaultMember,
 		VaultRole,
@@ -391,6 +393,95 @@
 			llmError = errMsg(err, "Failed to remove the key.");
 		} finally {
 			llmBusy = null;
+		}
+	}
+
+	// ------------------------------------------------- vault dreaming settings
+	// This vault's own dreaming settings (schedule, mode, phases, gates, caps,
+	// loss rail, LLM choice) + its Dream Diary. Editors and owners can change
+	// them and decide proposed dreams; viewers see everything read-only.
+	// svelte-ignore state_referenced_locally
+	let vaultDreaming = $state<VaultDreaming | null>(data.vaultDreaming);
+	const canEditDreaming = $derived(role !== "viewer");
+	const cloneSettings = (s: DreamSettingsWire): DreamSettingsWire => JSON.parse(JSON.stringify(s));
+	// svelte-ignore state_referenced_locally
+	let draft = $state<DreamSettingsWire | null>(
+		data.vaultDreaming ? cloneSettings(data.vaultDreaming.status.settings) : null,
+	);
+	// svelte-ignore state_referenced_locally
+	let draftModel = $state(data.vaultDreaming?.status.settings.llm.model ?? "");
+	let dreamSaving = $state(false);
+	let dreamSaved = $state(false);
+	let dreamError = $state<string | null>(null);
+	let decideBusy = $state<string | null>(null);
+	/** Proposal numbers ticked per proposed dream (all ticked by default). */
+	let picked = $state<Record<string, number[]>>({});
+
+	const PHASES = [
+		["merges", "Merge duplicates"],
+		["promotions", "Promote task outcomes"],
+		["links", "Add missing links"],
+		["contradictions", "File contradiction tasks"],
+	] as const;
+	const THRESHOLDS = [
+		["merge", "Merge"],
+		["promote", "Promote"],
+		["link", "Link"],
+		["contradiction", "Contradiction"],
+	] as const;
+	const CAPS = [
+		["maxMerges", "Merges", 20],
+		["maxPromotions", "Promotions", 20],
+		["maxLinks", "Links", 50],
+		["maxContradictions", "Contradictions", 10],
+	] as const;
+	const HOURS = Array.from({ length: 24 }, (_, h) => h);
+
+	function adoptDreaming(next: VaultDreaming) {
+		vaultDreaming = next;
+		draft = cloneSettings(next.status.settings);
+		draftModel = next.status.settings.llm.model ?? "";
+	}
+
+	async function saveDreamSettings(ev: SubmitEvent) {
+		ev.preventDefault();
+		if (!draft) return;
+		dreamSaving = true;
+		dreamSaved = false;
+		dreamError = null;
+		try {
+			adoptDreaming(
+				await api.updateVaultDreaming(vault.id, {
+					...draft,
+					llm: { provider: draft.llm.provider, model: draftModel.trim() || null },
+				}),
+			);
+			dreamSaved = true;
+		} catch (err) {
+			dreamError = errMsg(err, "Failed to save dreaming settings.");
+		} finally {
+			dreamSaving = false;
+		}
+	}
+
+	const pickedFor = (e: { id: string; proposals?: { n: number }[] }) =>
+		picked[e.id] ?? (e.proposals ?? []).map((p) => p.n);
+
+	function toggleProposal(e: { id: string; proposals?: { n: number }[] }, n: number, on: boolean) {
+		const cur = pickedFor(e).filter((x) => x !== n);
+		picked = { ...picked, [e.id]: on ? [...cur, n].sort((a, b) => a - b) : cur };
+	}
+
+	async function decideDream(dreamId: string, proposals: number[]) {
+		decideBusy = dreamId;
+		dreamError = null;
+		try {
+			await api.applyDream(vault.id, dreamId, proposals);
+			adoptDreaming(await api.getVaultDreaming(vault.id));
+		} catch (err) {
+			dreamError = errMsg(err, "Failed to decide the dream.");
+		} finally {
+			decideBusy = null;
 		}
 	}
 
@@ -942,6 +1033,181 @@
 		{#if llmError}<p class="error-text" role="alert">{llmError}</p>{/if}
 	</section>
 
+	<!-- -------------------------------------------- vault dreaming settings -->
+	<section class="card" data-testid="vault-dreaming">
+		<h2>Dreaming for this vault</h2>
+		<p class="muted section-hint">
+			How this vault consolidates itself: when it dreams, whether changes are applied or held for
+			approval, which kinds of change it may make and how confident it must be. The loss rail can
+			only be made stricter. {#if !canEditDreaming}<em>Viewers see this read-only.</em>{/if}
+		</p>
+		{#if !vaultDreaming || !draft}
+			<p class="error-text" role="alert">Couldn't load this vault's dreaming settings — reload to try again.</p>
+		{:else}
+			<p class="muted" role="status">
+				Last dream: <strong>{vaultDreaming.status.lastDreamAt ? fmtDate(vaultDreaming.status.lastDreamAt) : "never"}</strong>
+				· next: <strong>{vaultDreaming.status.nextDreamAt ? fmtDate(vaultDreaming.status.nextDreamAt) : "not scheduled"}</strong>
+				{#if vaultDreaming.status.provider !== undefined}
+					· thinking step: <strong>{vaultDreaming.status.provider ?? "none available"}</strong>
+				{/if}
+			</p>
+			<form onsubmit={saveDreamSettings} class="dream-form">
+				<fieldset disabled={!canEditDreaming || dreamSaving}>
+					<legend>Schedule</legend>
+					<div class="row">
+						<label class="check"><input type="checkbox" bind:checked={draft.enabled} /> Dreaming on</label>
+						<label>
+							Every
+							<input class="input num-input" type="number" min="1" max="168" step="1" bind:value={draft.cadenceHours} aria-label="Cadence in hours" />
+							hours
+						</label>
+						<label>
+							at
+							<select class="select" bind:value={draft.runHourUtc} aria-label="Preferred UTC hour">
+								<option value={null}>any time</option>
+								{#each HOURS as h (h)}<option value={h}>{String(h).padStart(2, "0")}:00 UTC</option>{/each}
+							</select>
+						</label>
+					</div>
+				</fieldset>
+				<fieldset disabled={!canEditDreaming || dreamSaving}>
+					<legend>Mode</legend>
+					<select class="select" bind:value={draft.mode} aria-label="Dreaming mode">
+						<option value="apply">Apply changes that pass the gates</option>
+						<option value="propose">Propose changes; apply only what I approve</option>
+						<option value="light-only">Light only: never call an LLM</option>
+					</select>
+				</fieldset>
+				<fieldset disabled={!canEditDreaming || dreamSaving}>
+					<legend>Phases</legend>
+					<div class="row">
+						{#each PHASES as [key, label] (key)}
+							<label class="check"><input type="checkbox" bind:checked={draft.phases[key]} /> {label}</label>
+						{/each}
+					</div>
+				</fieldset>
+				<fieldset disabled={!canEditDreaming || dreamSaving}>
+					<legend>Minimum confidence (0.5–1)</legend>
+					<div class="row">
+						{#each THRESHOLDS as [key, label] (key)}
+							<label>
+								{label}
+								<input class="input num-input" type="number" min="0.5" max="1" step="0.05" bind:value={draft.thresholds[key]} aria-label="{label} confidence" />
+							</label>
+						{/each}
+					</div>
+				</fieldset>
+				<fieldset disabled={!canEditDreaming || dreamSaving}>
+					<legend>Most changes per dream</legend>
+					<div class="row">
+						{#each CAPS as [key, label, max] (key)}
+							<label>
+								{label}
+								<input class="input num-input" type="number" min="1" {max} step="1" bind:value={draft.caps[key]} aria-label="Max {label.toLowerCase()}" />
+							</label>
+						{/each}
+					</div>
+				</fieldset>
+				<fieldset disabled={!canEditDreaming || dreamSaving}>
+					<legend>Loss rail (stricter only)</legend>
+					<div class="row">
+						<label>
+							Touch at most
+							<input class="input num-input" type="number" min="0.01" max="0.2" step="0.01" bind:value={draft.lossRail.maxTouchFraction} aria-label="Max touch fraction" />
+							of the vault
+						</label>
+						<label>
+							or
+							<input class="input num-input" type="number" min="0" max="3" step="1" bind:value={draft.lossRail.minTouchAllowance} aria-label="Min touch allowance" />
+							concepts, whichever is more
+						</label>
+					</div>
+				</fieldset>
+				<fieldset disabled={!canEditDreaming || dreamSaving}>
+					<legend>LLM</legend>
+					<div class="row">
+						<select class="select" bind:value={draft.llm.provider} aria-label="Dream LLM provider">
+							<option value="auto">Automatic (your key if set, else Brainz's AI)</option>
+							<option value="workers-ai">Brainz's AI only</option>
+							<option value="byok">The owner's own key only</option>
+						</select>
+						<input class="input grow" bind:value={draftModel} placeholder="Model for the owner's key (default: the key's model)" aria-label="Dream model" />
+					</div>
+				</fieldset>
+				{#if canEditDreaming}
+					<div class="row">
+						<button type="submit" class="btn btn-primary" disabled={dreamSaving}>
+							{#if dreamSaving}<span class="spinner"></span>{/if}
+							Save dreaming settings
+						</button>
+						{#if dreamSaved}<span class="ok-text" role="status">Saved.</span>{/if}
+					</div>
+				{/if}
+			</form>
+
+			<h3>Dream Diary</h3>
+			{#if vaultDreaming.entries.length === 0}
+				<p class="muted">No dreams yet.</p>
+			{:else}
+				<ul class="diary">
+					{#each vaultDreaming.entries as e (e.id)}
+						<li class="diary-entry" data-status={e.status}>
+							<div class="row">
+								<code>{e.id}</code>
+								<span class="pill">{e.status}</span>
+								<span class="muted">{fmtDate(e.startedAt)}</span>
+							</div>
+							{#if e.status === "proposed" && e.proposals}
+								<ul class="proposals">
+									{#each e.proposals as p (p.n)}
+										<li>
+											<label class="check">
+												<input
+													type="checkbox"
+													checked={pickedFor(e).includes(p.n)}
+													disabled={!canEditDreaming || decideBusy !== null}
+													onchange={(ev) => toggleProposal(e, p.n, ev.currentTarget.checked)}
+												/>
+												<strong>{p.kind}</strong> {p.summary}
+											</label>
+										</li>
+									{/each}
+								</ul>
+								{#if canEditDreaming}
+									<div class="row">
+										<button
+											type="button"
+											class="btn btn-primary btn-sm"
+											disabled={decideBusy !== null || pickedFor(e).length === 0}
+											onclick={() => decideDream(e.id, pickedFor(e))}
+										>
+											{#if decideBusy === e.id}<span class="spinner"></span>{/if}
+											Apply selected
+										</button>
+										<button
+											type="button"
+											class="btn btn-sm"
+											disabled={decideBusy !== null}
+											onclick={() => decideDream(e.id, [])}
+										>
+											Reject all
+										</button>
+									</div>
+								{/if}
+							{:else}
+								<details>
+									<summary>Details</summary>
+									<pre class="diary-md">{e.markdown}</pre>
+								</details>
+							{/if}
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		{/if}
+		{#if dreamError}<p class="error-text" role="alert">{dreamError}</p>{/if}
+	</section>
+
 	<!-- --------------------------------------------------------- mcp setup -->
 	<section class="card">
 		<h2>Connect your orchestrator (MCP)</h2>
@@ -1252,6 +1518,44 @@
 	}
 
 	/* -------------------------------------------------- concept types panel */
+	.dream-form fieldset {
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		margin: 0 0 0.75rem;
+		padding: 0.5rem 0.75rem 0.75rem;
+	}
+	.dream-form legend {
+		font-weight: 600;
+		padding: 0 0.25rem;
+	}
+	.check {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+	.diary,
+	.proposals {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+	.diary-entry {
+		border-top: 1px solid var(--border);
+		padding: 0.5rem 0;
+	}
+	.proposals li {
+		margin: 0.25rem 0;
+	}
+	.pill {
+		border-radius: 999px;
+		border: 1px solid var(--border);
+		font-size: 0.8em;
+		padding: 0 0.5rem;
+	}
+	.diary-md {
+		white-space: pre-wrap;
+		font-size: 0.85em;
+	}
 	.section-hint {
 		margin: -4px 0 14px;
 		font-size: 13px;

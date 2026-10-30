@@ -5,7 +5,7 @@
  * `.brainz/`, because preimages are not derivable state.
  */
 import { readFrontmatter, serializeNote } from "@brainz/engine";
-import type { DreamConcept, DreamDiaryEntry } from "@brainz/engine";
+import type { DreamConcept, DreamDiaryEntry, DreamSweepState } from "@brainz/engine";
 
 /** One applied write, as raw markdown so revert is byte-exact. */
 export interface LocalDreamOp {
@@ -21,6 +21,8 @@ export interface LocalDreamOp {
 export interface LocalDreamRecord {
   entry: DreamDiaryEntry;
   ops: LocalDreamOp[];
+  /** Propose mode: the sweep state (staged material + accepted proposals) until decided. */
+  pending?: DreamSweepState;
 }
 
 /** Render a planned concept as markdown, keeping unknown frontmatter keys of the prior file. */

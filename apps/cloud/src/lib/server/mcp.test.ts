@@ -32,6 +32,7 @@ import {
   TASK_COMPLETE_NOTICE,
   TASK_COMPLETE_REMINDER,
 } from "@brainz/engine";
+import { normalizeDreamSettings } from "@brainz/engine";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildMcpServer,
@@ -68,7 +69,7 @@ interface FakeVault extends VaultClient {
     /** Concept ids the fake vault "holds" — deleteConcept removes from here. */
     concepts: Set<string>;
     deletes: string[];
-    dream: { enabled?: boolean; cadenceHours?: number };
+    dream: Record<string, unknown>;
   };
 }
 
@@ -297,12 +298,16 @@ function fakeVault(): FakeVault {
       state.dream = { ...state.dream, ...args };
       return { ...DREAM_STATUS, ...state.dream };
     },
+    dreamApply: async (id) => {
+      throw new VaultDoError(`dream "${id}" has no pending proposals (status applied)`, 400);
+    },
   };
 }
 
 const DREAM_STATUS = {
   enabled: true,
   cadenceHours: 24,
+  settings: normalizeDreamSettings(undefined),
   lastDreamAt: null,
   nextDreamAt: "2026-10-28T03:00:00.000Z",
   inFlight: null,
@@ -1182,6 +1187,39 @@ describe("dream tool", () => {
       expect(schema.safeParse(data).success, JSON.stringify(args)).toBe(true);
     }
     expect(vault.state.dream).toEqual({ enabled: false, cadenceHours: 12 });
+  });
+
+  it("configure passes every settings field through; out-of-bounds values are rejected", async () => {
+    const vault = fakeVault();
+    const client = await connect(vault);
+    const patch = {
+      mode: "propose",
+      runHourUtc: 3,
+      phases: { contradictions: false },
+      thresholds: { merge: 0.9 },
+      caps: { maxLinks: 4 },
+      lossRail: { maxTouchFraction: 0.1 },
+      llm: { provider: "byok", model: "claude-sonnet-5-5" },
+    };
+    expect((await dreamCall(client, { action: "configure", ...patch })).isError ?? false).toBe(false);
+    expect(vault.state.dream).toEqual(patch);
+    for (const bad of [
+      { lossRail: { maxTouchFraction: 0.5 } },
+      { caps: { maxMerges: 0 } },
+      { thresholds: { link: 0.2 } },
+      { mode: "nap" },
+    ]) {
+      const res = await dreamCall(client, { action: "configure", ...bad });
+      expect(res.isError, JSON.stringify(bad)).toBe(true);
+    }
+  });
+
+  it("apply needs an id and a non-pending dream is isError", async () => {
+    const client = await connect(fakeVault());
+    expect((await dreamCall(client, { action: "apply" })).isError).toBe(true);
+    const res = await dreamCall(client, { action: "apply", id: "dream-20261027030000", proposals: [0] });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain("no pending proposals");
   });
 
   it("revert needs an id and unknown ids are isError, never a throw", async () => {

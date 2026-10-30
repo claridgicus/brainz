@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  DREAM_DEFAULTS,
+  DREAM_SETTINGS_DEFAULTS,
   advanceSweep,
+  decideEntry,
   diaryEntry,
+  dreamOptionsFromSettings,
+  nextDreamDue,
+  normalizeDreamSettings,
+  patchDreamSettings,
+  remChunkPrompt,
+  selectProposals,
   extractOutcome,
   isEmptySweep,
   parseRemResponse,
@@ -310,5 +319,142 @@ describe("deep phase", () => {
     const state = await runToDeep(snap, fakeLlm(PROPOSALS));
     planDeep(state, snap, { now: NOW });
     expect(JSON.stringify(snap.concepts)).toBe(before);
+  });
+});
+
+describe("per-vault settings", () => {
+  it("defaults reproduce today's engine options", () => {
+    const o = dreamOptionsFromSettings(normalizeDreamSettings(undefined));
+    expect(o).toMatchObject({
+      minMergeConfidence: DREAM_DEFAULTS.minMergeConfidence,
+      minPromoteConfidence: DREAM_DEFAULTS.minPromoteConfidence,
+      minLinkConfidence: DREAM_DEFAULTS.minLinkConfidence,
+      minContradictionConfidence: DREAM_DEFAULTS.minContradictionConfidence,
+      maxMerges: 5,
+      maxPromotions: 5,
+      maxLinks: 10,
+      maxContradictions: 3,
+      maxTouchFraction: 0.2,
+      minTouchAllowance: 3,
+    });
+    expect(normalizeDreamSettings({})).toEqual(DREAM_SETTINGS_DEFAULTS);
+  });
+
+  it("clamps every field into bounds and never loosens the loss rail", () => {
+    const s = normalizeDreamSettings({
+      cadenceHours: 9999,
+      runHourUtc: 30,
+      mode: "yolo",
+      phases: { merges: "no", links: false },
+      thresholds: { merge: 0.1, promote: 2, link: "0.75" },
+      caps: { maxMerges: 0, maxLinks: 500, maxContradictions: 2.6 },
+      lossRail: { maxTouchFraction: 0.9, minTouchAllowance: 50 },
+      llm: { provider: "gpt", model: "bad model!" },
+    });
+    expect(s.cadenceHours).toBe(168);
+    expect(s.runHourUtc).toBe(23);
+    expect(s.mode).toBe("apply");
+    expect(s.phases).toEqual({ merges: true, promotions: true, links: false, contradictions: true });
+    expect(s.thresholds).toEqual({ merge: 0.5, promote: 1, link: 0.75, contradiction: 0.6 });
+    expect(s.caps).toEqual({ maxMerges: 1, maxPromotions: 5, maxLinks: 50, maxContradictions: 3 });
+    expect(s.lossRail).toEqual({ maxTouchFraction: 0.2, minTouchAllowance: 3 });
+    expect(s.llm).toEqual({ provider: "auto", model: null });
+  });
+
+  it("patches nested objects field by field; null clears run hour and model", () => {
+    let s = patchDreamSettings(DREAM_SETTINGS_DEFAULTS, {
+      mode: "propose",
+      runHourUtc: 3,
+      phases: { contradictions: false },
+      caps: { maxLinks: 4 },
+      lossRail: { maxTouchFraction: 0.05 },
+      llm: { provider: "byok", model: "claude-sonnet-5-5" },
+    });
+    expect(s).toMatchObject({
+      mode: "propose",
+      runHourUtc: 3,
+      phases: { merges: true, contradictions: false },
+      caps: { maxLinks: 4, maxMerges: 5 },
+      lossRail: { maxTouchFraction: 0.05, minTouchAllowance: 3 },
+      llm: { provider: "byok", model: "claude-sonnet-5-5" },
+    });
+    s = patchDreamSettings(s, { runHourUtc: null, llm: { model: null } });
+    expect(s.runHourUtc).toBeNull();
+    expect(s.llm).toEqual({ provider: "byok", model: null });
+    expect(dreamOptionsFromSettings(s)).toMatchObject({ maxLinks: 4, maxTouchFraction: 0.05 });
+  });
+
+  it("schedules at the preferred UTC hour when the cadence is at least a day", () => {
+    const last = Date.parse("2026-10-27T15:20:00.000Z");
+    const now = last + 1000;
+    expect(new Date(nextDreamDue(last, now, { cadenceHours: 24, runHourUtc: null })).toISOString()).toBe(
+      "2026-10-28T15:20:00.000Z",
+    );
+    expect(new Date(nextDreamDue(last, now, { cadenceHours: 24, runHourUtc: 3 })).toISOString()).toBe(
+      "2026-10-29T03:00:00.000Z",
+    );
+    expect(new Date(nextDreamDue(last, now, { cadenceHours: 24, runHourUtc: 18 })).toISOString()).toBe(
+      "2026-10-28T18:00:00.000Z",
+    );
+    // Below a day the run hour is ignored.
+    expect(new Date(nextDreamDue(last, now, { cadenceHours: 6, runHourUtc: 3 })).toISOString()).toBe(
+      "2026-10-27T21:20:00.000Z",
+    );
+  });
+
+  it("a phase that is off is not asked of the model and its proposals are rejected", async () => {
+    const snap = seeded();
+    const state = await runToDeep(snap, fakeLlm(PROPOSALS));
+    const options = { phases: { ...DREAM_DEFAULTS.phases, merges: false } };
+    const prompt = JSON.parse(remChunkPrompt(state, snap, 0, options)) as Record<string, unknown>;
+    expect(prompt.duplicates).toEqual([]);
+    expect(prompt.off).toEqual(["merges"]);
+    expect(JSON.parse(remChunkPrompt(state, snap, 0)).off).toBeUndefined();
+    const plan = planDeep(state, snap, { now: NOW, options });
+    expect(plan.rejected["phase-off"]).toBe(1);
+    expect(plan.applied.map((a) => a.kind)).toEqual(["promote"]);
+  });
+
+  it("propose → apply: holds gated changes, then applies the approved subset", async () => {
+    const snap = seeded();
+    const state = await runToDeep(snap, fakeLlm(PROPOSALS));
+    const plan = planDeep(state, snap, { now: NOW });
+    const proposed = diaryEntry(state, plan, NOW, { mode: "propose" });
+    expect(proposed.status).toBe("proposed");
+    expect(proposed.mode).toBe("propose");
+    expect(proposed.deep.status).toBe("proposed");
+    expect(proposed.applied).toEqual([]);
+    expect(proposed.proposals?.map((p) => [p.n, p.kind, p.decision])).toEqual([
+      [0, "merge", "pending"],
+      [1, "promote", "pending"],
+    ]);
+    expect(proposed.markdown).toContain("held for approval");
+
+    // Approve only the promotion (#1), re-planned against the vault as it is now.
+    const pending = { ...state, rem: { ...state.rem, proposals: selectProposals(plan.accepted, [1]) } };
+    const replan = planDeep(pending, snap, { now: NOW });
+    expect(replan.applied.map((a) => a.kind)).toEqual(["promote"]);
+    const decided = decideEntry(proposed, replan, [1], NOW);
+    expect(decided.status).toBe("applied");
+    expect(decided.deep).toMatchObject({ status: "applied", promoted: 1, merged: 0 });
+    expect(decided.proposals?.map((p) => p.decision)).toEqual(["rejected", "approved"]);
+    expect(decided.decidedAt).toBe(NOW);
+
+    const dismissed = decideEntry(proposed, null, [], NOW);
+    expect(dismissed.status).toBe("dismissed");
+    expect(dismissed.proposals?.every((p) => p.decision === "rejected")).toBe(true);
+  });
+
+  it("an approved proposal whose target has gone is re-gated, not forced", async () => {
+    const snap = seeded();
+    const state = await runToDeep(snap, fakeLlm(PROPOSALS));
+    const plan = planDeep(state, snap, { now: NOW });
+    const later: DreamSnapshot = {
+      concepts: snap.concepts.filter((c) => c.id !== "session-refreshing"),
+    };
+    const pending = { ...state, rem: { ...state.rem, proposals: selectProposals(plan.accepted) } };
+    const replan = planDeep(pending, later, { now: NOW });
+    expect(replan.rejected.missing).toBe(1);
+    expect(replan.applied.map((a) => a.kind)).toEqual(["promote"]);
   });
 });

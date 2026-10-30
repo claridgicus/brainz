@@ -10,7 +10,9 @@
  * concept inventory (keyword-only badge asserted — no Workers AI locally) →
  * settings SSR shows keys/MCP/danger zone → unknown slug 404s → the OAuth
  * consent page with more than 5 vaults (search-and-select markup, "+ New
- * vault" above Allow, a duplicate approve getting the same code). When
+ * vault" above Allow, a duplicate approve getting the same code) → the
+ * vault's "Dreaming for this vault" card (SSR, REST settings + bounds, and a
+ * browser save of the mode select). When
  * `agent-browser` is on PATH (E2E_UI_BROWSER=0 skips it) a real browser also
  * drives the consent search, chips and a double-clicked Allow, which must
  * reach the client's callback exactly once.
@@ -107,6 +109,69 @@ async function waitForReady(proc) {
     await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error("wrangler dev did not become ready within 60s");
+}
+
+// ----------------------------------------------------------------- dreaming
+
+/** The settings page's per-vault Dreaming card + its REST surface (SPEC-CLOUD "Per-vault settings"). */
+async function dreamingJourney(vaultId, settingsHtml) {
+  step(
+    "settings SSR has the vault Dreaming card with editor controls + diary",
+    settingsHtml.includes("Dreaming for this vault") &&
+      settingsHtml.includes("Save dreaming settings") &&
+      settingsHtml.includes("Dream Diary"),
+  );
+  const got = await api("GET", `/api/vaults/${vaultId}/dreaming`);
+  step(
+    "GET dreaming → 200 with default settings",
+    got.status === 200 && got.json?.status?.settings?.mode === "apply" && Array.isArray(got.json?.entries),
+    `status ${got.status}`,
+  );
+  const patched = await api("PATCH", `/api/vaults/${vaultId}/dreaming`, {
+    body: { mode: "propose", runHourUtc: 3, caps: { maxLinks: 4 }, phases: { contradictions: false } },
+  });
+  const s = patched.json?.status?.settings;
+  step(
+    "PATCH dreaming → settings merged (mode, run hour, caps, phases)",
+    patched.status === 200 &&
+      s?.mode === "propose" &&
+      s?.runHourUtc === 3 &&
+      s?.caps?.maxLinks === 4 &&
+      s?.caps?.maxMerges === 5 &&
+      s?.phases?.contradictions === false,
+    `status ${patched.status}`,
+  );
+  const loose = await api("PATCH", `/api/vaults/${vaultId}/dreaming`, { body: { lossRail: { maxTouchFraction: 0.5 } } });
+  step("PATCH a looser loss rail → 400", loose.status === 400, `status ${loose.status}`);
+  const missing = await api("POST", `/api/vaults/${vaultId}/dreaming/dream-nope/apply`, { body: {} });
+  step("apply an unknown dream → 404", missing.status === 404, `status ${missing.status}`);
+
+  if (!hasAgentBrowser()) {
+    console.log("  [SKIP] browser dreaming card (agent-browser not on PATH, or E2E_UI_BROWSER=0)");
+    return;
+  }
+  try {
+    const base = new URL(BASE);
+    for (const [name, value] of jar) agentBrowser(["cookies", "set", name, value, "--url", `${base.origin}/`]);
+    agentBrowser(["open", `${BASE}/v/ui-vault/settings`]);
+    agentBrowser(["wait", '[data-testid="vault-dreaming"] select[aria-label="Dreaming mode"]']);
+    const shown = agentBrowser(["eval", `document.querySelector('select[aria-label="Dreaming mode"]').value`]).replace(/"/g, "");
+    step("browser: the card shows the saved mode", shown === "propose", shown);
+    agentBrowser(["select", 'select[aria-label="Dreaming mode"]', "light-only"]);
+    agentBrowser(["click", '[data-testid="vault-dreaming"] button[type="submit"]']);
+    agentBrowser(["wait", '[data-testid="vault-dreaming"] .ok-text']);
+    const after = await api("GET", `/api/vaults/${vaultId}/dreaming`);
+    step(
+      "browser: saving the card persists the mode (other settings kept)",
+      after.json?.status?.settings?.mode === "light-only" && after.json?.status?.settings?.caps?.maxLinks === 4,
+      after.json?.status?.settings?.mode,
+    );
+    if (process.env.E2E_UI_SCREENSHOT) {
+      agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-dreaming.png")]);
+    }
+  } finally {
+    spawnSync("agent-browser", ["--session", "brainz-e2e-ui", "close"]);
+  }
 }
 
 // ------------------------------------------------------------------ consent
@@ -500,6 +565,7 @@ async function main() {
     step("settings lists the created key by name + prefix", settings.html.includes("ui-e2e-key") && settings.html.includes(keyRes.json.keyPrefix));
     step("settings shows the MCP setup snippets", settings.html.includes("https://brainz.brownmatter.ai/mcp") && settings.html.includes("claude mcp add"));
     step("settings teaches onboard as step 1", settings.html.includes("onboard"));
+    await dreamingJourney(vault.id, settings.html);
 
     // 8. unknown slug 404s
     const missing = await page("/v/never-created");

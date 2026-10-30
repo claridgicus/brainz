@@ -8,7 +8,7 @@
  * binding) and the REST routes share them, and tests can back them with
  * better-sqlite3.
  */
-import type { DreamLlm } from "@brainz/engine";
+import type { DreamLlm, DreamLlmProvider } from "@brainz/engine";
 import {
   anthropicDreamLlm,
   DREAM_LLM_PRICE_USD_PER_M,
@@ -267,6 +267,8 @@ export async function byokDreamLlm(
   row: LlmKeyRow,
   secret: string | undefined,
   fetchFn?: typeof fetch,
+  /** A vault's model override (its dreaming `llm.model`); the key's own model otherwise. */
+  modelOverride?: string | null,
 ): Promise<DreamLlm> {
   const name = `byok:${row.provider}`;
   let apiKey: string;
@@ -275,9 +277,10 @@ export async function byokDreamLlm(
   } catch {
     return failingDreamLlm(name, "stored LLM key could not be decrypted — set it again in settings");
   }
-  if (row.provider === "anthropic") return anthropicDreamLlm(apiKey, row.model ?? undefined, fetchFn);
-  if (row.provider === "openai" && row.base_url && row.model) {
-    return openAiCompatibleDreamLlm({ apiKey, baseUrl: row.base_url, model: row.model }, fetchFn);
+  const model = modelOverride || row.model;
+  if (row.provider === "anthropic") return anthropicDreamLlm(apiKey, model ?? undefined, fetchFn);
+  if (row.provider === "openai" && row.base_url && model) {
+    return openAiCompatibleDreamLlm({ apiKey, baseUrl: row.base_url, model }, fetchFn);
   }
   return failingDreamLlm(name, `stored LLM key has an unusable provider configuration (${row.provider})`);
 }
@@ -302,7 +305,9 @@ const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
 /**
  * Decide which provider (if any) the next REM step may use — SPEC order:
  * kill switch `all` → owner's BYOK key → kill switch `workers-ai` → no AI
- * binding → daily cap spent → metered Workers AI.
+ * binding → daily cap spent → metered Workers AI. The vault's `preference`
+ * narrows it: `workers-ai` skips the key, `byok` stops at the key (no key ⇒
+ * no REM, never Workers AI); `model` overrides the key's model.
  */
 export async function chooseDreamProvider(args: {
   db: D1Like | undefined;
@@ -311,7 +316,9 @@ export async function chooseDreamProvider(args: {
   ownerId: string | null;
   now?: Date;
   fetchFn?: typeof fetch;
+  preference?: { provider: DreamLlmProvider; model: string | null };
 }): Promise<DreamProviderChoice> {
+  const preferred = args.preference?.provider ?? "auto";
   const now = args.now ?? new Date();
   const killSwitch = await readKillSwitch(args.db, args.env);
   if (killSwitch === "all") {
@@ -339,13 +346,22 @@ export async function chooseDreamProvider(args: {
   const spent = await spentUsd(db, ownerId, day);
   const spend = spendSummary(day, spent, cap);
 
-  const key = await loadLlmKey(db, ownerId);
+  const key = preferred === "workers-ai" ? null : await loadLlmKey(db, ownerId);
   if (key) {
     return {
-      llm: await byokDreamLlm(key, args.env.BYOK_ENCRYPTION_KEY, args.fetchFn),
+      llm: await byokDreamLlm(key, args.env.BYOK_ENCRYPTION_KEY, args.fetchFn, args.preference?.model),
       provider: `byok:${key.provider}`,
       killSwitch,
       spend,
+    };
+  }
+  if (preferred === "byok") {
+    return {
+      llm: null,
+      provider: null,
+      killSwitch,
+      spend,
+      skipReason: "no LLM provider available: this vault dreams only on the owner's own LLM key, and none is stored",
     };
   }
   if (killSwitch === "workers-ai") {

@@ -326,3 +326,130 @@ describe("VaultDO dreaming spend controls", () => {
     expect(d1.db.prepare(`SELECT COUNT(*) AS n FROM dream_spend`).get()).toEqual({ n: 0 });
   });
 });
+
+describe("VaultDO per-vault dreaming settings", () => {
+  it("configure stores every setting, clamped, and status reports them", async () => {
+    const { vault } = await seededVault({});
+    const status = await vault.dreamConfigure({
+      mode: "propose",
+      runHourUtc: 3,
+      phases: { links: false },
+      thresholds: { merge: 0.9 },
+      caps: { maxMerges: 2 },
+      lossRail: { maxTouchFraction: 0.9, minTouchAllowance: 1 },
+      llm: { provider: "byok", model: "claude-sonnet-5-5" },
+    });
+    expect(dreamOutputSchema.safeParse(status).success).toBe(true);
+    expect(status.settings).toMatchObject({
+      enabled: true,
+      cadenceHours: 24,
+      mode: "propose",
+      runHourUtc: 3,
+      phases: { merges: true, links: false },
+      thresholds: { merge: 0.9, promote: 0.7 },
+      caps: { maxMerges: 2, maxLinks: 10 },
+      // Stricter only: the fraction is clamped back to the 0.2 floor.
+      lossRail: { maxTouchFraction: 0.2, minTouchAllowance: 1 },
+      llm: { provider: "byok", model: "claude-sonnet-5-5" },
+    });
+    // The next nightly run lands on the preferred hour.
+    expect(new Date(status.nextDreamAt!).getUTCHours()).toBe(3);
+    // A later patch merges field by field.
+    const next = await vault.dreamConfigure({ phases: { merges: false }, runHourUtc: null });
+    expect(next.settings.phases).toMatchObject({ merges: false, links: false });
+    expect(next.settings.runHourUtc).toBeNull();
+    expect(next.settings.caps.maxMerges).toBe(2);
+  });
+
+  it("settings flow into the sweep: a stricter loss rail rejects the dream", async () => {
+    const { vault, db } = await seededVault(billed({ AI: fakeAi() }).env);
+    const before = dump(db);
+    await vault.dreamConfigure({ lossRail: { minTouchAllowance: 1 } });
+    const run = await vault.dreamRun();
+    expect(run.entry?.status).toBe("rejected");
+    expect(dump(db)).toEqual(before);
+  });
+
+  it("light-only mode never calls the LLM", async () => {
+    const ai = fakeAi();
+    const { vault, db } = await seededVault(billed({ AI: ai }).env);
+    const before = dump(db);
+    const status = await vault.dreamConfigure({ mode: "light-only" });
+    expect(status).toMatchObject({ llm: null, provider: null });
+    const run = await vault.dreamRun();
+    expect(run.entry).toMatchObject({ status: "light-only", mode: "light-only" });
+    expect(run.entry?.rem.reason).toBe("light-only mode");
+    expect(ai.calls.filter((m) => !m.includes("bge"))).toEqual([]);
+    expect(dump(db)).toEqual(before);
+  });
+
+  it("propose → apply: nothing written until approved, then the approved subset applies and reverts", async () => {
+    const { vault, db } = await seededVault(billed({ AI: fakeAi() }).env);
+    const before = dump(db);
+    await vault.dreamConfigure({ mode: "propose" });
+    const run = await vault.dreamRun();
+    expect(dreamOutputSchema.safeParse(run).success).toBe(true);
+    expect(run.entry?.status).toBe("proposed");
+    expect(run.entry?.proposals?.map((p) => [p.n, p.kind])).toEqual([
+      [0, "merge"],
+      [1, "promote"],
+    ]);
+    expect(dump(db)).toEqual(before);
+    await expect(vault.dreamRevert(run.id!)).rejects.toThrow(/still proposed/);
+
+    const res = await vault.dreamApply(run.id!, [0]);
+    expect(dreamOutputSchema.safeParse(res).success).toBe(true);
+    expect(res).toMatchObject({ status: "applied", applied: 1, rejected: 1 });
+    expect(vault.getConcept("session-refreshing").concept).toBeNull();
+    expect(vault.getConcept("signup-rate-limit").concept).toBeNull();
+    expect(vault.dreamDiary(1).entries[0].proposals?.map((p) => p.decision)).toEqual(["approved", "rejected"]);
+    await expect(vault.dreamApply(run.id!)).rejects.toThrow(/no pending proposals/);
+
+    expect(await vault.dreamRevert(run.id!)).toMatchObject({ reverted: true });
+    expect(dump(db)).toEqual(before);
+  });
+
+  it("reject all dismisses a proposed dream", async () => {
+    const { vault, db } = await seededVault(billed({ AI: fakeAi() }).env);
+    const before = dump(db);
+    await vault.dreamConfigure({ mode: "propose" });
+    const run = await vault.dreamRun();
+    const res = await vault.dreamApply(run.id!, []);
+    expect(res).toMatchObject({ status: "dismissed", applied: 0, rejected: 2 });
+    expect(dump(db)).toEqual(before);
+  });
+
+  it("llm provider preference: workers-ai skips the owner's key; byok without a key never uses Workers AI", async () => {
+    const ai = fakeAi();
+    const { d1, env } = billed({ AI: ai });
+    const { vault } = await seededVault(env);
+    await vault.dreamConfigure({ llm: { provider: "byok" } });
+    const status = await vault.dreamStatus();
+    expect(status.provider).toBeNull();
+    const run = await vault.dreamRun();
+    expect(run.entry?.rem.reason).toMatch(/^no LLM provider available: /);
+    expect(ai.calls.filter((m) => !m.includes("bge"))).toEqual([]);
+
+    await saveLlmKey(d1, "test-secret", "u1", { provider: "anthropic", apiKey: "sk-ant-api03-goodgoodgood" });
+    await vault.dreamConfigure({ llm: { provider: "workers-ai" } });
+    expect((await vault.dreamStatus()).provider).toBe("workers-ai");
+    await vault.dreamConfigure({ llm: { provider: "auto" } });
+    expect((await vault.dreamStatus()).provider).toBe("byok:anthropic");
+  });
+});
+
+describe("VaultDO schema v8 migration", () => {
+  it("adds dream.pending_json to a v7 vault and keeps its settings defaults", async () => {
+    const fake = fakeState();
+    new VaultDO(fake.state as never, {});
+    await fake.ready();
+    fake.db.exec(`ALTER TABLE dream DROP COLUMN pending_json`);
+    fake.db.prepare(`UPDATE meta SET value = '7' WHERE key = 'schema_version'`).run();
+    const vault = new VaultDO(fake.state as never, {});
+    await fake.ready();
+    const cols = fake.db.prepare(`PRAGMA table_info(dream)`).all() as { name: string }[];
+    expect(cols.map((c) => c.name)).toContain("pending_json");
+    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "8" });
+    expect((await vault.dreamStatus()).settings.mode).toBe("apply");
+  });
+});

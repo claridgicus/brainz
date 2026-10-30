@@ -51,6 +51,16 @@ export interface DreamOptions {
   /** Loss rail: touched existing concepts may not exceed max(allowance, floor(fraction × prior)). */
   maxTouchFraction: number;
   minTouchAllowance: number;
+  /** Which proposal kinds deep may apply (a phase that is off is not asked of the model). */
+  phases: DreamPhaseToggles;
+}
+
+/** Per-kind on/off switches for the REM/deep phases. */
+export interface DreamPhaseToggles {
+  merges: boolean;
+  promotions: boolean;
+  links: boolean;
+  contradictions: boolean;
 }
 
 export const DREAM_DEFAULTS: Readonly<DreamOptions> = Object.freeze({
@@ -72,6 +82,7 @@ export const DREAM_DEFAULTS: Readonly<DreamOptions> = Object.freeze({
   maxContradictions: 3,
   maxTouchFraction: 0.2,
   minTouchAllowance: 3,
+  phases: Object.freeze({ merges: true, promotions: true, links: true, contradictions: true }),
 });
 
 /** Concept types an outcome may be promoted into. */
@@ -226,6 +237,7 @@ export type DreamRejectReason =
   | "bad-type"
   | "cap"
   | "protected"
+  | "phase-off"
   | "unparseable";
 
 export interface DreamPlan {
@@ -237,6 +249,8 @@ export interface DreamPlan {
   touched: number;
   /** The loss-rail ceiling for `touched`. */
   allowance: number;
+  /** The REM proposals behind `applied`, in the same order (propose mode stores these). */
+  accepted: RemProposals;
 }
 
 export type DreamEntryStatus =
@@ -244,7 +258,19 @@ export type DreamEntryStatus =
   | "nothing-applied"
   | "rejected"
   | "light-only"
-  | "reverted";
+  | "reverted"
+  | "proposed"
+  | "dismissed";
+
+/** One gated change a `propose` sweep holds back until a human/agent decides. */
+export interface DreamProposal {
+  /** Position in the entry's proposal list — what `apply {proposals}` names. */
+  n: number;
+  kind: DreamChangeKind;
+  id: string;
+  summary: string;
+  decision: "pending" | "approved" | "rejected";
+}
 
 export interface DreamDiaryEntry {
   id: string;
@@ -252,6 +278,8 @@ export interface DreamDiaryEntry {
   startedAt: string;
   finishedAt: string;
   status: DreamEntryStatus;
+  /** The vault's dreaming mode when the sweep ran (absent on entries before settings existed). */
+  mode?: DreamMode;
   light: {
     changed: number;
     duplicates: number;
@@ -268,7 +296,7 @@ export interface DreamDiaryEntry {
     themes: string[];
   };
   deep: {
-    status: "applied" | "nothing-applied" | "rejected" | "skipped";
+    status: "applied" | "nothing-applied" | "rejected" | "skipped" | "proposed";
     reason?: string;
     touched: number;
     allowance: number;
@@ -279,6 +307,10 @@ export interface DreamDiaryEntry {
   };
   applied: DreamAppliedChange[];
   rejected: Partial<Record<DreamRejectReason, number>>;
+  /** Propose mode: the held-back changes and what was decided for each. */
+  proposals?: DreamProposal[];
+  /** When the proposals were applied or dismissed. */
+  decidedAt?: string;
   revertedAt?: string;
   markdown: string;
 }
@@ -286,7 +318,7 @@ export interface DreamDiaryEntry {
 // ------------------------------------------------------------------ helpers
 
 function opts(o?: Partial<DreamOptions>): DreamOptions {
-  return { ...DREAM_DEFAULTS, ...(o ?? {}) };
+  return { ...DREAM_DEFAULTS, ...(o ?? {}), phases: { ...DREAM_DEFAULTS.phases, ...(o?.phases ?? {}) } };
 }
 
 function isMergeable(c: DreamConcept): boolean {
@@ -492,6 +524,14 @@ function scanDuplicates(state: DreamSweepState, snapshot: DreamSnapshot, o: Drea
 
 // ---------------------------------------------------------------------- REM
 
+/** Phase toggle → the REM response key it governs. */
+const PHASE_KEYS: [keyof DreamPhaseToggles, keyof RemProposals][] = [
+  ["merges", "merges"],
+  ["promotions", "promotions"],
+  ["links", "links"],
+  ["contradictions", "contradictions"],
+];
+
 export const DREAM_REM_SYSTEM = [
   "You consolidate a product knowledge graph while its agents are idle (\"dreaming\").",
   "You receive staged material: candidate duplicate concept pairs, finished task outcomes, and recently changed concepts.",
@@ -504,6 +544,7 @@ export const DREAM_REM_SYSTEM = [
   "Rules: merge only pairs listed under duplicates, and only when both describe the SAME thing (keep the richer, better-connected one).",
   "Promote an outcome only when it states durable product knowledge (a decision, constraint, rule, or capability) that is not already a concept; write the body as that knowledge, not as a task log.",
   "Link only ids that appear in the material. Report contradictions instead of resolving them. Be conservative: low confidence is better than a wrong change.",
+  'If the material has an "off" list, return [] for every key named in it.',
 ].join("\n");
 
 /** The REM user message for one chunk of staged material (JSON for the model). */
@@ -519,11 +560,13 @@ export function remChunkPrompt(
     const c = byId.get(id);
     return c ? { id, title: c.title, type: c.type, excerpt: excerpt(c.body) } : { id };
   };
-  const dups = state.light.duplicates.slice(chunk * o.remPairsPerCall, (chunk + 1) * o.remPairsPerCall);
-  const outs = state.light.outcomes.slice(
-    chunk * o.remOutcomesPerCall,
-    (chunk + 1) * o.remOutcomesPerCall,
-  );
+  const dups = o.phases.merges
+    ? state.light.duplicates.slice(chunk * o.remPairsPerCall, (chunk + 1) * o.remPairsPerCall)
+    : [];
+  const outs = o.phases.promotions
+    ? state.light.outcomes.slice(chunk * o.remOutcomesPerCall, (chunk + 1) * o.remOutcomesPerCall)
+    : [];
+  const off = PHASE_KEYS.filter(([phase]) => !o.phases[phase]).map(([, key]) => key);
   const changed = state.light.changed.slice(
     chunk * o.remChangedPerCall,
     (chunk + 1) * o.remChangedPerCall,
@@ -533,6 +576,7 @@ export function remChunkPrompt(
       duplicates: dups.map((d) => ({ a: brief(d.a), b: brief(d.b), similarity: d.score })),
       outcomes: outs.map((x) => ({ task: x.task, title: x.title, outcome: x.outcome })),
       changed: changed.map(brief),
+      ...(off.length > 0 ? { off } : {}),
     },
     null,
     1,
@@ -747,6 +791,8 @@ export function planDeep(
   const staged = new Set(state.light.duplicates.map((d) => pairKey(d.a, d.b)));
   const stagedOutcomes = new Map(state.light.outcomes.map((x) => [x.task, x]));
   const p = state.rem.proposals;
+  const accepted = emptyProposals();
+  accepted.themes = [...p.themes];
 
   // merges
   let merges = 0;
@@ -755,6 +801,10 @@ export function planDeep(
     const key = pairKey(m.keep, m.drop);
     if (seenMerge.has(key)) continue;
     seenMerge.add(key);
+    if (!o.phases.merges) {
+      reject("phase-off");
+      continue;
+    }
     if (m.keep === m.drop || !staged.has(key)) {
       reject("not-staged");
       continue;
@@ -778,6 +828,7 @@ export function planDeep(
       continue;
     }
     merges++;
+    accepted.merges.push(m);
     keep.tags = union(keep.tags, drop.tags);
     keep.codeAreas = union(keep.codeAreas, drop.codeAreas);
     for (const [rel, targets] of Object.entries(drop.relations)) {
@@ -812,6 +863,10 @@ export function planDeep(
   let links = 0;
   for (const l of p.links) {
     const relation = RELATION_RE.test(l.relation) ? l.relation : "related_to";
+    if (!o.phases.links) {
+      reject("phase-off");
+      continue;
+    }
     if (l.confidence < o.minLinkConfidence) {
       reject("below-threshold");
       continue;
@@ -834,6 +889,7 @@ export function planDeep(
       continue;
     }
     links++;
+    accepted.links.push(l);
     from.relations[relation] = [...(from.relations[relation] ?? []), l.to];
     markTouched(from.id);
     applied.push({ kind: "link", id: from.id, summary: `linked "${from.id}" ${relation} "${l.to}"` });
@@ -842,6 +898,10 @@ export function planDeep(
   // promotions
   let promotions = 0;
   for (const pr of p.promotions) {
+    if (!o.phases.promotions) {
+      reject("phase-off");
+      continue;
+    }
     const source = stagedOutcomes.get(pr.task);
     if (!source) {
       reject("not-staged");
@@ -865,6 +925,7 @@ export function planDeep(
       continue;
     }
     promotions++;
+    accepted.promotions.push(pr);
     stagedOutcomes.delete(pr.task);
     const task = work.get(pr.task);
     work.set(id, {
@@ -886,6 +947,10 @@ export function planDeep(
   // contradictions → open tasks for a human/agent
   let contradictions = 0;
   for (const c of p.contradictions) {
+    if (!o.phases.contradictions) {
+      reject("phase-off");
+      continue;
+    }
     if (c.confidence < o.minContradictionConfidence) {
       reject("below-threshold");
       continue;
@@ -905,6 +970,7 @@ export function planDeep(
       continue;
     }
     contradictions++;
+    accepted.contradictions.push(c);
     const titles = ids.map((x) => work.get(x)?.title ?? x);
     work.set(id, {
       id,
@@ -928,7 +994,15 @@ export function planDeep(
   const prior = snapshot.concepts.length;
   const allowance = Math.max(o.minTouchAllowance, Math.floor(o.maxTouchFraction * prior));
   if (touched.size > allowance) {
-    return { status: "rejected", ops: [], applied: [], rejected, touched: touched.size, allowance };
+    return {
+      status: "rejected",
+      ops: [],
+      applied: [],
+      rejected,
+      touched: touched.size,
+      allowance,
+      accepted: { ...emptyProposals(), themes: accepted.themes },
+    };
   }
   const ops: DreamOp[] = [];
   for (const id of [...touched].sort()) {
@@ -944,30 +1018,42 @@ export function planDeep(
     rejected,
     touched: touched.size,
     allowance,
+    accepted,
   };
 }
 
 // -------------------------------------------------------------------- diary
 
-/** Build the Dream Diary entry for a finished sweep (`plan` null ⇒ deep skipped). */
+/**
+ * Build the Dream Diary entry for a finished sweep (`plan` null ⇒ deep
+ * skipped). In `propose` mode an applicable plan is NOT applied: the entry is
+ * `proposed` and lists the gated changes as numbered pending proposals.
+ */
 export function diaryEntry(
   state: DreamSweepState,
   plan: DreamPlan | null,
   finishedAt: string,
+  extra: { mode?: DreamMode } = {},
 ): DreamDiaryEntry {
-  const count = (k: DreamChangeKind) => plan?.applied.filter((a) => a.kind === k).length ?? 0;
+  const proposing = extra.mode === "propose" && plan?.status === "apply";
+  const count = (k: DreamChangeKind) =>
+    proposing ? 0 : (plan?.applied.filter((a) => a.kind === k).length ?? 0);
   const p = state.rem.proposals;
   const remStatus: "ok" | "skipped" = state.rem.status === "ok" ? "ok" : "skipped";
   const deepStatus: DreamDiaryEntry["deep"]["status"] = !plan
     ? "skipped"
-    : plan.status === "apply"
+    : proposing
+      ? "proposed"
+      : plan.status === "apply"
       ? "applied"
       : plan.status === "rejected"
         ? "rejected"
         : "nothing-applied";
   const status: DreamEntryStatus = !plan
     ? "light-only"
-    : deepStatus === "applied"
+    : deepStatus === "proposed"
+      ? "proposed"
+      : deepStatus === "applied"
       ? "applied"
       : deepStatus === "rejected"
         ? "rejected"
@@ -978,6 +1064,7 @@ export function diaryEntry(
     startedAt: state.startedAt,
     finishedAt,
     status,
+    ...(extra.mode ? { mode: extra.mode } : {}),
     light: {
       changed: state.light.changed.length,
       duplicates: state.light.duplicates.length,
@@ -1007,12 +1094,107 @@ export function diaryEntry(
       linked: count("link"),
       contradictions: count("contradiction"),
     },
-    applied: plan?.applied ?? [],
+    applied: proposing ? [] : (plan?.applied ?? []),
     rejected: plan?.rejected ?? {},
+    ...(proposing
+      ? {
+          proposals: plan.applied.map((a, n) => ({
+            n,
+            kind: a.kind,
+            id: a.id,
+            summary: a.summary,
+            decision: "pending" as const,
+          })),
+        }
+      : {}),
     markdown: "",
   };
   entry.markdown = renderDiaryEntry(entry);
   return entry;
+}
+
+/** Flatten proposals in planDeep's order (merges, links, promotions, contradictions). */
+function flattenProposals(p: RemProposals): { kind: keyof RemProposals; item: unknown }[] {
+  return [
+    ...p.merges.map((item) => ({ kind: "merges" as const, item })),
+    ...p.links.map((item) => ({ kind: "links" as const, item })),
+    ...p.promotions.map((item) => ({ kind: "promotions" as const, item })),
+    ...p.contradictions.map((item) => ({ kind: "contradictions" as const, item })),
+  ];
+}
+
+/**
+ * The subset of a propose sweep's accepted proposals named by `ns` (positions
+ * in the entry's `proposals` list; omitted ⇒ all). Unknown positions are ignored.
+ */
+export function selectProposals(accepted: RemProposals, ns?: readonly number[]): RemProposals {
+  const out: RemProposals = { ...emptyProposals(), themes: [...accepted.themes] };
+  const keep = ns === undefined ? null : new Set(ns);
+  flattenProposals(accepted).forEach(({ kind, item }, n) => {
+    if (keep && !keep.has(n)) return;
+    (out[kind] as unknown[]).push(item);
+  });
+  return out;
+}
+
+/**
+ * Record the decision on a `proposed` entry: `selected` (positions) were
+ * approved and re-planned into `plan` (null ⇒ nothing approved ⇒ dismissed);
+ * every other proposal is rejected.
+ */
+export function decideEntry(
+  entry: DreamDiaryEntry,
+  plan: DreamPlan | null,
+  selected: readonly number[],
+  decidedAt: string,
+): DreamDiaryEntry {
+  const chosen = new Set(selected);
+  const proposals = (entry.proposals ?? []).map((p) => ({
+    ...p,
+    decision: chosen.has(p.n) ? ("approved" as const) : ("rejected" as const),
+  }));
+  const count = (k: DreamChangeKind) => plan?.applied.filter((a) => a.kind === k).length ?? 0;
+  const rejected: Partial<Record<DreamRejectReason, number>> = { ...entry.rejected };
+  for (const [r, n] of Object.entries(plan?.rejected ?? {}) as [DreamRejectReason, number][]) {
+    if (r === "unparseable") continue; // already counted when the sweep ran
+    rejected[r] = (rejected[r] ?? 0) + n;
+  }
+  const deepStatus: DreamDiaryEntry["deep"]["status"] =
+    !plan || plan.status === "nothing"
+      ? "nothing-applied"
+      : plan.status === "rejected"
+        ? "rejected"
+        : "applied";
+  const status: DreamEntryStatus = !plan
+    ? "dismissed"
+    : deepStatus === "applied"
+      ? "applied"
+      : deepStatus === "rejected"
+        ? "rejected"
+        : "nothing-applied";
+  const next: DreamDiaryEntry = {
+    ...entry,
+    status,
+    deep: {
+      status: deepStatus,
+      ...(plan?.status === "rejected"
+        ? { reason: `loss threshold: would touch ${plan.touched} existing concepts (allowed ${plan.allowance})` }
+        : {}),
+      touched: plan?.touched ?? 0,
+      allowance: plan?.allowance ?? entry.deep.allowance,
+      merged: count("merge"),
+      promoted: count("promote"),
+      linked: count("link"),
+      contradictions: count("contradiction"),
+    },
+    applied: plan?.applied ?? [],
+    rejected,
+    proposals,
+    decidedAt,
+    markdown: "",
+  };
+  next.markdown = renderDiaryEntry(next);
+  return next;
 }
 
 /** Human-readable markdown for one diary entry (counts and ids, not dumps). */
@@ -1037,6 +1219,11 @@ export function renderDiaryEntry(e: DreamDiaryEntry): string {
   );
   const d = e.deep;
   if (d.status === "skipped") lines.push(`- **Deep:** skipped (${d.reason ?? "REM skipped"}).`);
+  else if (d.status === "proposed")
+    lines.push(
+      `- **Deep:** propose mode — ${e.proposals?.length ?? 0} change${(e.proposals?.length ?? 0) === 1 ? "" : "s"} held for approval ` +
+        `(${d.touched}/${d.allowance} existing concepts would be touched). Nothing was written.`,
+    );
   else if (d.status === "rejected") lines.push(`- **Deep:** rejected — ${d.reason}. Nothing was written.`);
   else
     lines.push(
@@ -1047,9 +1234,14 @@ export function renderDiaryEntry(e: DreamDiaryEntry): string {
   if (rejected.length > 0) {
     lines.push(`- **Rejected proposals:** ${rejected.map(([r, n]) => `${n} ${r}`).join(", ")}.`);
   }
+  if (e.decidedAt) lines.push(`- **Decided:** ${e.decidedAt}.`);
   if (e.applied.length > 0) {
     lines.push("");
     for (const a of e.applied) lines.push(`- ${a.kind}: ${a.summary}`);
+  }
+  if (e.proposals && e.proposals.length > 0) {
+    lines.push("");
+    for (const p of e.proposals) lines.push(`- [${p.decision}] #${p.n} ${p.kind}: ${p.summary}`);
   }
   return `${lines.join("\n")}\n`;
 }
@@ -1063,4 +1255,212 @@ export function dreamId(nowIso: string): string {
 export function clampCadenceHours(h: number): number {
   if (!Number.isFinite(h)) return DREAM_DEFAULT_CADENCE_HOURS;
   return Math.min(DREAM_MAX_CADENCE_HOURS, Math.max(DREAM_MIN_CADENCE_HOURS, Math.round(h)));
+}
+
+// ----------------------------------------------------------------- settings
+
+/** apply: write changes (default) · propose: hold them for approval · light-only: never call an LLM. */
+export type DreamMode = "apply" | "propose" | "light-only";
+export const DREAM_MODES: readonly DreamMode[] = ["apply", "propose", "light-only"];
+
+/** Which LLM a cloud vault's REM may use: the default order, Workers AI only, or the owner's key only. */
+export type DreamLlmProvider = "auto" | "workers-ai" | "byok";
+export const DREAM_LLM_PROVIDERS: readonly DreamLlmProvider[] = ["auto", "workers-ai", "byok"];
+
+/** Per-vault dreaming settings (SPEC-CLOUD "Dreaming → Per-vault settings"). */
+export interface DreamSettings {
+  enabled: boolean;
+  cadenceHours: number;
+  /** Preferred UTC hour for a sweep (cadence ≥ 24h only); null = no preference. */
+  runHourUtc: number | null;
+  mode: DreamMode;
+  phases: DreamPhaseToggles;
+  thresholds: { merge: number; promote: number; link: number; contradiction: number };
+  caps: { maxMerges: number; maxPromotions: number; maxLinks: number; maxContradictions: number };
+  /** May only be stricter than the defaults (the rail is a hard floor). */
+  lossRail: { maxTouchFraction: number; minTouchAllowance: number };
+  /** Cloud only: provider preference and a BYOK model override. */
+  llm: { provider: DreamLlmProvider; model: string | null };
+}
+
+/** A partial update: nested objects merge field by field. */
+export interface DreamSettingsPatch {
+  enabled?: boolean;
+  cadenceHours?: number;
+  runHourUtc?: number | null;
+  mode?: DreamMode;
+  phases?: Partial<DreamSettings["phases"]>;
+  thresholds?: Partial<DreamSettings["thresholds"]>;
+  caps?: Partial<DreamSettings["caps"]>;
+  lossRail?: Partial<DreamSettings["lossRail"]>;
+  llm?: Partial<DreamSettings["llm"]>;
+}
+
+export const DREAM_SETTINGS_DEFAULTS: Readonly<DreamSettings> = Object.freeze({
+  enabled: true,
+  cadenceHours: DREAM_DEFAULT_CADENCE_HOURS,
+  runHourUtc: null,
+  mode: "apply",
+  phases: { merges: true, promotions: true, links: true, contradictions: true },
+  thresholds: {
+    merge: DREAM_DEFAULTS.minMergeConfidence,
+    promote: DREAM_DEFAULTS.minPromoteConfidence,
+    link: DREAM_DEFAULTS.minLinkConfidence,
+    contradiction: DREAM_DEFAULTS.minContradictionConfidence,
+  },
+  caps: {
+    maxMerges: DREAM_DEFAULTS.maxMerges,
+    maxPromotions: DREAM_DEFAULTS.maxPromotions,
+    maxLinks: DREAM_DEFAULTS.maxLinks,
+    maxContradictions: DREAM_DEFAULTS.maxContradictions,
+  },
+  lossRail: {
+    maxTouchFraction: DREAM_DEFAULTS.maxTouchFraction,
+    minTouchAllowance: DREAM_DEFAULTS.minTouchAllowance,
+  },
+  llm: { provider: "auto", model: null },
+}) as Readonly<DreamSettings>;
+
+/** Inclusive [min, max] for every numeric setting (contracts mirrors these). */
+export const DREAM_SETTINGS_BOUNDS = Object.freeze({
+  cadenceHours: [DREAM_MIN_CADENCE_HOURS, DREAM_MAX_CADENCE_HOURS],
+  runHourUtc: [0, 23],
+  threshold: [0.5, 1],
+  maxMerges: [1, 20],
+  maxPromotions: [1, 20],
+  maxLinks: [1, 50],
+  maxContradictions: [1, 10],
+  // The loss rail can only be tightened: the defaults are the upper bounds.
+  maxTouchFraction: [0.01, DREAM_DEFAULTS.maxTouchFraction],
+  minTouchAllowance: [0, DREAM_DEFAULTS.minTouchAllowance],
+  modelLength: [1, 200],
+} as const);
+
+/** A BYOK model id: provider model names, no whitespace or markup. */
+export const DREAM_MODEL_RE = /^[A-Za-z0-9._:/@-]+$/;
+
+function clampNum(v: unknown, [lo, hi]: readonly [number, number], fallback: number, int = false): number {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  if (!Number.isFinite(n)) return fallback;
+  const x = int ? Math.round(n) : n;
+  return Math.min(hi, Math.max(lo, x));
+}
+
+function bool(v: unknown, fallback: boolean): boolean {
+  return typeof v === "boolean" ? v : fallback;
+}
+
+function rec(v: unknown): Record<string, unknown> {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+/**
+ * Settings from anything stored (config JSON, DO meta): unknown or missing
+ * fields take the default, every number is clamped into its bounds, so a
+ * hand-edited config can never loosen the loss rail or exceed a cap.
+ */
+export function normalizeDreamSettings(input?: unknown): DreamSettings {
+  const d = DREAM_SETTINGS_DEFAULTS;
+  const B = DREAM_SETTINGS_BOUNDS;
+  const r = rec(input);
+  const ph = rec(r.phases);
+  const th = rec(r.thresholds);
+  const cp = rec(r.caps);
+  const lr = rec(r.lossRail);
+  const llm = rec(r.llm);
+  const runHour = r.runHourUtc === null || r.runHourUtc === undefined
+    ? null
+    : clampNum(r.runHourUtc, B.runHourUtc, NaN, true);
+  const model = typeof llm.model === "string" ? llm.model.trim() : "";
+  return {
+    enabled: bool(r.enabled, d.enabled),
+    cadenceHours: clampCadenceHours(
+      typeof r.cadenceHours === "number" || typeof r.cadenceHours === "string"
+        ? Number(r.cadenceHours)
+        : d.cadenceHours,
+    ),
+    runHourUtc: runHour === null || Number.isNaN(runHour) ? null : runHour,
+    mode: (DREAM_MODES as readonly unknown[]).includes(r.mode) ? (r.mode as DreamMode) : d.mode,
+    phases: {
+      merges: bool(ph.merges, d.phases.merges),
+      promotions: bool(ph.promotions, d.phases.promotions),
+      links: bool(ph.links, d.phases.links),
+      contradictions: bool(ph.contradictions, d.phases.contradictions),
+    },
+    thresholds: {
+      merge: clampNum(th.merge, B.threshold, d.thresholds.merge),
+      promote: clampNum(th.promote, B.threshold, d.thresholds.promote),
+      link: clampNum(th.link, B.threshold, d.thresholds.link),
+      contradiction: clampNum(th.contradiction, B.threshold, d.thresholds.contradiction),
+    },
+    caps: {
+      maxMerges: clampNum(cp.maxMerges, B.maxMerges, d.caps.maxMerges, true),
+      maxPromotions: clampNum(cp.maxPromotions, B.maxPromotions, d.caps.maxPromotions, true),
+      maxLinks: clampNum(cp.maxLinks, B.maxLinks, d.caps.maxLinks, true),
+      maxContradictions: clampNum(cp.maxContradictions, B.maxContradictions, d.caps.maxContradictions, true),
+    },
+    lossRail: {
+      maxTouchFraction: clampNum(lr.maxTouchFraction, B.maxTouchFraction, d.lossRail.maxTouchFraction),
+      minTouchAllowance: clampNum(lr.minTouchAllowance, B.minTouchAllowance, d.lossRail.minTouchAllowance, true),
+    },
+    llm: {
+      provider: (DREAM_LLM_PROVIDERS as readonly unknown[]).includes(llm.provider)
+        ? (llm.provider as DreamLlmProvider)
+        : d.llm.provider,
+      model:
+        model && model.length <= B.modelLength[1] && DREAM_MODEL_RE.test(model) ? model : null,
+    },
+  };
+}
+
+/** Merge a patch into settings (nested objects field by field), then normalize. */
+export function patchDreamSettings(current: DreamSettings, patch: DreamSettingsPatch): DreamSettings {
+  const defined = <T extends object>(o: T | undefined): Partial<T> =>
+    Object.fromEntries(Object.entries(o ?? {}).filter(([, v]) => v !== undefined)) as Partial<T>;
+  const top = defined(patch);
+  return normalizeDreamSettings({
+    ...current,
+    ...top,
+    phases: { ...current.phases, ...defined(patch.phases) },
+    thresholds: { ...current.thresholds, ...defined(patch.thresholds) },
+    caps: { ...current.caps, ...defined(patch.caps) },
+    lossRail: { ...current.lossRail, ...defined(patch.lossRail) },
+    llm: { ...current.llm, ...defined(patch.llm) },
+  });
+}
+
+/** The engine options a vault's settings imply (the rest stay at their defaults). */
+export function dreamOptionsFromSettings(s: DreamSettings): Partial<DreamOptions> {
+  return {
+    phases: { ...s.phases },
+    minMergeConfidence: s.thresholds.merge,
+    minPromoteConfidence: s.thresholds.promote,
+    minLinkConfidence: s.thresholds.link,
+    minContradictionConfidence: s.thresholds.contradiction,
+    maxMerges: s.caps.maxMerges,
+    maxPromotions: s.caps.maxPromotions,
+    maxLinks: s.caps.maxLinks,
+    maxContradictions: s.caps.maxContradictions,
+    // Hard floor: never looser than the default rail, whatever was stored.
+    maxTouchFraction: Math.min(s.lossRail.maxTouchFraction, DREAM_DEFAULTS.maxTouchFraction),
+    minTouchAllowance: Math.min(s.lossRail.minTouchAllowance, DREAM_DEFAULTS.minTouchAllowance),
+  };
+}
+
+/**
+ * When the next sweep is due (epoch ms): one cadence after `lastMs` (or `nowMs`
+ * when never dreamed), pushed forward to the first `runHourUtc:00Z` at/after
+ * that time when a run hour is set and the cadence is at least a day.
+ */
+export function nextDreamDue(
+  lastMs: number | null,
+  nowMs: number,
+  s: Pick<DreamSettings, "cadenceHours" | "runHourUtc">,
+): number {
+  const base = lastMs !== null && Number.isFinite(lastMs) ? lastMs : nowMs;
+  const due = base + clampCadenceHours(s.cadenceHours) * 3_600_000;
+  if (s.runHourUtc === null || s.cadenceHours < 24) return due;
+  const d = new Date(due);
+  const at = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), s.runHourUtc);
+  return at >= due ? at : at + 24 * 3_600_000;
 }

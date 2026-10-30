@@ -621,4 +621,45 @@ describe("brainz dream", () => {
     expect(bad.code).toBe(1);
     expect(bad.err).toContain("dream id");
   });
+  it("configure sets every setting via flags, validated by the wire schema", async () => {
+    const dir = await copyDemoVault();
+    const res = await run([
+      "dream", "configure", "--vault", dir, "--json",
+      "--mode", "propose", "--run-hour", "4", "--cadence", "48",
+      "--phases", "merges,links", "--min-merge", "0.9", "--max-links", "3",
+      "--max-touch-fraction", "0.1", "--llm-provider", "byok", "--llm-model", "claude-sonnet-5-5",
+    ]);
+    expect(res.code).toBe(0);
+    const status = dreamStatusOutputSchema.parse(JSON.parse(res.out));
+    expect(status.settings).toMatchObject({
+      mode: "propose",
+      runHourUtc: 4,
+      cadenceHours: 48,
+      phases: { merges: true, promotions: false, links: true, contradictions: false },
+      thresholds: { merge: 0.9 },
+      caps: { maxLinks: 3 },
+      lossRail: { maxTouchFraction: 0.1 },
+      llm: { provider: "byok", model: "claude-sonnet-5-5" },
+    });
+    const cleared = await run(["dream", "configure", "--vault", dir, "--json", "--run-hour", "none", "--disable"]);
+    expect(dreamStatusOutputSchema.parse(JSON.parse(cleared.out)).settings).toMatchObject({
+      enabled: false,
+      runHourUtc: null,
+      mode: "propose",
+    });
+    const human = await run(["dream", "--vault", dir]);
+    expect(human.out).toContain("mode propose");
+
+    const loose = await run(["dream", "configure", "--vault", dir, "--max-touch-fraction", "0.5"]);
+    expect(loose.code).toBe(1);
+    expect(loose.err).toContain("lossRail.maxTouchFraction");
+    const badPhase = await run(["dream", "configure", "--vault", dir, "--phases", "naps"]);
+    expect(badPhase.code).toBe(1);
+
+    const apply = await run(["dream", "apply", "--vault", dir]);
+    expect(apply.code).toBe(1);
+    expect(apply.err).toContain("dream id");
+    const notPending = await run(["dream", "apply", "dream-nope", "--vault", dir]);
+    expect(notPending.code).toBe(1);
+  });
 });

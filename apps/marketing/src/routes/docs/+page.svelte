@@ -221,8 +221,9 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 				"links, and files a task for each contradiction. A sweep that would touch too much of the vault " +
 				"is rejected; every applied dream keeps preimages and can be reverted. {action: \"status\"} shows " +
 				"schedule + last dream; {action: \"run\"} dreams now; {action: \"diary\"} reads the Dream Diary; " +
-				"{action: \"revert\", id} undoes one dream; {action: \"configure\", enabled?, cadenceHours?} sets it " +
-				"up. Without an LLM only light runs.",
+				"{action: \"revert\", id} undoes one dream; {action: \"configure\", ...} sets the schedule, mode " +
+				"(apply, propose, light-only), phases, thresholds, caps, a stricter loss rail and the LLM choice; " +
+				"{action: \"apply\", id, proposals?} decides a proposed dream. Without an LLM only light runs.",
 		},
 		{
 			name: "create_task",

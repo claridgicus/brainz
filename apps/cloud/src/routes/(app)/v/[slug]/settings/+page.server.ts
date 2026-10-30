@@ -1,4 +1,10 @@
-import type { AccountDreaming, ConceptTypeEntry, VaultInvite, VaultMember } from "@brainz/contracts";
+import type {
+  AccountDreaming,
+  ConceptTypeEntry,
+  VaultDreaming,
+  VaultInvite,
+  VaultMember,
+} from "@brainz/contracts";
 import { createApi, roleOf } from "$lib/api";
 import type { PageServerLoad } from "./$types";
 
@@ -13,8 +19,9 @@ export const load: PageServerLoad = async ({ fetch, parent }) => {
   // Concept types are visible to every member (viewer+); best-effort so the
   // page still renders if a fetch hiccups.
   // Dreaming is about the signed-in user's own account (BYOK key + spend), so
-  // every member sees it; best-effort like the rest.
-  const [keys, members, invites, publicStatus, types, dreaming] = await Promise.all([
+  // every member sees it; best-effort like the rest. The vault's own dreaming
+  // settings + diary are visible to every member (editable by editor+).
+  const [keys, members, invites, publicStatus, types, dreaming, vaultDreaming] = await Promise.all([
     isOwner ? api.listKeys(vault.id) : Promise.resolve([]),
     api.listMembers(vault.id).catch(() => null as VaultMember[] | null),
     isOwner
@@ -25,6 +32,7 @@ export const load: PageServerLoad = async ({ fetch, parent }) => {
       : Promise.resolve(null),
     api.listTypes(vault.id).catch(() => null as ConceptTypeEntry[] | null),
     api.getAccountDreaming().catch(() => null as AccountDreaming | null),
+    api.getVaultDreaming(vault.id).catch(() => null as VaultDreaming | null),
   ]);
-  return { keys, members, invites, publicStatus, types, dreaming };
+  return { keys, members, invites, publicStatus, types, dreaming, vaultDreaming };
 };

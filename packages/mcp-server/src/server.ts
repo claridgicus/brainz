@@ -499,12 +499,13 @@ export function createServer(vault: Vault, options: CreateServerOptions = {}): M
         content: [{ type: "text", text: sessionHookPlaybook({ client, serverName }) }],
       })),
 
-    dream: async ({ action, id, limit, enabled, cadenceHours }) =>
+    dream: async ({ action, id, limit, proposals, ...settings }) =>
       guarded(async () => {
         const status = async () => {
           const [lastEntry] = await vault.dreamDiary(1);
           return {
             ...vault.dreamConfig(),
+            settings: vault.dreamSettings(),
             lastDreamAt: vault.lastDreamAt,
             // Local vaults have no scheduler: dreams run on demand only.
             nextDreamAt: null,
@@ -522,7 +523,11 @@ export function createServer(vault: Vault, options: CreateServerOptions = {}): M
           if (!id) return fail('dream {action: "revert"} requires the dream `id`');
           return ok(await vault.revertDream(id));
         }
-        if (action === "configure") await vault.configureDreaming({ enabled, cadenceHours });
+        if (action === "apply") {
+          if (!id) return fail('dream {action: "apply"} requires the dream `id`');
+          return ok(await vault.applyDream(id, proposals));
+        }
+        if (action === "configure") await vault.configureDreaming(settings);
         return ok(await status());
       }),
 

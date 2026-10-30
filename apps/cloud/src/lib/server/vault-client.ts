@@ -4,9 +4,16 @@
  * code talks to vault content.
  */
 import type { DurableObjectNamespace } from "@cloudflare/workers-types";
-import type { ConceptType, DreamDiaryEntry, TaskStatus, UpsertInput } from "@brainz/engine";
+import type {
+  ConceptType,
+  DreamDiaryEntry,
+  DreamSettingsPatch,
+  TaskStatus,
+  UpsertInput,
+} from "@brainz/engine";
 import type {
   ContextArgs,
+  DreamApplyResult,
   DreamRevertResult,
   DreamRunResult,
   DreamStatusResult,
@@ -110,7 +117,8 @@ export interface VaultClient {
   dreamRun(): Promise<DreamRunResult>;
   dreamDiary(limit?: number): Promise<{ count: number; entries: DreamDiaryEntry[] }>;
   dreamRevert(id: string): Promise<DreamRevertResult>;
-  dreamConfigure(args: { enabled?: boolean; cadenceHours?: number }): Promise<DreamStatusResult>;
+  dreamConfigure(patch: DreamSettingsPatch): Promise<DreamStatusResult>;
+  dreamApply(id: string, proposals?: number[]): Promise<DreamApplyResult>;
 }
 
 /** Get the typed client for a vault's DO. `vaultId` is the DO name. */
@@ -157,6 +165,7 @@ export function vaultClient(ns: DurableObjectNamespace, vaultId: string): VaultC
     dreamRun: () => call("dreamRun"),
     dreamDiary: (limit) => call("dreamDiary", limit === undefined ? {} : { limit }),
     dreamRevert: (id) => call("dreamRevert", { id }),
-    dreamConfigure: (args) => call("dreamConfigure", args),
+    dreamConfigure: (patch) => call("dreamConfigure", patch),
+    dreamApply: (id, proposals) => call("dreamApply", proposals === undefined ? { id } : { id, proposals }),
   };
 }

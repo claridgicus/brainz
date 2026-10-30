@@ -7,6 +7,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { getMcpTool, linkConceptsOutputSchema } from "@brainz/contracts";
+import { normalizeDreamSettings } from "@brainz/engine";
 import { describe, expect, it } from "vitest";
 import { buildMcpServer } from "./mcp";
 import { VaultDoError, type VaultClient } from "./vault-client";
@@ -72,6 +73,7 @@ function vaultWith(overrides: Partial<VaultClient>): VaultClient {
     dreamDiary: async () => ({ count: 0, entries: [] }),
     dreamRevert: async (id) => notFound(id),
     dreamConfigure: async () => DREAM_STATUS,
+    dreamApply: async (id) => notFound(id),
   };
   return { ...base, ...overrides };
 }
@@ -79,6 +81,7 @@ function vaultWith(overrides: Partial<VaultClient>): VaultClient {
 const DREAM_STATUS = {
   enabled: true,
   cadenceHours: 24,
+  settings: normalizeDreamSettings(undefined),
   lastDreamAt: null,
   nextDreamAt: null,
   inFlight: null,

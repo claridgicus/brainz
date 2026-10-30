@@ -14,6 +14,7 @@ import {
   conceptListResponseSchema,
   conceptTypeEntrySchema,
   conceptTypeListSchema,
+  dreamApplyOutputSchema,
   graphResponseSchema,
   searchResponseSchema,
   statsResponseSchema,
@@ -23,6 +24,7 @@ import {
   inviteListResponseSchema,
   publicEnableResponseSchema,
   publicStatusSchema,
+  vaultDreamingSchema,
   vaultListResponseSchema,
   memberListResponseSchema,
   vaultMemberSchema,
@@ -33,6 +35,7 @@ import {
   type ConceptTypeCreateRequest,
   type ConceptTypeEntry,
   type ConceptTypeUpdateRequest,
+  type DreamSettingsPatchWire,
   type GraphPayload,
   type LlmKeyPutRequest,
   type PublicEnableResponse,
@@ -331,6 +334,26 @@ export function createApi(fetchFn: Fetch) {
     },
     removeLlmKey(): Promise<AccountDreaming> {
       return request(accountDreamingSchema, "/api/account/llm-key", { method: "DELETE" });
+    },
+
+    // -------------------------------------------- vault dreaming settings
+    /** The vault's dream status (incl. settings) + newest Dream Diary entries. */
+    getVaultDreaming(vaultId: string) {
+      return request(vaultDreamingSchema, `/api/vaults/${enc(vaultId)}/dreaming`);
+    },
+    /** Editor+: change the vault's dreaming settings (nested objects merge). */
+    updateVaultDreaming(vaultId: string, patch: DreamSettingsPatchWire) {
+      return request(vaultDreamingSchema, `/api/vaults/${enc(vaultId)}/dreaming`, {
+        method: "PATCH",
+        body: patch,
+      });
+    },
+    /** Editor+: approve these proposals of a proposed dream (omit ⇒ all, [] ⇒ reject all). */
+    applyDream(vaultId: string, dreamId: string, proposals?: number[]) {
+      return request(dreamApplyOutputSchema, `/api/vaults/${enc(vaultId)}/dreaming/${enc(dreamId)}/apply`, {
+        method: "POST",
+        body: proposals === undefined ? {} : { proposals },
+      });
     },
 
     // ------------------------------------------------------ public access

@@ -184,6 +184,12 @@ Dreaming (runs by itself — nothing to install):
   threshold-gated and revertible. `dream {action: "diary"}` shows what changed;
   `dream {action: "revert", id}` undoes a dream; `dream {action: "configure",
   enabled: false}` turns it off.
+- Each vault has its own dreaming settings (`dream {action: "configure", ...}`
+  or vault settings → "Dreaming for this vault"): schedule (`cadenceHours`,
+  `runHourUtc`), `mode` (`apply`, `propose` — changes wait in the Dream Diary
+  until `dream {action: "apply", id, proposals?}` — or `light-only`), which
+  `phases` run, confidence `thresholds`, per-dream `caps`, a stricter
+  `lossRail`, and the `llm` choice.
 - The thinking step runs on Brainz's AI up to a small daily budget per account
   (`dream {action: "status"}` shows `provider`, today's `spend` vs the cap, and
   `killSwitch`). Past the budget a dream tidies up without thinking and retries

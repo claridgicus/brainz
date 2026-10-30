@@ -216,13 +216,134 @@ export const sessionHookInputSchema = z.object({
     ),
 });
 
+// Per-vault dreaming settings (engine DreamSettings; bounds mirror engine
+// DREAM_SETTINGS_BOUNDS — a contracts test keeps them in step).
+const dreamThreshold = z.number().min(0.5).max(1);
+const dreamModel = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z0-9._:/@-]+$/, "a model id: letters, digits and . _ : / @ -");
+
+export const dreamModeSchema = z.enum(["apply", "propose", "light-only"]);
+export const dreamLlmProviderSchema = z.enum(["auto", "workers-ai", "byok"]);
+
+const dreamPhasesShape = {
+  merges: z.boolean(),
+  promotions: z.boolean(),
+  links: z.boolean(),
+  contradictions: z.boolean(),
+};
+const dreamThresholdsShape = {
+  merge: dreamThreshold,
+  promote: dreamThreshold,
+  link: dreamThreshold,
+  contradiction: dreamThreshold,
+};
+const dreamCapsShape = {
+  maxMerges: z.number().int().min(1).max(20),
+  maxPromotions: z.number().int().min(1).max(20),
+  maxLinks: z.number().int().min(1).max(50),
+  maxContradictions: z.number().int().min(1).max(10),
+};
+const dreamLossRailShape = {
+  maxTouchFraction: z.number().min(0.01).max(0.2),
+  minTouchAllowance: z.number().int().min(0).max(3),
+};
+
+/** A vault's full dreaming settings, as status reports them. */
+export const dreamSettingsSchema = z
+  .object({
+    enabled: z.boolean(),
+    cadenceHours: z.number().int().min(1).max(168),
+    runHourUtc: z.number().int().min(0).max(23).nullable(),
+    mode: dreamModeSchema,
+    phases: z.object(dreamPhasesShape).strict(),
+    thresholds: z.object(dreamThresholdsShape).strict(),
+    caps: z.object(dreamCapsShape).strict(),
+    lossRail: z.object(dreamLossRailShape).strict(),
+    llm: z.object({ provider: dreamLlmProviderSchema, model: z.string().nullable() }).strict(),
+  })
+  .strict();
+export type DreamSettingsWire = z.infer<typeof dreamSettingsSchema>;
+
+/** Fields of a settings change (MCP `configure` takes them at top level; REST PATCH is exactly this). */
+const dreamSettingsPatchShape = {
+  enabled: z.boolean().optional().describe("Turn scheduled dreaming on or off."),
+  cadenceHours: z.number().int().min(1).max(168).optional().describe("Hours between dreams (default 24)."),
+  runHourUtc: z
+    .number()
+    .int()
+    .min(0)
+    .max(23)
+    .nullable()
+    .optional()
+    .describe("Preferred UTC hour for a dream when the cadence is 24h or more; null clears it."),
+  mode: dreamModeSchema
+    .optional()
+    .describe(
+      '"apply" writes the changes that pass the gates (default); "propose" holds them in the Dream Diary until approved with {action: "apply"}; "light-only" never calls an LLM.',
+    ),
+  phases: z
+    .object(dreamPhasesShape)
+    .partial()
+    .strict()
+    .optional()
+    .describe("Turn individual kinds of change on or off: merges, promotions, links, contradictions."),
+  thresholds: z
+    .object(dreamThresholdsShape)
+    .partial()
+    .strict()
+    .optional()
+    .describe("Minimum confidence (0.5-1) per kind: merge 0.8, promote 0.7, link 0.7, contradiction 0.6 by default."),
+  caps: z
+    .object(dreamCapsShape)
+    .partial()
+    .strict()
+    .optional()
+    .describe("Most changes per dream: maxMerges 5 (1-20), maxPromotions 5 (1-20), maxLinks 10 (1-50), maxContradictions 3 (1-10)."),
+  lossRail: z
+    .object(dreamLossRailShape)
+    .partial()
+    .strict()
+    .optional()
+    .describe(
+      "How much of the vault one dream may modify: maxTouchFraction (0.01-0.2) and minTouchAllowance (0-3). Can only be made stricter than the defaults.",
+    ),
+  llm: z
+    .object({ provider: dreamLlmProviderSchema, model: dreamModel.nullable() })
+    .partial()
+    .strict()
+    .optional()
+    .describe(
+      'Cloud: which LLM the REM step uses — "auto" (default), "workers-ai", or "byok" (only the account\'s own key) — and a model id for the account\'s own key; null clears it.',
+    ),
+};
+
+function forConfigure<T extends z.ZodTypeAny>(t: T): T {
+  return t.describe(`With "configure": ${t.description ?? ""}`) as T;
+}
+
+/** PATCH /api/vaults/:vaultId/dreaming — a partial settings change. */
+export const dreamSettingsPatchSchema = z.object(dreamSettingsPatchShape).strict();
+export type DreamSettingsPatchWire = z.infer<typeof dreamSettingsPatchSchema>;
+
 export const dreamInputSchema = z.object({
   action: z
-    .enum(["status", "run", "diary", "revert", "configure"])
+    .enum(["status", "run", "diary", "revert", "configure", "apply"])
     .describe(
-      '"status" reports whether dreaming is on, its cadence, the last/next dream and any sweep in flight. "run" starts (or continues) a sweep NOW and advances it as far as one request allows. "diary" returns recent Dream Diary entries (newest first). "revert" undoes one dream via its preimages (requires `id`). "configure" turns dreaming on/off and sets the cadence.',
+      '"status" reports the settings, the last/next dream and any sweep in flight. "run" starts (or continues) a sweep NOW and advances it as far as one request allows. "diary" returns recent Dream Diary entries (newest first). "revert" undoes one dream via its preimages (requires `id`). "configure" changes this vault\'s dreaming settings. "apply" decides a proposed dream (propose mode): applies the listed `proposals` (all when omitted) and rejects the rest (requires `id`).',
     ),
-  id: z.string().optional().describe('With "revert": the dream id to undo (from "diary" or "status").'),
+  id: z
+    .string()
+    .optional()
+    .describe('With "revert" or "apply": the dream id (from "diary" or "status").'),
+  proposals: z
+    .array(z.number().int().min(0))
+    .max(200)
+    .optional()
+    .describe('With "apply": the proposal numbers (`n`) to approve; omit for all, [] to reject all.'),
   limit: z
     .number()
     .int()
@@ -230,14 +351,15 @@ export const dreamInputSchema = z.object({
     .max(50)
     .optional()
     .describe('With "diary": how many entries to return (default 10).'),
-  enabled: z.boolean().optional().describe('With "configure": turn nightly dreaming on or off.'),
-  cadenceHours: z
-    .number()
-    .int()
-    .min(1)
-    .max(168)
-    .optional()
-    .describe('With "configure": hours between dreams (default 24).'),
+  enabled: forConfigure(dreamSettingsPatchShape.enabled),
+  cadenceHours: forConfigure(dreamSettingsPatchShape.cadenceHours),
+  runHourUtc: forConfigure(dreamSettingsPatchShape.runHourUtc),
+  mode: forConfigure(dreamSettingsPatchShape.mode),
+  phases: forConfigure(dreamSettingsPatchShape.phases),
+  thresholds: forConfigure(dreamSettingsPatchShape.thresholds),
+  caps: forConfigure(dreamSettingsPatchShape.caps),
+  lossRail: forConfigure(dreamSettingsPatchShape.lossRail),
+  llm: forConfigure(dreamSettingsPatchShape.llm),
 });
 
 // ------------------------------------------------------------- task tool i/o
@@ -509,6 +631,17 @@ const dreamAppliedChangeSchema = z
   })
   .strict();
 
+/** A change a propose-mode dream holds for approval. */
+export const dreamProposalSchema = z
+  .object({
+    n: z.number().int().min(0),
+    kind: z.enum(["merge", "promote", "link", "contradiction"]),
+    id: z.string(),
+    summary: z.string(),
+    decision: z.enum(["pending", "approved", "rejected"]),
+  })
+  .strict();
+
 /** One Dream Diary entry (engine DreamDiaryEntry): counts and ids, never dumps. */
 export const dreamDiaryEntrySchema = z
   .object({
@@ -516,7 +649,17 @@ export const dreamDiaryEntrySchema = z
     trigger: z.enum(["alarm", "manual"]),
     startedAt: z.string(),
     finishedAt: z.string(),
-    status: z.enum(["applied", "nothing-applied", "rejected", "light-only", "reverted"]),
+    status: z.enum([
+      "applied",
+      "nothing-applied",
+      "rejected",
+      "light-only",
+      "reverted",
+      "proposed",
+      "dismissed",
+    ]),
+    /** The vault's dreaming mode when the sweep ran (absent on older entries). */
+    mode: dreamModeSchema.optional(),
     light: z
       .object({
         changed: z.number().int(),
@@ -538,7 +681,7 @@ export const dreamDiaryEntrySchema = z
       .strict(),
     deep: z
       .object({
-        status: z.enum(["applied", "nothing-applied", "rejected", "skipped"]),
+        status: z.enum(["applied", "nothing-applied", "rejected", "skipped", "proposed"]),
         reason: z.string().optional(),
         touched: z.number().int(),
         allowance: z.number().int(),
@@ -550,6 +693,9 @@ export const dreamDiaryEntrySchema = z
       .strict(),
     applied: z.array(dreamAppliedChangeSchema),
     rejected: z.record(z.string(), z.number().int()),
+    /** Propose mode: the held-back changes (numbered `n`) and the decision on each. */
+    proposals: z.array(dreamProposalSchema).optional(),
+    decidedAt: z.string().optional(),
     revertedAt: z.string().optional(),
     markdown: z.string(),
   })
@@ -574,6 +720,8 @@ export const dreamStatusOutputSchema = z
   .object({
     enabled: z.boolean(),
     cadenceHours: z.number().int(),
+    /** Every per-vault setting (enabled/cadenceHours repeated inside). */
+    settings: dreamSettingsSchema,
     /** Start of the last completed sweep (changes after it feed the next one); null if never. */
     lastDreamAt: z.string().nullable(),
     /** When the next nightly sweep is due; null when dreaming is off or not scheduled (local). */
@@ -622,11 +770,25 @@ export const dreamRevertOutputSchema = z
   })
   .strict();
 
+/** `dream {action: "apply"}`: the decided entry (applied subset, or dismissed). */
+export const dreamApplyOutputSchema = z
+  .object({
+    id: z.string(),
+    status: z.enum(["applied", "nothing-applied", "rejected", "dismissed"]),
+    /** Proposals approved and written. */
+    applied: z.number().int(),
+    /** Proposals rejected by the caller or by re-gating. */
+    rejected: z.number().int(),
+    entry: dreamDiaryEntrySchema,
+  })
+  .strict();
+
 export const dreamOutputSchema = z.union([
   dreamStatusOutputSchema,
   dreamRunOutputSchema,
   dreamDiaryOutputSchema,
   dreamRevertOutputSchema,
+  dreamApplyOutputSchema,
 ]);
 
 // ----------------------------------------------------------- task tool output
@@ -896,8 +1058,9 @@ export const MCP_TOOLS = [
       "task for each contradiction. A sweep that would touch too much of the vault is rejected; every " +
       "applied dream keeps preimages and can be reverted. {action: \"status\"} shows schedule + last " +
       "dream; {action: \"run\"} dreams now; {action: \"diary\"} reads the Dream Diary; " +
-      "{action: \"revert\", id} undoes one dream; {action: \"configure\", enabled?, cadenceHours?} " +
-      "sets it up. Without an LLM only light runs.",
+      "{action: \"revert\", id} undoes one dream; {action: \"configure\", ...} sets the schedule, mode " +
+      "(apply, propose, light-only), phases, thresholds, caps, a stricter loss rail and the LLM choice; " +
+      "{action: \"apply\", id, proposals?} decides a proposed dream. Without an LLM only light runs.",
     inputSchema: dreamInputSchema,
     outputSchema: dreamOutputSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },

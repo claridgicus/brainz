@@ -633,4 +633,23 @@ describe("dream tool (local)", () => {
     const result = await callTool("dream", { action: "revert" });
     expect(result.isError).toBe(true);
   });
+
+  it("configure takes the full settings and apply needs a proposed dream", async () => {
+    const configured = await callJson("dream", {
+      action: "configure",
+      mode: "propose",
+      phases: { contradictions: false },
+      caps: { maxMerges: 2 },
+    });
+    expect(configured.settings).toMatchObject({
+      mode: "propose",
+      phases: { contradictions: false, merges: true },
+      caps: { maxMerges: 2 },
+    });
+    expect((await callTool("dream", { action: "apply" })).isError).toBe(true);
+    const diary = await callJson("dream", { action: "diary", limit: 1 });
+    const notPending = await callTool("dream", { action: "apply", id: diary.entries[0]?.id ?? "dream-x" });
+    expect(notPending.isError).toBe(true);
+    await callJson("dream", { action: "configure", mode: "apply", phases: { contradictions: true }, caps: { maxMerges: 5 } });
+  });
 });

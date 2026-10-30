@@ -3,15 +3,18 @@ import {
   advanceSweep,
   assembleContext,
   bfsRelated,
-  clampCadenceHours,
   cosineSim,
-  DREAM_DEFAULT_CADENCE_HOURS,
+  decideEntry,
   diaryEntry,
   dreamId,
+  dreamOptionsFromSettings,
   isEmptySweep,
+  normalizeDreamSettings,
+  patchDreamSettings,
   ONBOARDING_SUMMARY_ID,
   planDeep,
   renderDiaryEntry,
+  selectProposals,
   startSweep,
   packVector,
   parseNote,
@@ -31,6 +34,9 @@ import type {
   DreamDiaryEntry,
   DreamLlm,
   DreamOptions,
+  DreamPlan,
+  DreamSettings,
+  DreamSettingsPatch,
   DreamSnapshot,
   DreamTrigger,
   Edge,
@@ -59,8 +65,8 @@ interface VaultConfig {
   lastSyncedAt?: string;
   /** Start of the last completed dream sweep; absent → never dreamed. */
   lastDreamAt?: string;
-  /** Dreaming settings (on by default, 24h cadence). */
-  dreaming?: { enabled?: boolean; cadenceHours?: number };
+  /** Per-vault dreaming settings (engine DreamSettings; every field optional, defaults apply). */
+  dreaming?: Partial<DreamSettings>;
   [key: string]: unknown;
 }
 
@@ -783,23 +789,23 @@ export class Vault {
       : null;
   }
 
-  /** Dreaming settings: on by default, 24h cadence. */
-  dreamConfig(): { enabled: boolean; cadenceHours: number } {
-    const d = this.#config.dreaming ?? {};
-    return {
-      enabled: d.enabled !== false,
-      cadenceHours: clampCadenceHours(d.cadenceHours ?? DREAM_DEFAULT_CADENCE_HOURS),
-    };
+  /** Every dreaming setting, defaults filled in and clamped to bounds. */
+  dreamSettings(): DreamSettings {
+    return normalizeDreamSettings(this.#config.dreaming);
   }
 
-  /** Update dreaming settings in brainz.config.json. */
-  async configureDreaming(input: { enabled?: boolean; cadenceHours?: number }): Promise<void> {
-    const current = this.dreamConfig();
-    this.#config.dreaming = {
-      enabled: input.enabled ?? current.enabled,
-      cadenceHours: clampCadenceHours(input.cadenceHours ?? current.cadenceHours),
-    };
+  /** The schedule part of the settings: on by default, 24h cadence. */
+  dreamConfig(): { enabled: boolean; cadenceHours: number } {
+    const { enabled, cadenceHours } = this.dreamSettings();
+    return { enabled, cadenceHours };
+  }
+
+  /** Merge a settings change into brainz.config.json `dreaming` (nested objects field by field). */
+  async configureDreaming(patch: DreamSettingsPatch): Promise<DreamSettings> {
+    const next = patchDreamSettings(this.dreamSettings(), patch);
+    this.#config.dreaming = next;
     await this.#writeConfig();
+    return next;
   }
 
   async #writeConfig(): Promise<void> {
@@ -877,26 +883,25 @@ export class Vault {
       await this.#writeConfig();
       return { status: "idle", id: null };
     }
-    const llm = opts.llm ?? null;
+    const settings = this.dreamSettings();
+    const options = { ...dreamOptionsFromSettings(settings), ...(opts.options ?? {}) };
+    const lightOnly = settings.mode === "light-only";
+    const llm = lightOnly ? null : (opts.llm ?? null);
+    const skipReason = lightOnly ? "light-only mode" : undefined;
     while (state.phase !== "deep") {
-      state = await advanceSweep(state, snapshot, { llm, options: opts.options });
+      state = await advanceSweep(state, snapshot, { llm, options, skipReason });
     }
-    const plan = state.rem.status === "ok" ? planDeep(state, snapshot, { now, options: opts.options }) : null;
+    const plan = state.rem.status === "ok" ? planDeep(state, snapshot, { now, options }) : null;
+    const proposing = settings.mode === "propose" && plan?.status === "apply";
 
-    const ops: LocalDreamOp[] = [];
-    if (plan?.status === "apply") {
-      for (const op of plan.ops) {
-        const prior = files.get(op.id);
-        const filePath = prior?.filePath ?? path.join(this.dir, "concepts", `${op.id}.md`);
-        const beforeRaw = prior?.raw ?? null;
-        const afterRaw = op.after ? serializeDreamConcept(op.after, beforeRaw) : null;
-        ops.push({ id: op.id, filePath, beforeRaw, afterRaw });
-      }
-      await this.#writeDreamFiles(ops.map((o) => ({ filePath: o.filePath, raw: o.afterRaw })));
-    }
-
-    const entry = diaryEntry(state, plan, new Date().toISOString());
-    const record: LocalDreamRecord = { entry, ops };
+    const ops = plan?.status === "apply" && !proposing ? await this.#applyDreamPlan(plan, files) : [];
+    const entry = diaryEntry(state, plan, new Date().toISOString(), { mode: settings.mode });
+    const record: LocalDreamRecord = {
+      entry,
+      ops,
+      // Propose mode keeps the staged material + only the accepted proposals for `applyDream`.
+      ...(proposing ? { pending: { ...state, rem: { ...state.rem, proposals: plan.accepted } } } : {}),
+    };
     await fsp.mkdir(this.#dreamsDir(), { recursive: true });
     await fsp.writeFile(
       path.join(this.#dreamsDir(), `${id}.json`),
@@ -906,6 +911,68 @@ export class Vault {
     this.#config.lastDreamAt = now;
     await this.#writeConfig();
     return { status: "done", id, entry };
+  }
+
+  /** Write a plan's ops as markdown and return them with their preimages. */
+  async #applyDreamPlan(
+    plan: DreamPlan,
+    files: Map<string, { filePath: string; raw: string }>,
+  ): Promise<LocalDreamOp[]> {
+    const ops: LocalDreamOp[] = [];
+    for (const op of plan.ops) {
+      const prior = files.get(op.id);
+      const filePath = prior?.filePath ?? path.join(this.dir, "concepts", `${op.id}.md`);
+      const beforeRaw = prior?.raw ?? null;
+      const afterRaw = op.after ? serializeDreamConcept(op.after, beforeRaw) : null;
+      ops.push({ id: op.id, filePath, beforeRaw, afterRaw });
+    }
+    await this.#writeDreamFiles(ops.map((o) => ({ filePath: o.filePath, raw: o.afterRaw })));
+    return ops;
+  }
+
+  /**
+   * Decide a `proposed` dream (propose mode): approve `proposals` (positions;
+   * omitted ⇒ all), reject the rest. Approved ones are re-gated and re-planned
+   * against the vault as it is NOW, then applied with preimages (revertible).
+   */
+  async applyDream(
+    id: string,
+    proposals?: number[],
+  ): Promise<{
+    id: string;
+    status: "applied" | "nothing-applied" | "rejected" | "dismissed";
+    applied: number;
+    rejected: number;
+    entry: DreamDiaryEntry;
+  }> {
+    const record = await this.#readDream(id);
+    if (!record) throw new Error(`no dream with id "${id}"`);
+    if (record.entry.status !== "proposed" || !record.pending) {
+      throw new Error(`dream "${id}" has no pending proposals (status ${record.entry.status})`);
+    }
+    const all = (record.entry.proposals ?? []).map((p) => p.n);
+    const selected = proposals === undefined ? all : all.filter((n) => proposals.includes(n));
+    const now = new Date().toISOString();
+    let plan: DreamPlan | null = null;
+    let ops: LocalDreamOp[] = [];
+    if (selected.length > 0) {
+      const { snapshot, files } = await this.#dreamSnapshot();
+      const pending = record.pending;
+      const state = { ...pending, rem: { ...pending.rem, proposals: selectProposals(pending.rem.proposals, selected) } };
+      plan = planDeep(state, snapshot, { now, options: dreamOptionsFromSettings(this.dreamSettings()) });
+      if (plan.status === "apply") ops = await this.#applyDreamPlan(plan, files);
+    }
+    const entry = decideEntry(record.entry, plan, selected, now);
+    const next: LocalDreamRecord = { entry, ops };
+    await fsp.writeFile(path.join(this.#dreamsDir(), `${id}.json`), `${JSON.stringify(next, null, 2)}\n`);
+    const applied = plan?.status === "apply" ? plan.applied.length : 0;
+    return {
+      id,
+      status: entry.status as "applied" | "nothing-applied" | "rejected" | "dismissed",
+      applied,
+      rejected: all.length - applied,
+      entry,
+    };
   }
 
   async #writeDreamFiles(writes: { filePath: string; raw: string | null }[]): Promise<void> {
@@ -958,6 +1025,9 @@ export class Vault {
     const record = await this.#readDream(id);
     if (!record) throw new Error(`no dream with id "${id}"`);
     if (record.entry.revertedAt) throw new Error(`dream "${id}" was already reverted`);
+    if (record.entry.status === "proposed") {
+      throw new Error(`dream "${id}" is still proposed — nothing was written; decide it with apply`);
+    }
     const conflicts: string[] = [];
     for (const op of record.ops) {
       let current: string | null = null;

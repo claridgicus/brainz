@@ -583,15 +583,19 @@ function vaultToolHandlers(vault: VaultClient, hooks: McpServerHooks): ToolHandl
 
     // Dreaming: the VaultDO runs the sweep (alarm-driven nightly, or now via
     // "run"); the tool only routes the action.
-    dream: async ({ action, id, limit, enabled, cadenceHours }) =>
+    dream: async ({ action, id, limit, proposals, ...settings }) =>
       guarded(async () => {
         if (action === "run") return ok(await vault.dreamRun());
+        if (action === "apply") {
+          if (!id) return fail('dream {action: "apply"} requires the dream `id`');
+          return ok(await vault.dreamApply(id, proposals));
+        }
         if (action === "diary") return ok(await vault.dreamDiary(limit ?? 10));
         if (action === "revert") {
           if (!id) return fail('dream {action: "revert"} requires the dream `id`');
           return ok(await vault.dreamRevert(id));
         }
-        if (action === "configure") return ok(await vault.dreamConfigure({ enabled, cadenceHours }));
+        if (action === "configure") return ok(await vault.dreamConfigure(settings));
         return ok(await vault.dreamStatus());
       }),
 

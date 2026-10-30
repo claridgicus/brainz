@@ -5,7 +5,9 @@ import type {
   CliSearchJson,
   CliShowJson,
   CliShowNeighbor,
+  DreamSettingsPatchWire,
 } from "@brainz/contracts";
+import { dreamSettingsPatchSchema } from "@brainz/contracts";
 import type { Concept, ConceptType, SessionHookClient } from "@brainz/core";
 import {
   claudeCodeSessionHook,
@@ -76,6 +78,94 @@ function parseList(value: string): string[] {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+function num(value: string): number {
+  const n = Number(value);
+  if (value.trim() === "" || !Number.isFinite(n)) throw new InvalidArgumentError("expected a number");
+  return n;
+}
+
+interface DreamCliOptions {
+  limit: number;
+  proposals?: string;
+  enable?: boolean;
+  disable?: boolean;
+  cadence?: number;
+  runHour?: string;
+  mode?: string;
+  phases?: string;
+  minMerge?: number;
+  minPromote?: number;
+  minLink?: number;
+  minContradiction?: number;
+  maxMerges?: number;
+  maxPromotions?: number;
+  maxLinks?: number;
+  maxContradictions?: number;
+  maxTouchFraction?: number;
+  minTouchAllowance?: number;
+  llmProvider?: string;
+  llmModel?: string;
+}
+
+const DREAM_PHASES = ["merges", "promotions", "links", "contradictions"] as const;
+
+/** `--proposals 0,2` → [0, 2]; `none` → []; omitted → undefined (all). */
+function parseProposalList(value: string | undefined): number[] | undefined {
+  if (value === undefined) return undefined;
+  if (value.trim() === "none") return [];
+  return parseList(value).map((v) => {
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < 0) throw new CliError(`--proposals: "${v}" is not a proposal number`);
+    return n;
+  });
+}
+
+/** `brainz dream configure` flags → a settings patch, validated by the wire schema (same bounds as MCP/REST). */
+function dreamPatchFromOptions(o: DreamCliOptions): DreamSettingsPatchWire {
+  if (o.enable && o.disable) throw new CliError("pass --enable or --disable, not both");
+  const pick = <T extends object>(obj: T): T | undefined =>
+    Object.values(obj).some((v) => v !== undefined) ? obj : undefined;
+  let phases: Record<string, boolean> | undefined;
+  if (o.phases !== undefined) {
+    const on = o.phases.trim() === "none" ? [] : parseList(o.phases);
+    const unknown = on.filter((p) => !(DREAM_PHASES as readonly string[]).includes(p));
+    if (unknown.length > 0) {
+      throw new CliError(`--phases: unknown phase ${unknown.join(", ")} — use ${DREAM_PHASES.join(", ")}`);
+    }
+    phases = Object.fromEntries(DREAM_PHASES.map((p) => [p, on.includes(p)]));
+  }
+  const raw = {
+    enabled: o.enable ? true : o.disable ? false : undefined,
+    cadenceHours: o.cadence,
+    runHourUtc: o.runHour === undefined ? undefined : o.runHour.trim() === "none" ? null : Number(o.runHour),
+    mode: o.mode,
+    phases,
+    thresholds: pick({
+      merge: o.minMerge,
+      promote: o.minPromote,
+      link: o.minLink,
+      contradiction: o.minContradiction,
+    }),
+    caps: pick({
+      maxMerges: o.maxMerges,
+      maxPromotions: o.maxPromotions,
+      maxLinks: o.maxLinks,
+      maxContradictions: o.maxContradictions,
+    }),
+    lossRail: pick({ maxTouchFraction: o.maxTouchFraction, minTouchAllowance: o.minTouchAllowance }),
+    llm: pick({
+      provider: o.llmProvider,
+      model: o.llmModel === undefined ? undefined : o.llmModel.trim() === "none" ? null : o.llmModel,
+    }),
+  };
+  const parsed = dreamSettingsPatchSchema.safeParse(raw);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new CliError(`dream configure: ${issue?.path.join(".") || "settings"} — ${issue?.message ?? "invalid"}`);
+  }
+  return parsed.data;
 }
 
 function flattenSnippet(text: string, maxLen = 72): string {
@@ -802,23 +892,46 @@ export function buildProgram(ctx: Ctx): Command {
       .command("dream [action] [id]")
       .description(
         "dreaming — consolidate the vault: `status` (default), `run` a sweep now, " +
-          "`diary` of past dreams, `revert <id>` to undo one. Locally there is no LLM " +
-          "provider yet, so a run does the light phase and writes a diary entry.",
+          "`diary` of past dreams, `revert <id>` to undo one, `apply <id>` to decide a " +
+          "proposed dream (propose mode), `configure` the vault's dreaming settings. Locally " +
+          "there is no LLM provider yet, so a run does the light phase and writes a diary entry.",
       ),
   )
     .option("--limit <n>", "with diary: how many entries", (v) => Number.parseInt(v, 10), 10)
+    .option("--proposals <list>", "with apply: proposal numbers to approve, e.g. 0,2 (default all; `none` rejects all)")
+    .option("--enable", "with configure: turn dreaming on")
+    .option("--disable", "with configure: turn dreaming off")
+    .option("--cadence <hours>", "with configure: hours between dreams (1-168)", num)
+    .option("--run-hour <hour>", "with configure: preferred UTC hour 0-23, or `none`")
+    .option("--mode <mode>", "with configure: apply | propose | light-only")
+    .option("--phases <list>", "with configure: the phases to keep on (merges,promotions,links,contradictions; `none` for all off)")
+    .option("--min-merge <c>", "with configure: merge confidence gate (0.5-1)", num)
+    .option("--min-promote <c>", "with configure: promotion confidence gate (0.5-1)", num)
+    .option("--min-link <c>", "with configure: link confidence gate (0.5-1)", num)
+    .option("--min-contradiction <c>", "with configure: contradiction confidence gate (0.5-1)", num)
+    .option("--max-merges <n>", "with configure: merges per dream (1-20)", num)
+    .option("--max-promotions <n>", "with configure: promotions per dream (1-20)", num)
+    .option("--max-links <n>", "with configure: links per dream (1-50)", num)
+    .option("--max-contradictions <n>", "with configure: contradiction tasks per dream (1-10)", num)
+    .option("--max-touch-fraction <f>", "with configure: loss rail fraction (0.01-0.2; stricter only)", num)
+    .option("--min-touch-allowance <n>", "with configure: loss rail allowance (0-3; stricter only)", num)
+    .option("--llm-provider <p>", "with configure: auto | workers-ai | byok (cloud only)")
+    .option("--llm-model <id>", "with configure: model for the account's own key, or `none` (cloud only)")
     .action(
       async (
         action: string | undefined,
         id: string | undefined,
-        opts: { limit: number },
+        opts: DreamCliOptions,
         cmd: Command,
       ) => {
         const g = getGlobals(cmd);
         const act = action ?? "status";
-        if (!["status", "run", "diary", "revert"].includes(act)) {
-          throw new CliError(`unknown dream action "${act}" — use status, run, diary, or revert <id>`);
+        if (!["status", "run", "diary", "revert", "apply", "configure"].includes(act)) {
+          throw new CliError(
+            `unknown dream action "${act}" — use status, run, diary, revert <id>, apply <id>, or configure`,
+          );
         }
+        const patch = act === "configure" ? dreamPatchFromOptions(opts) : null;
         await withVault(g.vaultDir, async (vault) => {
           if (act === "run") {
             const res = await vault.dream({ trigger: "manual" });
@@ -849,9 +962,21 @@ export function buildProgram(ctx: Ctx): Command {
             ctx.out(`${pc.green("✓")} reverted ${pc.cyan(id)} — ${res.restored} concept(s) restored\n`);
             return;
           }
+          if (act === "apply") {
+            if (!id) throw new CliError("dream apply requires the dream id (see `brainz dream diary`)");
+            const res = await vault.applyDream(id, parseProposalList(opts.proposals));
+            if (g.json) return printJson(ctx, res);
+            ctx.out(
+              `${pc.green("✓")} ${pc.cyan(id)} ${res.status} — ${res.applied} applied, ${res.rejected} rejected\n`,
+            );
+            return;
+          }
+          if (patch) await vault.configureDreaming(patch);
           const [lastEntry] = await vault.dreamDiary(1);
+          const settings = vault.dreamSettings();
           const status = {
             ...vault.dreamConfig(),
+            settings,
             lastDreamAt: vault.lastDreamAt,
             nextDreamAt: null,
             inFlight: null,
@@ -859,8 +984,13 @@ export function buildProgram(ctx: Ctx): Command {
             ...(lastEntry ? { lastEntry } : {}),
           };
           if (g.json) return printJson(ctx, status);
+          const off = Object.entries(settings.phases)
+            .filter(([, on]) => !on)
+            .map(([k]) => k);
           ctx.out(
-            `dreaming ${status.enabled ? pc.green("on") : pc.yellow("off")} — last dream ` +
+            `dreaming ${status.enabled ? pc.green("on") : pc.yellow("off")} — mode ${settings.mode}, ` +
+              `every ${settings.cadenceHours}h${settings.runHourUtc === null ? "" : ` at ${settings.runHourUtc}:00 UTC`}` +
+              `${off.length > 0 ? `, off: ${off.join(", ")}` : ""}; last dream ` +
               `${status.lastDreamAt ?? "never"}; no LLM provider locally (light phase only)\n`,
           );
           if (lastEntry) ctx.out(`\n${lastEntry.markdown}`);

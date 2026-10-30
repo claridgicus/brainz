@@ -20,8 +20,10 @@ import {
 } from "./domain.js";
 import {
   createTaskInputSchema,
+  dreamDiaryEntrySchema,
   dreamKillSwitchSchema,
   dreamSpendSchema,
+  dreamStatusOutputSchema,
   getContextInputSchema,
   getRelatedOutputSchema,
   listConceptsOutputSchema,
@@ -292,6 +294,23 @@ export const accountDreamingSchema = z
   })
   .strict();
 export type AccountDreaming = z.infer<typeof accountDreamingSchema>;
+
+// ------------------------------------------------ vault dreaming (settings)
+
+/** GET/PATCH /api/vaults/:vaultId/dreaming — the vault's dream status (incl. settings) + newest diary entries. */
+export const vaultDreamingSchema = z
+  .object({
+    status: dreamStatusOutputSchema,
+    entries: z.array(dreamDiaryEntrySchema),
+  })
+  .strict();
+export type VaultDreaming = z.infer<typeof vaultDreamingSchema>;
+
+/** POST /api/vaults/:vaultId/dreaming/:dreamId/apply — approve these proposals (omit ⇒ all, [] ⇒ reject all). */
+export const dreamApplyRequestSchema = z
+  .object({ proposals: z.array(z.number().int().min(0)).max(200).optional() })
+  .strict();
+export type DreamApplyRequest = z.infer<typeof dreamApplyRequestSchema>;
 
 // ----------------------------------------------------- search/related/context
 
