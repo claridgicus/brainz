@@ -2683,6 +2683,20 @@ async function main() {
       `status ${approve.status} → ${approveLocation.origin}${approveLocation.pathname} — ${approve.status === 303 ? "" : (await approve.text()).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 700)}`,
     );
 
+    // A double-clicked Allow: the same authorize request approved again before
+    // the exchange gets the SAME code back, never a second one.
+    const approveDup = await fetch(`${BASE}/oauth/authorize?/approve`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", origin: BASE, cookie: cookieHeader(reviewerJar) },
+      body: consentForm.toString(),
+    });
+    step(
+      "a duplicate approve of the same request → 303 with the same code",
+      approveDup.status === 303 && new URL(approveDup.headers.get("location") ?? "http://x.invalid/").searchParams.get("code") === code,
+      `status ${approveDup.status}`,
+    );
+
     // Token exchange: form-encoded, NO Origin header (server-to-server).
     const tokenCall = (form) =>
       fetch(`${BASE}/oauth/token`, {
@@ -2703,12 +2717,29 @@ async function main() {
     const replay = await tokenCall({ grant_type: "authorization_code", code, code_verifier: verifier, redirect_uri: redirectUri, client_id: clientId });
     step("replaying the code → invalid_grant", replay.status === 400 && replay.json?.error === "invalid_grant", `status ${replay.status}`);
 
-    // The replay revoked that grant, so run the flow once more for a live one.
-    const approve2 = await fetch(`${BASE}/oauth/authorize?/approve`, {
+    // Once exchanged, approving that request again is a clean 409 with no
+    // redirect (resending the used code would be a replay).
+    const approveAfter = await fetch(`${BASE}/oauth/authorize?/approve`, {
       method: "POST",
       redirect: "manual",
       headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", origin: BASE, cookie: cookieHeader(reviewerJar) },
       body: consentForm.toString(),
+    });
+    step(
+      "approving an already-exchanged request → 409, no redirect",
+      approveAfter.status === 409 && !approveAfter.headers.get("location") && (await approveAfter.text()).includes("already approved"),
+      `status ${approveAfter.status}`,
+    );
+
+    // The replay revoked that grant, so run the flow once more (a new
+    // authorize request: new state) for a live one.
+    const consentForm2 = new URLSearchParams(consentForm);
+    consentForm2.set("state", "e2e-state-2");
+    const approve2 = await fetch(`${BASE}/oauth/authorize?/approve`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", origin: BASE, cookie: cookieHeader(reviewerJar) },
+      body: consentForm2.toString(),
     });
     const code2 = new URL(approve2.headers.get("location") ?? "http://x.invalid/").searchParams.get("code");
     const live = await tokenCall({ grant_type: "authorization_code", code: code2, code_verifier: verifier, redirect_uri: redirectUri, client_id: clientId });
@@ -2770,6 +2801,7 @@ async function main() {
     });
     step("reviewer creates a second vault → 201", secondVault.status === 201, `status ${secondVault.status}`);
     const multiForm = new URLSearchParams(authorizeQs);
+    multiForm.set("state", "e2e-state-multi");
     multiForm.append("vault_id", reviewerVaultId);
     multiForm.append("vault_id", secondVault.json?.id);
     const multiApprove = await fetch(`${BASE}/oauth/authorize?/approve`, {

@@ -12,12 +12,15 @@
  * - else `{status: "consent", client, redirectHost, loopback, vaults, params}`:
  *   the vault picker lists the user's member vaults with their role, as
  *   checkboxes plus "All my vaults, including ones I create or join later"
- *   (multi-vault grants, SPEC-CLOUD.md "Multi-vault grants").
+ *   (multi-vault grants, SPEC-CLOUD.md "Multi-vault grants"). With more
+ *   than 5 vaults the page adds search-and-select on top of the same
+ *   checkboxes (progressive enhancement).
  *
  * actions (same-origin form POSTs; the request params ride hidden inputs):
  * - approve: re-validate, check membership on every ticked vault (`vault_id`,
  *   repeatable) or take `all_vaults=on`, mint a single-use code, 303 to
- *   `redirect_uri?code&state&iss`.
+ *   `redirect_uri?code&state&iss`. Idempotent per authorize request: a
+ *   duplicate approve gets the same code back (409 once it was exchanged).
  * - createVault ("+ New vault"): create a vault owned by the user (shared
  *   $lib/server/vaults code path, same slug rules as POST /api/vaults), then
  *   303 back here with `tick=<new id>` (plus the earlier ticks) so it is
@@ -30,7 +33,9 @@ import { asc, eq } from "drizzle-orm";
 import type { Actions, PageServerLoad, RequestEvent } from "./$types";
 import { HttpError, requirePlatform } from "$lib/server/api-util";
 import { createDb, schema } from "$lib/server/db";
+import { resolveSecret } from "$lib/server/auth";
 import {
+  AuthorizationAlreadyExchangedError,
   buildRedirect,
   createAuthorizationCode,
   isLoopbackHttp,
@@ -66,15 +71,15 @@ async function validate(event: RequestEvent, params: URLSearchParams): Promise<A
   );
 }
 
-/** The user's member vaults with their role, by name (the consent picker's rows). */
+/** The user's member vaults with their slug and role, by name (the consent picker's rows). */
 async function memberVaultsOf(d1: App.Platform["env"]["DB"], userId: string) {
   const rows = await createDb(d1)
-    .select({ id: schema.vault.id, name: schema.vault.name, role: schema.vaultMember.role })
+    .select({ id: schema.vault.id, name: schema.vault.name, slug: schema.vault.slug, role: schema.vaultMember.role })
     .from(schema.vaultMember)
     .innerJoin(schema.vault, eq(schema.vaultMember.vaultId, schema.vault.id))
     .where(eq(schema.vaultMember.userId, userId))
     .orderBy(asc(schema.vault.name));
-  return rows.map((v) => ({ id: v.id, name: v.name, role: v.role as VaultRole }));
+  return rows.map((v) => ({ id: v.id, name: v.name, slug: v.slug, role: v.role as VaultRole }));
 }
 
 export const load: PageServerLoad = async (event) => {
@@ -114,6 +119,10 @@ export const load: PageServerLoad = async (event) => {
     client: {
       name: request.client.displayName,
       selfAsserted: request.client.selfAsserted,
+      // A client-ID metadata document: `name` is the URL's host. Claude Code
+      // uses claude.ai's document with a loopback redirect, so "claude.ai" +
+      // localhost means a program on this computer, not the claude.ai website.
+      metadataDocument: request.client.kind !== "dcr",
     },
     redirectHost: redirect_.host,
     loopback: isLoopbackHttp(redirect_),
@@ -162,13 +171,22 @@ export const actions: Actions = {
     const anchorVaultId = ticked[0] ?? (all ? memberVaults[0]?.id : undefined);
     if (!anchorVaultId) return fail(400, { error: "Pick at least one vault." });
     const { request } = result;
-    const code = await createAuthorizationCode(platform.env.DB, {
-      request,
-      userId: user.id,
-      selection: { all, vaultIds: all ? [] : ticked },
-      anchorVaultId,
-      now: new Date(),
-    });
+    // Idempotent per authorize request: a double click or resubmit gets the
+    // same code (with the latest selection), never a second one.
+    let code: string;
+    try {
+      code = await createAuthorizationCode(platform.env.DB, {
+        request,
+        userId: user.id,
+        selection: { all, vaultIds: all ? [] : ticked },
+        anchorVaultId,
+        now: new Date(),
+        secret: resolveSecret(platform.env),
+      });
+    } catch (err) {
+      if (err instanceof AuthorizationAlreadyExchangedError) return fail(409, { error: err.message });
+      throw err;
+    }
     redirect(
       303,
       buildRedirect(request.redirectUri, {

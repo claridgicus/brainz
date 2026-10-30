@@ -310,6 +310,18 @@ lives in `src/lib/server/oauth.ts`, `src/routes/oauth/**` and
   `160.79.104.0/21`. Anthropic fetches discovery, registration and tokens
   from it, with a 10 s timeout.
 
+## Migration 0015: one authorization code per authorize request
+
+0015 adds two nullable columns to `oauth_code` (`request_key`, `code_nonce`)
+and a unique index on `request_key`, so a double-clicked Allow gets the same
+code instead of a second one (SPEC-CLOUD.md "Authorization"). It is additive:
+existing rows keep NULL and never conflict. Apply it **before** deploying the
+code that writes the columns (`npm run db:migrate:remote`, then
+`npm run deploy`); the old code ignores them. Codes are derived from
+`BETTER_AUTH_SECRET`; rotating it only affects a duplicate Allow for a request
+approved in the 5 minutes before the rotation (that duplicate's code won't
+exchange; reconnecting works).
+
 ## Migrations 0013–0014: multi-vault OAuth grants (deploy runbook)
 
 0013 adds `oauth_grant_vault` (backfilled one row per existing grant) and

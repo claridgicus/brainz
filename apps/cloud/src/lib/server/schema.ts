@@ -359,29 +359,41 @@ export const oauthClient = sqliteTable("oauth_client", {
  * (`used_at`). `grant_id` records the grant the exchange produced so a replayed
  * code can revoke it. `client_id` is not a foreign key (CIMD clients are URLs).
  */
-export const oauthCode = sqliteTable("oauth_code", {
-  codeHash: text("code_hash").primaryKey(),
-  clientId: text("client_id").notNull(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-  vaultId: text("vault_id")
-    .notNull()
-    .references(() => vault.id, { onDelete: "cascade" }),
-  redirectUri: text("redirect_uri").notNull(),
-  /** 1 when the authorize request carried redirect_uri, so the token request must repeat it. */
-  redirectUriExplicit: integer("redirect_uri_explicit", { mode: "boolean" }).notNull().default(true),
-  codeChallenge: text("code_challenge").notNull(),
-  scope: text("scope").notNull(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
-  usedAt: integer("used_at", { mode: "timestamp_ms" }),
-  grantId: text("grant_id"),
-  /** The grant's vault scope: "single" | "selected" | "all" (see oauthGrant.vaultScope). */
-  vaultScope: text("vault_scope").notNull().default("single"),
-  /** JSON array of the ticked vault ids ("single"/"selected"); null for "all". `vault_id` is the first. */
-  vaultIds: text("vault_ids"),
-});
+export const oauthCode = sqliteTable(
+  "oauth_code",
+  {
+    codeHash: text("code_hash").primaryKey(),
+    clientId: text("client_id").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    vaultId: text("vault_id")
+      .notNull()
+      .references(() => vault.id, { onDelete: "cascade" }),
+    redirectUri: text("redirect_uri").notNull(),
+    /** 1 when the authorize request carried redirect_uri, so the token request must repeat it. */
+    redirectUriExplicit: integer("redirect_uri_explicit", { mode: "boolean" }).notNull().default(true),
+    codeChallenge: text("code_challenge").notNull(),
+    scope: text("scope").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+    usedAt: integer("used_at", { mode: "timestamp_ms" }),
+    grantId: text("grant_id"),
+    /** The grant's vault scope: "single" | "selected" | "all" (see oauthGrant.vaultScope). */
+    vaultScope: text("vault_scope").notNull().default("single"),
+    /** JSON array of the ticked vault ids ("single"/"selected"); null for "all". `vault_id` is the first. */
+    vaultIds: text("vault_ids"),
+    /**
+     * SHA-256 of the authorize request (user, client, redirect, PKCE challenge,
+     * state): one code per request, so a duplicate Approve gets the same code.
+     * Null on codes minted before migration 0015.
+     */
+    requestKey: text("request_key"),
+    /** The code is HMAC(secret, nonce); kept so a duplicate Approve can re-derive it. */
+    codeNonce: text("code_nonce"),
+  },
+  (t) => [uniqueIndex("oauth_code_request_key").on(t.requestKey)],
+);
 
 /**
  * One consented grant = one user × one client × a vault set. Revoking it kills

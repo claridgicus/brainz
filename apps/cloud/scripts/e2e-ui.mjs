@@ -8,11 +8,17 @@
  * (session cookie) → empty dashboard → create vault + concepts via REST →
  * dashboard lists the vault → /v/[slug] SSR carries vault name, stats and
  * concept inventory (keyword-only badge asserted — no Workers AI locally) →
- * settings SSR shows keys/MCP/danger zone → unknown slug 404s.
+ * settings SSR shows keys/MCP/danger zone → unknown slug 404s → the OAuth
+ * consent page with more than 5 vaults (search-and-select markup, "+ New
+ * vault" above Allow, a duplicate approve getting the same code). When
+ * `agent-browser` is on PATH (E2E_UI_BROWSER=0 skips it) a real browser also
+ * drives the consent search, chips and a double-clicked Allow, which must
+ * reach the client's callback exactly once.
  *
  * Run: node scripts/e2e-ui.mjs   (set E2E_UI_SKIP_BUILD=1 to reuse a build)
  */
 import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { readFileSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -101,6 +107,171 @@ async function waitForReady(proc) {
     await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error("wrangler dev did not become ready within 60s");
+}
+
+// ------------------------------------------------------------------ consent
+
+/** A loopback "client" that records every OAuth callback it receives. */
+async function callbackServer() {
+  const hits = [];
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, "http://127.0.0.1");
+    // Only the OAuth callback counts (the browser also asks for /favicon.ico).
+    if (url.pathname === "/callback") hits.push(url);
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("callback received");
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { hits, port: server.address().port, close: () => server.close() };
+}
+
+function agentBrowser(args) {
+  const res = spawnSync("agent-browser", ["--session", "brainz-e2e-ui", ...args], { encoding: "utf8" });
+  if (res.status !== 0) throw new Error(`agent-browser ${args[0]} failed: ${res.stderr || res.stdout}`);
+  return res.stdout.trim();
+}
+
+function hasAgentBrowser() {
+  if (process.env.E2E_UI_BROWSER === "0") return false;
+  return spawnSync("agent-browser", ["--version"], { encoding: "utf8" }).status === 0;
+}
+
+async function consentJourney() {
+  // Six more vaults (seven in all) puts the consent page in search mode.
+  for (let i = 1; i <= 6; i++) {
+    await api("POST", "/api/vaults", { body: { name: `Consent ${i}`, slug: `consent-${i}` } });
+  }
+  const listed = (await api("GET", "/api/vaults")).json?.vaults ?? [];
+  step("seeded 7 vaults for the consent picker", listed.length === 7, `${listed.length} vaults`);
+  const byslug = Object.fromEntries(listed.map((v) => [v.slug, v.id]));
+
+  const reg = await api("POST", "/oauth/register", {
+    cookie: false,
+    body: { client_name: "E2E UI app", redirect_uris: ["http://127.0.0.1/callback"], token_endpoint_auth_method: "none" },
+  });
+  step("DCR registers a loopback client → 201", reg.status === 201, `status ${reg.status}`);
+  const clientId = reg.json?.client_id;
+  const callbacks = await callbackServer();
+  const verifier = `ui-verifier-${crypto.randomUUID()}-${crypto.randomUUID()}`;
+  const challenge = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))).toString("base64url");
+  const redirectUri = `http://127.0.0.1:${callbacks.port}/callback`;
+  const authorizeQs = (state) =>
+    new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      state,
+      scope: "vault",
+    });
+
+  try {
+    const consent = await page(`/oauth/authorize?${authorizeQs("ui-http")}`);
+    const html = consent.html;
+    step("consent page → 200", consent.status === 200, `status ${consent.status}`);
+    step(
+      "more than 5 vaults: search-and-select over the checkboxes (search hidden until hydrated)",
+      html.includes('data-picker="search"') && /<div class="search[^"]*"[^>]*hidden/.test(html) &&
+        html.includes('id="vault-search"') && (html.match(/name="vault_id"/g) ?? []).length === 7,
+      `${(html.match(/name="vault_id"/g) ?? []).length} vault checkboxes`,
+    );
+    step("scope copy reflects multi-select", html.includes("the vaults you pick") && !html.includes("the vault you pick"));
+    const iPicker = html.indexOf('id="vault-options"');
+    const iNew = html.indexOf('action="?/createVault"');
+    const iAllow = html.indexOf('form="consent-approve"');
+    const iCancel = html.indexOf('action="?/deny"');
+    step(
+      "order: picker, + New vault, Allow access, Cancel",
+      iPicker > 0 && iPicker < iNew && iNew < iAllow && iAllow < iCancel,
+      `${iPicker} < ${iNew} < ${iAllow} < ${iCancel}`,
+    );
+    step("+ New vault input uses the design-system input", /<input[^>]*id="new-vault-name"[^>]*class="input/.test(html) || /<input[^>]*class="input[^"]*"[^>]*id="new-vault-name"/.test(html));
+
+    // Server-side idempotency: two concurrent approves of one request, with
+    // different selections, both 303 with ONE code.
+    const approve = (state, ids) => {
+      const form = authorizeQs(state);
+      for (const id of ids) form.append("vault_id", id);
+      return fetch(`${BASE}/oauth/authorize?/approve`, {
+        method: "POST",
+        redirect: "manual",
+        headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", origin: BASE, cookie: cookieHeader() },
+        body: form.toString(),
+      });
+    };
+    const [a, b] = await Promise.all([approve("ui-http", [byslug["consent-1"]]), approve("ui-http", [byslug["consent-1"], byslug["consent-2"]])]);
+    const codeOf = (r) => new URL(r.headers.get("location") ?? "http://x.invalid/").searchParams.get("code");
+    step(
+      "two concurrent approves of one request → the same code",
+      a.status === 303 && b.status === 303 && Boolean(codeOf(a)) && codeOf(a) === codeOf(b),
+      `${a.status}/${b.status}`,
+    );
+
+    if (!hasAgentBrowser()) {
+      console.log("  [SKIP] browser consent checks (agent-browser not on PATH, or E2E_UI_BROWSER=0)");
+      return;
+    }
+    const base = new URL(BASE);
+    for (const [name, value] of jar) agentBrowser(["cookies", "set", name, value, "--url", `${base.origin}/`]);
+    agentBrowser(["set", "viewport", "480", "1100"]);
+    agentBrowser(["open", `${BASE}/oauth/authorize?${authorizeQs("ui-browser")}`]);
+    // The search box is server-rendered hidden; it shows once the page hydrates.
+    agentBrowser(["wait", ".search:not([hidden]) #vault-search"]);
+    const visibleRows = () => Number(agentBrowser(["eval", `document.querySelectorAll("#vault-options .vault:not([hidden])").length`]));
+    const chips = () => agentBrowser(["eval", `[...document.querySelectorAll(".chip")].map((c) => c.getAttribute("aria-label")).join("|")`]).replace(/^"|"$/g, "");
+    step("browser: the search box shows once hydrated", agentBrowser(["is", "visible", "#vault-search"]).includes("true"));
+    agentBrowser(["fill", "#vault-search", "consent-4"]);
+    step("browser: searching by slug narrows the list to one vault", visibleRows() === 1, `${visibleRows()} visible`);
+    agentBrowser(["press", "Enter"]);
+    step(
+      "browser: Enter ticks the match (chip added) without submitting",
+      chips().includes("Remove Consent 4") && callbacks.hits.length === 0,
+      chips(),
+    );
+    step("browser: the search clears after picking", visibleRows() === 7, `${visibleRows()} visible`);
+    agentBrowser(["click", '[aria-label="Remove Consent 1"]']);
+    step("browser: a chip's remove button unticks that vault", chips() === "Remove Consent 4", chips());
+    agentBrowser(["check", 'input[name="all_vaults"]']);
+    step(
+      "browser: 'All my vaults' disables the picker and says so",
+      agentBrowser(["is", "enabled", "#vault-search"]).includes("false") &&
+        agentBrowser(["get", "text", "#vault-picker-status"]).includes("picking single vaults is off"),
+    );
+    agentBrowser(["uncheck", 'input[name="all_vaults"]']);
+    if (process.env.E2E_UI_SCREENSHOT) agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT]);
+
+    // A double-clicked Allow reaches the client once, with the picked vault.
+    // Count the submits the browser actually sends (not cancelled by the
+    // page's guard). A window listener runs after the form's own handler; the
+    // count lives in this origin's localStorage, so it outlives the redirect.
+    agentBrowser([
+      "eval",
+      `localStorage.setItem("e2eSubmits", "0"); addEventListener("submit", (e) => { if (!e.defaultPrevented) localStorage.setItem("e2eSubmits", String(Number(localStorage.getItem("e2eSubmits")) + 1)); }); 1`,
+    ]);
+    agentBrowser(["dblclick", 'button[form="consent-approve"]']);
+    const deadline = Date.now() + 10_000;
+    while (callbacks.hits.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 1500));
+    step(
+      "browser: a double-clicked Allow reaches the callback exactly once",
+      callbacks.hits.length === 1,
+      callbacks.hits.map((u) => u.pathname + u.search.slice(0, 20)).join(" | "),
+    );
+    agentBrowser(["open", `${BASE}/`]);
+    const sent = agentBrowser(["eval", `localStorage.getItem("e2eSubmits")`]).replace(/"/g, "");
+    step("browser: the double click submitted the approve form once", sent === "1", `${sent} submit(s) sent`);
+    const code = callbacks.hits[0]?.searchParams.get("code");
+    const token = await fetch(`${BASE}/oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "authorization_code", code: code ?? "", code_verifier: verifier, redirect_uri: redirectUri, client_id: clientId }).toString(),
+    });
+    step("browser: that code exchanges for tokens", token.status === 200, `status ${token.status}`);
+  } finally {
+    callbacks.close();
+    if (hasAgentBrowser()) spawnSync("agent-browser", ["--session", "brainz-e2e-ui", "close"]);
+  }
 }
 
 // ----------------------------------------------------------------------- go
@@ -374,6 +545,10 @@ async function main() {
       dashB.status === 200 && !dashBHtml.includes("UI Vault"),
       `status ${dashB.status}`,
     );
+
+    // 12. OAuth consent with more than 5 vaults: search-and-select, "+ New
+    // vault" above Allow, and a single submit (SPEC-CLOUD.md "Authorization").
+    await consentJourney();
   } catch (err) {
     step("journey completed without exceptions", false, err instanceof Error ? err.message : String(err));
     if (devLog) console.error("\n---- wrangler dev log (tail) ----\n" + devLog.slice(-4000));

@@ -9,9 +9,11 @@ import {
 } from "@brainz/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { Db } from "./db";
+import { hashApiKey as sha256Hex } from "./api-keys";
 import { applyMigration, fakeD1, seedOwner } from "./fake-d1.testutil";
 import { membersDbFrom } from "./members";
 import {
+  AuthorizationAlreadyExchangedError,
   authorizationServerMetadata,
   callsGatedTool,
   createAuthorizationCode,
@@ -37,12 +39,15 @@ import {
   registerClient,
   memberRemovalStatements,
   prepareGrantsForVaultDelete,
+  randomToken,
   resolveAccessToken,
   s256,
   validateAuthorizeRequest,
   wwwAuthenticate,
+  type AuthorizeRequest,
   type FetchLike,
   type VaultSelection,
+  vaultScopeOf,
 } from "./oauth";
 
 const ISSUER = "https://brainz.example";
@@ -56,6 +61,42 @@ const SINGLE_V1 = { selection: { all: false, vaultIds: ["v1"] }, anchorVaultId: 
 const noFetch: FetchLike = async () => {
   throw new Error("unexpected fetch");
 };
+const SECRET = "test-oauth-secret";
+
+type MintArgs = { request: AuthorizeRequest; userId: string; selection: VaultSelection; anchorVaultId: string; now: Date };
+
+/**
+ * Mint a code for a FRESH authorize request (a new `state` each call; codes
+ * are idempotent per request). On a pre-0015 schema (the migration tests) it
+ * inserts the legacy row shape directly.
+ */
+async function mint(d1: ReturnType<typeof fakeD1>, args: MintArgs): Promise<string> {
+  const request = { ...args.request, state: crypto.randomUUID() };
+  const cols = d1.db.prepare(`PRAGMA table_info(oauth_code)`).all() as { name: string }[];
+  if (cols.some((c) => c.name === "request_key")) return createAuthorizationCode(d1, { ...args, request, secret: SECRET });
+  const code = randomToken("", 43);
+  const scope = vaultScopeOf(args.selection);
+  d1.db
+    .prepare(
+      `INSERT INTO oauth_code (code_hash, client_id, user_id, vault_id, redirect_uri, redirect_uri_explicit, code_challenge, scope, created_at, expires_at, vault_scope, vault_ids)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      await sha256Hex(code),
+      request.client.clientId,
+      args.userId,
+      args.anchorVaultId,
+      request.redirectUri,
+      request.redirectUriExplicit ? 1 : 0,
+      request.codeChallenge,
+      request.scope,
+      args.now.getTime(),
+      args.now.getTime() + 5 * 60 * 1000,
+      scope,
+      scope === "all" ? null : JSON.stringify(args.selection.vaultIds),
+    );
+  return code;
+}
 
 function setup() {
   const d1 = fakeD1();
@@ -97,7 +138,7 @@ async function connect(
   );
   const v = await validateAuthorizeRequest(d1, await authorizeParams(client.client_id), ISSUER, noFetch);
   if (!v.ok) throw new Error("authorize failed");
-  const code = await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...vaults, now });
+  const code = await mint(d1, { request: v.request, userId: "u1", ...vaults, now });
   const res = await handleTokenRequest(
     { db: d1, now, fetchImpl: noFetch },
     { grant_type: "authorization_code", code, code_verifier: VERIFIER, redirect_uri: CLAUDE_CALLBACK, client_id: client.client_id },
@@ -560,7 +601,7 @@ describe("token endpoint", () => {
     const other = await registerClient(d1, { redirect_uris: [CLAUDE_CALLBACK], token_endpoint_auth_method: "none" }, now);
     const v = await validateAuthorizeRequest(d1, await authorizeParams(client.client_id), ISSUER, noFetch);
     if (!v.ok) throw new Error("authorize failed");
-    const freshCode = () => createAuthorizationCode(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
+    const freshCode = () => mint(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
     const deps = { db: d1, now, fetchImpl: noFetch };
     const base = {
       grant_type: "authorization_code",
@@ -602,7 +643,7 @@ describe("token endpoint", () => {
     params.delete("redirect_uri");
     const v = await validateAuthorizeRequest(d1, params, ISSUER, noFetch);
     if (!v.ok) throw new Error("authorize failed");
-    const code = await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
+    const code = await mint(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
     const res = await handleTokenRequest(
       { db: d1, now, fetchImpl: noFetch },
       { grant_type: "authorization_code", code, code_verifier: VERIFIER, client_id: client.client_id },
@@ -821,7 +862,7 @@ describe("token endpoint", () => {
     const v = await validateAuthorizeRequest(d1, await authorizeParams(client.client_id), ISSUER, noFetch);
     if (!v.ok) throw new Error("authorize failed");
     const deps = { db: d1, now, fetchImpl: noFetch };
-    const code = await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
+    const code = await mint(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
     const form = {
       grant_type: "authorization_code",
       code,
@@ -843,7 +884,7 @@ describe("token endpoint", () => {
       `Basic ${btoa(`${client.client_id}:${client.client_secret}`)}`,
     );
     expect(basic.status).toBe(200);
-    const code2 = await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
+    const code2 = await mint(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
     const post = await handleTokenRequest(deps, { ...form, code: code2, client_secret: client.client_secret! }, null);
     expect(post.status).toBe(200);
   });
@@ -996,6 +1037,94 @@ describe("multi-vault grants", () => {
     d1.db.prepare(`DELETE FROM vault WHERE id = ?`).run(vaultId);
   };
 
+  describe("approve is idempotent per authorize request (double submit)", () => {
+    async function request(d1: ReturnType<typeof fakeD1>, now: Date, state = "st-1") {
+      const client = await registerClient(d1, { redirect_uris: [CLAUDE_CALLBACK], token_endpoint_auth_method: "none" }, now);
+      const v = await validateAuthorizeRequest(d1, await authorizeParams(client.client_id, { state }), ISSUER, noFetch);
+      if (!v.ok) throw new Error("authorize failed");
+      return { client, request: v.request };
+    }
+    const approve = (d1: ReturnType<typeof fakeD1>, req: AuthorizeRequest, vaults: ReturnType<typeof pick>, now: Date) =>
+      createAuthorizationCode(d1, { request: req, userId: "u1", ...vaults, now, secret: SECRET });
+    const exchange = (d1: ReturnType<typeof fakeD1>, clientId: string, code: string, now: Date) =>
+      handleTokenRequest(
+        { db: d1, now, fetchImpl: noFetch },
+        { grant_type: "authorization_code", code, code_verifier: VERIFIER, redirect_uri: CLAUDE_CALLBACK, client_id: clientId },
+        null,
+      );
+    const codeRows = (d1: ReturnType<typeof fakeD1>) => (d1.db.prepare(`SELECT COUNT(*) AS n FROM oauth_code`).get() as { n: number }).n;
+
+    it("a second approve returns the SAME code, with the latest selection, and mints no second row", async () => {
+      const d1 = multiSetup();
+      const now = new Date();
+      const { client, request: req } = await request(d1, now);
+      // The live bug: a single-vault click, then a two-vault click, minted two codes.
+      const first = await approve(d1, req, pick("v1"), now);
+      const second = await approve(d1, req, pick("v1", "v3"), now);
+      expect(second).toBe(first);
+      expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(codeRows(d1)).toBe(1);
+      const res = await exchange(d1, client.client_id, first, now);
+      expect(res.status).toBe(200);
+      expect(await ids(d1, (res.body as OAuthTokenResponse).access_token)).toEqual(["v1:owner", "v3:owner"]);
+    });
+
+    it("concurrent approves all get one code", async () => {
+      const d1 = multiSetup();
+      const now = new Date();
+      const { request: req } = await request(d1, now);
+      const codes = await Promise.all([1, 2, 3].map(() => approve(d1, req, pick("v1", "v3"), now)));
+      expect(new Set(codes).size).toBe(1);
+      expect(codeRows(d1)).toBe(1);
+    });
+
+    it("after the exchange a duplicate approve is rejected cleanly and the grant survives (no replay)", async () => {
+      const d1 = multiSetup();
+      const now = new Date();
+      const { client, request: req } = await request(d1, now);
+      const code = await approve(d1, req, pick("v1", "v3"), now);
+      const res = await exchange(d1, client.client_id, code, now);
+      const token = (res.body as OAuthTokenResponse).access_token;
+      await expect(approve(d1, req, pick("v1"), now)).rejects.toBeInstanceOf(AuthorizationAlreadyExchangedError);
+      expect(codeRows(d1)).toBe(1);
+      expect(await ids(d1, token)).toEqual(["v1:owner", "v3:owner"]);
+    });
+
+    it("a different authorize request (new state or PKCE challenge, or another user) gets its own code", async () => {
+      const d1 = multiSetup();
+      const now = new Date();
+      const { request: req } = await request(d1, now);
+      const code = await approve(d1, req, pick("v1"), now);
+      expect(await approve(d1, { ...req, state: "st-2" }, pick("v1"), now)).not.toBe(code);
+      expect(await approve(d1, { ...req, codeChallenge: await s256("w".repeat(43)) }, pick("v1"), now)).not.toBe(code);
+      const otherUser = await createAuthorizationCode(d1, { request: req, userId: "u2", ...pick("v2"), now, secret: SECRET });
+      expect(otherUser).not.toBe(code);
+      expect(codeRows(d1)).toBe(4);
+    });
+
+    it("an expired, never-exchanged code for the same request is replaced, and the old one stays dead", async () => {
+      const d1 = multiSetup();
+      const t0 = new Date();
+      const { client, request: req } = await request(d1, t0);
+      const old = await approve(d1, req, pick("v1"), t0);
+      const later = new Date(t0.getTime() + 6 * 60 * 1000);
+      const fresh = await approve(d1, req, pick("v1"), later);
+      expect(fresh).not.toBe(old);
+      expect(codeRows(d1)).toBe(1);
+      expect((await exchange(d1, client.client_id, old, later)).body).toMatchObject({ error: "invalid_grant" });
+      expect((await exchange(d1, client.client_id, fresh, later)).status).toBe(200);
+    });
+
+    it("the code depends on the server secret", async () => {
+      const d1 = multiSetup();
+      const now = new Date();
+      const { request: req } = await request(d1, now);
+      const code = await approve(d1, req, pick("v1"), now);
+      const other = await createAuthorizationCode(d1, { request: req, userId: "u1", ...pick("v1"), now, secret: "another" });
+      expect(other).not.toBe(code);
+    });
+  });
+
   it("a grant over two ticked vaults covers both, by name, with each current role", async () => {
     const d1 = multiSetup();
     const { tokens } = await connect(d1, new Date(), pick("v2", "v1"));
@@ -1077,14 +1206,14 @@ describe("multi-vault grants", () => {
     const v = await validateAuthorizeRequest(d1, await authorizeParams(client.client_id), ISSUER, noFetch);
     if (!v.ok) throw new Error("authorize failed");
     const exchange = async (vaults: ReturnType<typeof pick>) => {
-      const code = await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...vaults, now });
+      const code = await mint(d1, { request: v.request, userId: "u1", ...vaults, now });
       return handleTokenRequest(
         { db: d1, now, fetchImpl: noFetch },
         { grant_type: "authorization_code", code, code_verifier: VERIFIER, redirect_uri: CLAUDE_CALLBACK, client_id: client.client_id },
         null,
       );
     };
-    const twoCode = await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...pick("v2", "v3"), now });
+    const twoCode = await mint(d1, { request: v.request, userId: "u1", ...pick("v2", "v3"), now });
     d1.db.prepare(`DELETE FROM vault_member WHERE vault_id = 'v2' AND user_id = 'u1'`).run();
     const ok = await handleTokenRequest(
       { db: d1, now, fetchImpl: noFetch },
@@ -1239,7 +1368,7 @@ describe("migration 0014 (nullable oauth_grant anchor) preserves live login data
     await handleRevokeRequest({ db: d1, now, fetchImpl: noFetch }, { token: revoked.tokens.access_token, client_id: revoked.client.client_id }, null);
     const v = await validateAuthorizeRequest(d1, await authorizeParams(revoked.client.client_id), ISSUER, noFetch);
     if (!v.ok) throw new Error("authorize failed");
-    await createAuthorizationCode(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
+    await mint(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
     return d1;
   }
 
@@ -1298,5 +1427,34 @@ describe("migration 0014 (nullable oauth_grant anchor) preserves live login data
     expect(counts(d1)).toEqual(before.counts);
     expect(dump(d1)).toEqual(before.rows);
     expect((d1.db.prepare(`PRAGMA table_info(oauth_grant)`).all() as { name: string; notnull: number }[]).find((c) => c.name === "vault_id")?.notnull).toBe(1);
+  });
+});
+
+describe("migration 0015 (oauth_code request_key)", () => {
+  it("keeps a code minted before it exchangeable, adds nullable columns and a unique index", async () => {
+    const d1 = fakeD1({ through: 14 });
+    seedOwner(d1, "u1", "v1");
+    addMember(d1, "v1", "u1", "owner");
+    const now = new Date();
+    const client = await registerClient(d1, { redirect_uris: [CLAUDE_CALLBACK], token_endpoint_auth_method: "none" }, now);
+    const v = await validateAuthorizeRequest(d1, await authorizeParams(client.client_id), ISSUER, noFetch);
+    if (!v.ok) throw new Error("authorize failed");
+    const legacy = await mint(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
+    const second = await mint(d1, { request: v.request, userId: "u1", ...SINGLE_V1, now });
+    applyMigration(d1, 15);
+    expect(d1.db.prepare(`SELECT request_key, code_nonce FROM oauth_code`).all()).toEqual([
+      { request_key: null, code_nonce: null },
+      { request_key: null, code_nonce: null },
+    ]);
+    const indexes = d1.db.prepare(`PRAGMA index_list(oauth_code)`).all() as { name: string; unique: number }[];
+    expect(indexes.find((i) => i.name === "oauth_code_request_key")?.unique).toBe(1);
+    for (const code of [legacy, second]) {
+      const res = await handleTokenRequest(
+        { db: d1, now, fetchImpl: noFetch },
+        { grant_type: "authorization_code", code, code_verifier: VERIFIER, redirect_uri: CLAUDE_CALLBACK, client_id: client.client_id },
+        null,
+      );
+      expect(res.status).toBe(200);
+    }
   });
 });

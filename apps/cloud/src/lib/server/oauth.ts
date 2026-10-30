@@ -754,9 +754,45 @@ export function vaultScopeOf(selection: VaultSelection): VaultScope {
 }
 
 /**
+ * A second Approve for an authorize request whose code the client already
+ * exchanged. The consent page renders it as an error and never redirects:
+ * sending the used code again would be a replay, which revokes the grant.
+ */
+export class AuthorizationAlreadyExchangedError extends Error {
+  constructor() {
+    super("This connection was already approved and completed. Go back to the app.");
+    this.name = "AuthorizationAlreadyExchangedError";
+  }
+}
+
+/**
+ * The code for a stored nonce: BASE64URL(HMAC-SHA256(secret, nonce)), 43
+ * chars. Only its SHA-256 is stored, so a database read alone can't rebuild a
+ * live code, but the server can hand the same code to a duplicate Approve.
+ */
+async function codeFromNonce(secret: string, nonce: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`oauth-code:${nonce}`)));
+  return btoa(String.fromCharCode(...mac)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
  * Mint a single-use authorization code bound to client, redirect, PKCE, user
  * and the vault selection. `anchorVaultId` fills the NOT NULL `vault_id`
  * column: the first ticked vault, or for "all" any vault the user is in.
+ *
+ * Idempotent per authorize request (user × client × redirect × PKCE challenge
+ * × state, the unique `request_key`): a duplicate Approve (a double click, a
+ * resubmitted form) gets the SAME code back, carrying the latest selection,
+ * never a second code. Once the client has exchanged it, a duplicate throws
+ * AuthorizationAlreadyExchangedError. An expired, unused code for the same
+ * request is replaced by a fresh one.
  */
 export async function createAuthorizationCode(
   db: OAuthDb,
@@ -766,32 +802,77 @@ export async function createAuthorizationCode(
     selection: VaultSelection;
     anchorVaultId: string;
     now: Date;
+    /** Server secret the code is derived from (BETTER_AUTH_SECRET via resolveSecret). */
+    secret: string;
   },
 ): Promise<string> {
-  const code = randomToken("", 43);
-  const { request, now, selection } = args;
+  const { request, now, selection, secret } = args;
   const scope = vaultScopeOf(selection);
-  await db
-    .prepare(
-      `INSERT INTO oauth_code (code_hash, client_id, user_id, vault_id, redirect_uri, redirect_uri_explicit, code_challenge, scope, created_at, expires_at, vault_scope, vault_ids)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      await sha256Hex(code),
-      request.client.clientId,
-      args.userId,
-      args.anchorVaultId,
-      request.redirectUri,
-      request.redirectUriExplicit ? 1 : 0,
-      request.codeChallenge,
-      request.scope,
-      now.getTime(),
-      now.getTime() + AUTHORIZATION_CODE_TTL_SECONDS * 1000,
-      scope,
-      scope === "all" ? null : JSON.stringify(selection.vaultIds),
-    )
-    .run();
-  return code;
+  const vaultIds = scope === "all" ? null : JSON.stringify(selection.vaultIds);
+  const requestKey = await sha256Hex(
+    JSON.stringify([args.userId, request.client.clientId, request.redirectUri, request.codeChallenge, request.state ?? null]),
+  );
+  const t = now.getTime();
+  const expiresAt = t + AUTHORIZATION_CODE_TTL_SECONDS * 1000;
+  // Two passes cover a duplicate racing an exchange or the expiry purge.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const nonce = randomToken("", 43);
+    const code = await codeFromNonce(secret, nonce);
+    const inserted = await db
+      .prepare(
+        `INSERT INTO oauth_code (code_hash, client_id, user_id, vault_id, redirect_uri, redirect_uri_explicit, code_challenge, scope, created_at, expires_at, vault_scope, vault_ids, request_key, code_nonce)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(request_key) DO NOTHING RETURNING code_hash`,
+      )
+      .bind(
+        await sha256Hex(code),
+        request.client.clientId,
+        args.userId,
+        args.anchorVaultId,
+        request.redirectUri,
+        request.redirectUriExplicit ? 1 : 0,
+        request.codeChallenge,
+        request.scope,
+        t,
+        expiresAt,
+        scope,
+        vaultIds,
+        requestKey,
+        nonce,
+      )
+      .first();
+    if (inserted) return code;
+
+    // A duplicate Approve for the same request.
+    const existing = await db
+      .prepare(`SELECT code_nonce, used_at, expires_at FROM oauth_code WHERE request_key = ?`)
+      .bind(requestKey)
+      .first<{ code_nonce: string; used_at: number | null; expires_at: number }>();
+    if (!existing) continue;
+    if (existing.used_at !== null) throw new AuthorizationAlreadyExchangedError();
+    if (existing.expires_at > t) {
+      // Same code, latest selection (the last click is what the user sees).
+      const kept = await db
+        .prepare(
+          `UPDATE oauth_code SET vault_id = ?, vault_scope = ?, vault_ids = ?
+           WHERE request_key = ? AND used_at IS NULL AND expires_at > ? RETURNING code_hash`,
+        )
+        .bind(args.anchorVaultId, scope, vaultIds, requestKey, t)
+        .first();
+      if (kept) return codeFromNonce(secret, existing.code_nonce);
+      continue;
+    }
+    // Expired and never exchanged: replace it with a fresh code.
+    const replaced = await db
+      .prepare(
+        `UPDATE oauth_code SET code_hash = ?, code_nonce = ?, created_at = ?, expires_at = ?, vault_id = ?, vault_scope = ?, vault_ids = ?
+         WHERE request_key = ? AND used_at IS NULL AND expires_at <= ? RETURNING code_hash`,
+      )
+      .bind(await sha256Hex(code), nonce, t, expiresAt, args.anchorVaultId, scope, vaultIds, requestKey, t)
+      .first();
+    if (replaced) return code;
+  }
+  throw new Error("could not mint an authorization code");
 }
 
 // ---------------------------------------------------------------- token
