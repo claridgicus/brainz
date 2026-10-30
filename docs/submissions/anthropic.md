@@ -20,6 +20,64 @@ portal's **Test & launch** step.
 
 ---
 
+## Submitted / Published
+
+| | |
+|---|---|
+| Status | **Published**: live in the Claude Connectors Directory |
+| Submitted | 2026-10-29, from James's Claude account (Max plan). Passed the automated review and was **Approved** the same day |
+| Published | 2026-10-30. The portal shows "Published · Live in the directory" |
+| Listing | `brainz` (permanent slug). Public page: <https://claude.ai/directory/brainz>. Manage: <https://claude.ai/directory/manage/brainz>. The portal shows no other submission id. |
+| Public page check | Right after publishing, the public page still said "This connector doesn't exist". The portal notes that new listings "can take up to an hour to show in the directory". Re-check it. |
+| Escalations | directory@anthropic.com (listing changes, review decisions), mcp-review@anthropic.com |
+
+Screenshots (kept out of the repo): `~/.cache/orchestrate/anthropic-submission/review-before-submit-2026-10-29.jpg`
+(the full review step before submit, with no credentials on it) and `published-2026-10-30.jpg`.
+
+### What was entered, where it differs from the steps below
+
+- **Connection:** the portal now needs the server connected as a custom connector in the submitting
+  account, so it can read the tools ("Brainz", Sign in now, CIMD). It was connected to one of
+  James's vaults with one Allow click, and it stays in James's Settings → Connectors until he
+  removes it. The portal read 16 tools / 0 resources / OAuth. Its only notes were two non-blocking
+  "Reference the target API docs" suggestions (on `create_task` and `upsert_concept`), which don't
+  apply to a first-party server.
+- **Listing:** name `Brainz`, slug `brainz`, one-liner as in Step 3. In the description, the vault
+  paragraph was corrected for multi-vault consent: "You sign in with OAuth and pick the vaults to
+  share on the consent screen. The connection reaches only those vaults: owners and editors get
+  every tool, viewers get the read tools." The destructive sentence became "Read tools change
+  nothing, and tools that overwrite or delete data are marked destructive." (1,392 chars.)
+  Categories: Development tools, Productivity. Author: left blank, so it defaults to the company.
+  Icon: the portal takes a URL, not an upload, and the server URL's favicon resolves to the
+  Brownmatter mark, so a custom icon is set: the commit-pinned
+  `https://raw.githubusercontent.com/claridgicus/brainz/db2f61f…/docs/submissions/assets/brainz-tile-512.png`.
+  Docs `https://brownmatter.ai/docs`, support `support@brownmatter.ai`, privacy
+  `https://brownmatter.ai/privacy`.
+- **Use cases** (the portal allows three, each with one example prompt): brief a coding task
+  (`get_context` prompt), answer product questions and record decisions (search plus the PostHog
+  decision), work a shared task pile (list + take). Prerequisites as in Step 4. Read and write.
+- **Company:** `Brownmatter`, `https://brownmatter.ai` (James's choice). Primary contact James
+  Claridge, Founder. The submitted listing still has **james@plutocracy.io** as the primary
+  contact, because it was filled before James asked for support@brownmatter.ai everywhere.
+  Editing an approved listing would send it back to review, so the change is requested by email:
+  [anthropic-contact-change-email.md](anthropic-contact-change-email.md) (draft, not sent). The
+  public support contact is support@brownmatter.ai.
+- **Authentication:** Always required, OAuth with **Client ID Metadata Document**. The portal
+  detected "no sign-in" because anonymous `initialize` returns 200, so this was set by hand.
+- **Data handling:** we own the API; health data No; sponsored content No.
+- **Test & launch:** the Step 8 text with the credentials, plus "Have a reviewer password?" for the
+  sign-in link, "Allow access" for the consent button, and an instruction to tick ONE vault and
+  click Allow access ONCE (the double-submit consent fix was still in flight). "Self-tested" was
+  ticked with James's confirmation, after all 16 tools ran (see Evidence, 2026-10-29 MCP
+  Inspector).
+- **Compliance:** all seven acknowledgments were ticked with James's explicit confirmation. An
+  additional note explains CIMD + DCR, the lazy-auth 401, why the portal detects "no sign-in", and
+  that `signup`/`sign_in`/`claim`/`session_hook` are not on `/mcp` for OAuth connections.
+- The submit step showed one non-blocking advisory: the contact email's domain differs from the
+  signed-in account's.
+
+---
+
 ## Before you open the portal
 
 | # | Item | State | Tracking task |
@@ -27,7 +85,7 @@ portal's **Test & launch** step.
 | 1 | Setup docs for connecting from Claude on brownmatter.ai/docs ("required by your publish date") | **gap** | `docs-add-connect-from-claude-and-connect-from-chatgpt-setup-sections` |
 | 2 | No Cloudflare WAF/bot rule blocks `160.79.104.0/21` | **unknown** (operator check) | `james-confirm-no-cloudflare-waf-bot-rule-blocks-claude-or-chatgpt-on-brainz-brownmatter-ai` |
 | 3 | support@brownmatter.ai is monitored | **unknown** | `james-make-support-brownmatter-ai-a-monitored-inbox` |
-| 4 | Every tool run once from claude.ai as a custom connector (the portal asks you to confirm this) | **partial** (2026-10-29: claude.ai connect, consent, `vault_stats`, multi-vault `list_vaults` + required `vault`, and Claude Code passed live; the other tools only over curl. See Evidence) | `james-live-client-tests-claude-ai-claude-code-and-chatgpt-against-production` |
+| 4 | Every tool run once via MCP Inspector or as a custom connector (the portal asks you to confirm this) | **done** (2026-10-29: all 16 tools via MCP Inspector on the reviewer account; claude.ai and Claude Code connect + consent passed live. See Evidence) | `james-live-client-tests-claude-ai-claude-code-and-chatgpt-against-production` |
 | 5 | Privacy policy discloses OAuth connector data | **gap** (advised) | `privacy-policy-disclose-oauth-connector-data-needs-james-s-approval` |
 | 6 | Onboard/sync notices in tool results are neutral | **gap** (advised; reviewer vault unaffected) | `make-the-onboard-sync-notices-in-tool-results-neutral-on-directory-surfaces` |
 
@@ -274,6 +332,23 @@ the `brainz-test` server were removed afterwards.
 - **Duplicate consent submits (found live, fix in progress).** Allow was posted more than once per consent: 3 codes in the first flow and 2 in the second, a few seconds apart, each a separate `?/approve` POST. claude.ai exchanged the **first** code and dropped the rest. In the second flow the first code was `single` (only the pre-ticked vault) and the later code was `selected`, so the connection silently got one vault instead of two. A clean retry with one click gave the right `selected` grant. Nothing is broken (each code is single-use, and the unused ones expire after 5 minutes), but the consent should not mint a code per click.
 - **Claude Code.** **pass**. `claude mcp add --transport http --scope local brainz-test https://brainz.brownmatter.ai/mcp` → `claude mcp list` shows "✔ Connected" (anonymous handshake). A headless `claude -p` call to `vault_stats` returned `MCP server "brainz-test" needs you to sign in again (run /mcp to re-authenticate)`. In an interactive session, `/mcp` → Authenticate used CIMD `https://claude.ai/oauth/claude-code-client-metadata` with redirect `http://localhost:<port>/callback`. The consent page showed the loopback warning ("This app runs on your own computer…") and, per the CIMD rule, named the client by host ("claude.ai", not "Claude Code"). After Allow came "Authentication successful. Connected to brainz-test.", then `vault_stats` returned 232 concepts and 780 edges. Removed with `claude mcp remove brainz-test`.
 - **Not run:** every remaining tool from a Claude client. The task was stopped once the goal was clarified as the public directory listing, not a custom connector.
+
+## Evidence: every tool through MCP Inspector, 2026-10-29
+
+As the reviewer account, over a fresh OAuth grant (password sign-in, DCR, one vault, S256), with
+`@modelcontextprotocol/inspector@2.11.0 --cli --transport http`. The script is kept out of the
+repo, and it printed no secrets. `tools/list` returned 16 tools. All 16 were called once and every
+call returned ok: `vault_stats`, `search_concepts`, `get_concept`, `get_related`,
+`get_context`, `list_concepts`, `list_tasks`, `upsert_concept` (a self-test decision),
+`link_concepts`, `create_task`, `take_task`, `complete_task`, `onboard status`, `sync status`,
+`dream status`, and `delete_concept` (for both the decision and the task). Reading the deleted id
+back gave the actionable `isError`. Afterwards the vault was back to 31 concepts / 114 edges with
+the seeded task states (4 open, 1 taken, 1 done), so it needed no reseed, and the grant was
+revoked (200).
+
+Note: `dream status` reported dreaming **enabled** on the reviewer vault (24 h cadence). A nightly
+sweep could merge or tombstone seeded concepts while a review is in progress. Consider
+`dream {action:"configure", enabled:false}` on that vault, or re-run the seed after reviews.
 
 ## Screenshots
 
