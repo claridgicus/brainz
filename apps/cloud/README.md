@@ -389,6 +389,10 @@ workspace, `/v/[slug]/settings`), `src/lib/components/**`, `src/lib/api.ts`
 (typed REST client — every response parsed with `@brainz/contracts`),
 `src/lib/{markdown,graph-data,nav,auth-client}.ts`, `src/app.css`, and
 `scripts/e2e-ui.mjs` (`node scripts/e2e-ui.mjs`: boots wrangler dev and
-asserts the SSR'd auth/dashboard/workspace/settings journey). The root
+asserts the SSR'd auth/dashboard/workspace/settings journey). The graph
+workspace's LOD/cluster/bundling behaviour is checked against the standalone
+bench harness (`bench/graph`, synthetic vaults, headless Chrome):
+`npm run e2e:graph` (UI e2e) and `npm run perf:graph` (prints fps for
+500/2k/5k-concept vaults) — see SPEC-CLOUD "Graph workspace". The root
 `+layout.server.ts` exposes `data.user` / `data.session`; the auth client is
 `createAuthClient()` from `better-auth/svelte` (`src/lib/auth-client.ts`).
