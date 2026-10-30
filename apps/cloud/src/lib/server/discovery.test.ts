@@ -27,6 +27,8 @@ import {
   DIRECTORY_MCP_TOOL_NAMES,
   MCP_TOOL_NAMES,
   MULTI_VAULT_MCP_TOOL_NAMES,
+  OAUTH_MCP_TOOL_NAMES,
+  AGENT_KEY_MCP_TOOLS,
   PUBLIC_MCP_TOOL_NAMES,
 } from "@brainz/contracts";
 import { PRODUCTION_ORIGIN } from "./auth";
@@ -86,13 +88,16 @@ describe("MCP discovery documents", () => {
       apiKeyTools: string[];
       agentEndpoint: string;
       agentEndpointUnauthenticatedTools: string[];
+      agentEndpointApiKeyExtraTools: string[];
     };
-    expect(meta.oauthTools).toEqual([...DIRECTORY_MCP_TOOL_NAMES]);
+    expect(meta.oauthTools).toEqual([...DIRECTORY_MCP_TOOL_NAMES, ...OAUTH_MCP_TOOL_NAMES]);
     expect(meta.oauthMultiVaultExtraTools).toEqual([...MULTI_VAULT_MCP_TOOL_NAMES]);
     expect(meta.apiKeyTools).toEqual([...MCP_TOOL_NAMES, ...CLOUD_MCP_TOOL_NAMES]);
     // Agent self-signup (the in-chat API key) lives on /mcp/agent, never /mcp.
     expect(meta.agentEndpoint).toBe(`${PRODUCTION_ORIGIN}${AGENT_MCP_PATH}`);
     expect(meta.agentEndpointUnauthenticatedTools).toEqual([...PUBLIC_MCP_TOOL_NAMES]);
+    // create_vault returns a new bz_ key, so keys get it on /mcp/agent only.
+    expect(meta.agentEndpointApiKeyExtraTools).toEqual(AGENT_KEY_MCP_TOOLS.map((t) => t.name));
   });
 
   it("links the public privacy, terms and support pages directories require", () => {

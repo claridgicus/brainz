@@ -10,7 +10,7 @@ import { count, eq, inArray } from "drizzle-orm";
 import { guarded, parseBody, requirePlatform } from "$lib/server/api-util";
 import { createDb, schema } from "$lib/server/db";
 import { requireUser } from "$lib/server/vault-access";
-import { createVault } from "$lib/server/vaults";
+import { createVault, vaultLimitsFromEnv } from "$lib/server/vaults";
 
 function toWire(
   v: typeof schema.vault.$inferSelect,
@@ -59,6 +59,7 @@ export const GET = guarded(async (event) => {
 export const POST = guarded(async (event) => {
   const user = requireUser(event);
   const body = await parseBody(event, vaultCreateRequestSchema);
-  const vault = await createVault(createDb(requirePlatform(event).env.DB), user.id, body);
+  const { env } = requirePlatform(event);
+  const vault = await createVault(env.DB, user.id, body, { limits: vaultLimitsFromEnv(env) });
   return json(toWire(vault, "owner", 1), { status: 201 });
 });

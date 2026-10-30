@@ -17,6 +17,8 @@ BYOK_ENCRYPTION_KEY=dev-insecure-byok-key-change-me
 # Optional overrides (defaults live in wrangler.jsonc vars):
 # DREAM_DAILY_USD_PER_ACCOUNT=1
 # DREAMING_AI_DISABLED=workers-ai
+# MAX_VAULTS_PER_USER=20
+# VAULT_CREATE_RATE_LIMIT=10
 
 # Optional: OpenAI plugin-portal domain verification. The portal shows the token
 # at connect time; it is served verbatim at /.well-known/openai-apps-challenge

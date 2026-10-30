@@ -24,6 +24,9 @@ import {
   MCP_TOOL_NAMES,
   MULTI_VAULT_MCP_TOOLS,
   MULTI_VAULT_MCP_TOOL_NAMES,
+  AGENT_KEY_MCP_TOOLS,
+  OAUTH_MCP_TOOLS,
+  OAUTH_MCP_TOOL_NAMES,
   withVaultRoutingArg,
   PUBLIC_MCP_TOOLS,
   PUBLIC_MCP_TOOL_NAMES,
@@ -46,12 +49,13 @@ import {
   type CloudMcpToolName,
   type McpToolName,
   type MultiVaultMcpToolName,
+  type OAuthMcpToolName,
   type PublicMcpToolName,
 } from "../src/index.js";
 
 // ------------------------------------------------------- registry integrity
 
-type AnyToolName = McpToolName | PublicMcpToolName | CloudMcpToolName | MultiVaultMcpToolName;
+type AnyToolName = McpToolName | PublicMcpToolName | CloudMcpToolName | MultiVaultMcpToolName | OAuthMcpToolName;
 
 /** A realistic, minimal INPUT sample for every tool (authed + public + cloud). */
 const INPUT_SAMPLES: Record<AnyToolName, unknown> = {
@@ -82,6 +86,7 @@ const INPUT_SAMPLES: Record<AnyToolName, unknown> = {
   sign_in: { email: "human@example.com" },
   claim: { email: "human@example.com" },
   list_vaults: {},
+  create_vault: { name: "Side project", slug: "side-project" },
 };
 
 const META = {
@@ -188,10 +193,19 @@ const OUTPUT_SAMPLES: Record<AnyToolName, unknown> = {
     ],
     includesFutureVaults: false,
   },
+  create_vault: {
+    vault: { id: "v-3", slug: "side-project", name: "Side project" },
+    vaults: [
+      { id: "v-1", slug: "brainz", name: "Brainz", role: "owner", readOnly: false },
+      { id: "v-3", slug: "side-project", name: "Side project", role: "owner", readOnly: false },
+    ],
+    includesFutureVaults: false,
+    notice: "This connection now covers 2 vaults.",
+  },
 };
 
-describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOLS + MULTI_VAULT_MCP_TOOLS)", () => {
-  const allTools = [...MCP_TOOLS, ...PUBLIC_MCP_TOOLS, ...CLOUD_MCP_TOOLS, ...MULTI_VAULT_MCP_TOOLS];
+describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOLS + MULTI_VAULT_MCP_TOOLS + OAUTH_MCP_TOOLS)", () => {
+  const allTools = [...MCP_TOOLS, ...PUBLIC_MCP_TOOLS, ...CLOUD_MCP_TOOLS, ...MULTI_VAULT_MCP_TOOLS, ...OAUTH_MCP_TOOLS];
 
   it("names are unique across ALL registries combined", () => {
     const names = allTools.map((t) => t.name);
@@ -200,7 +214,8 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOL
       MCP_TOOL_NAMES.length +
         PUBLIC_MCP_TOOL_NAMES.length +
         CLOUD_MCP_TOOL_NAMES.length +
-        MULTI_VAULT_MCP_TOOL_NAMES.length,
+        MULTI_VAULT_MCP_TOOL_NAMES.length +
+        OAUTH_MCP_TOOL_NAMES.length,
     );
   });
 
@@ -231,6 +246,7 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOL
       signup: { email: "not-an-email" },
       sign_in: { email: "not-an-email" },
       claim: { email: "not-an-email" },
+      create_vault: { name: "" },
     };
     for (const tool of allTools) {
       const sample = bad[tool.name];
@@ -329,10 +345,23 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOL
       sign_in: [false, false, true],
       claim: [false, false, true],
       list_vaults: [true, false, false],
+      create_vault: [false, false, false],
     };
     for (const tool of allTools) expect(flags(tool.name), tool.name).toEqual(EXPECTED[tool.name]);
     // Every public-vault (viewer) tool is read-only.
     for (const n of PUBLIC_VAULT_READ_TOOL_NAMES) expect(hints[n].readOnlyHint, n).toBe(true);
+  });
+
+  it("create_vault: the bz_ key variant shares the OAuth entry's name, shapes and annotations", () => {
+    const [oauth] = OAUTH_MCP_TOOLS;
+    const [agent] = AGENT_KEY_MCP_TOOLS;
+    expect(agent.name).toBe(oauth.name);
+    expect(agent.inputSchema).toBe(oauth.inputSchema);
+    expect(agent.outputSchema).toBe(oauth.outputSchema);
+    expect(agent.annotations).toEqual(oauth.annotations);
+    // Only the key variant mentions a key (no API keys on the directory surface).
+    expect(oauth.description).not.toMatch(/api key/i);
+    expect(agent.description).toMatch(/API key/);
   });
 
   it("multi-vault routing: every vault tool's input + a required `vault` parses, and omitting it fails", () => {

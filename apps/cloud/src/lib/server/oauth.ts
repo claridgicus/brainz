@@ -1501,6 +1501,37 @@ export function memberRemovalStatements<S>(
   ];
 }
 
+/**
+ * The statements that add a vault the user just created over MCP
+ * (`create_vault`) to the grant of the connection that created it, for the
+ * SAME D1 batch as the vault insert ($lib/server/vaults createVault `also`).
+ * Each is guarded on the new vault existing, so a create refused by the
+ * limits changes no grant.
+ * - "single" becomes "selected", and its current vault gets an explicit join
+ *   row (a deploy-window grant may have none) next to the new one;
+ * - "selected" gains a join row;
+ * - "all" already covers every vault the user belongs to: no statement.
+ * Generic over the statement type, like memberRemovalStatements.
+ */
+export function grantAddVaultStatements<S>(
+  db: { prepare(query: string): { bind(...values: unknown[]): S } },
+  args: { grantId: string; vaultScope: VaultScope; coveredVaultIds: readonly string[]; newVaultId: string },
+): S[] {
+  const { grantId, vaultScope, coveredVaultIds, newVaultId } = args;
+  if (vaultScope === "all") return [];
+  const ifCreated = `WHERE EXISTS (SELECT 1 FROM vault WHERE id = ?)`;
+  return [
+    db
+      .prepare(`UPDATE oauth_grant SET vault_scope = 'selected' WHERE id = ? AND vault_scope = 'single' AND EXISTS (SELECT 1 FROM vault WHERE id = ?)`)
+      .bind(grantId, newVaultId),
+    ...[...new Set([...coveredVaultIds, newVaultId])].map((vaultId) =>
+      db
+        .prepare(`INSERT OR IGNORE INTO oauth_grant_vault (grant_id, vault_id) SELECT ?, ? ${ifCreated}`)
+        .bind(grantId, vaultId, newVaultId),
+    ),
+  ];
+}
+
 // ------------------------------------------------------ lazy-auth gate
 
 /**

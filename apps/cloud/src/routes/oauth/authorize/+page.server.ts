@@ -44,7 +44,7 @@ import {
   validateAuthorizeRequest,
   type AuthorizeValidation,
 } from "$lib/server/oauth";
-import { createVault } from "$lib/server/vaults";
+import { createVault, vaultLimitsFromEnv } from "$lib/server/vaults";
 
 /** Vault ids to pre-tick on the consent page (set by the "+ New vault" redirect). */
 const TICK_PARAM = "tick";
@@ -213,7 +213,8 @@ export const actions: Actions = {
     if (!parsed.success) return fail(400, { createError: "Give the new vault a name." });
     let vaultId: string;
     try {
-      vaultId = (await createVault(createDb(requirePlatform(event).env.DB), user.id, parsed.data)).id;
+      const { env } = requirePlatform(event);
+      vaultId = (await createVault(env.DB, user.id, parsed.data, { limits: vaultLimitsFromEnv(env) })).id;
     } catch (err) {
       if (err instanceof HttpError) return fail(err.status, { createError: err.message });
       throw err;

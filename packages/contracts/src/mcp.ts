@@ -1176,6 +1176,96 @@ export const MULTI_VAULT_MCP_TOOL_NAMES = MULTI_VAULT_MCP_TOOLS.map(
   (t) => t.name,
 ) as readonly MultiVaultMcpToolName[];
 
+// ------------------------------------------------- vault creation (cloud)
+
+export const createVaultInputSchema = z.object({
+  name: z.string().min(1).describe("The new vault's display name."),
+  slug: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Optional slug (lowercase letters, digits, dashes). Derived from `name` when omitted; must not " +
+        "already be used by one of your vaults.",
+    ),
+});
+
+export const createdVaultSchema = z
+  .object({
+    id: z.string(),
+    slug: z.string(),
+    name: z.string(),
+  })
+  .strict();
+
+export const createVaultOutputSchema = z
+  .object({
+    /** The vault just created; the caller owns it. */
+    vault: createdVaultSchema,
+    /**
+     * The vaults this connection can use after the call (OAuth: the grant's
+     * vaults, the new one included; API key: the key's own vault).
+     */
+    vaults: z.array(connectedVaultSchema),
+    /** True when the connection also covers vaults the user creates or joins later. */
+    includesFutureVaults: z.boolean(),
+    /** `/mcp/agent` with a `bz_` key only: a new key for the new vault, shown this once. */
+    apiKey: z.string().optional(),
+    /** One neutral sentence on how the connection changed (no tool steering). */
+    notice: z.string(),
+  })
+  .strict();
+
+const CREATE_VAULT_TOOL = {
+  name: "create_vault",
+  title: "Create a vault",
+  inputSchema: createVaultInputSchema,
+  outputSchema: createVaultOutputSchema,
+  annotations: ADDITIVE_WRITE_TOOL,
+} as const;
+
+/**
+ * OAUTH_MCP_TOOLS — registered on every OAuth (`bzat_`) connection to `/mcp`
+ * (SPEC-CLOUD.md "Multi-vault grants": "Creating a vault over MCP"). The new
+ * vault joins the connection's grant, so afterwards the connection covers
+ * several vaults. Deliberately NOT part of MCP_TOOLS (vault creation is an
+ * account concern, which only Brainz Cloud has).
+ */
+export const OAUTH_MCP_TOOLS = [
+  {
+    ...CREATE_VAULT_TOOL,
+    description:
+      "Create a new, empty vault owned by you and add it to this connection. Returns the new vault and " +
+      "the vaults this connection can now use. Once a connection covers more than one vault, every vault " +
+      "tool takes a `vault` argument (a slug or id) and list_vaults lists the vaults. Each account has a " +
+      "vault limit and an hourly creation limit.",
+  },
+] as const;
+
+/**
+ * AGENT_KEY_MCP_TOOLS — the `bz_` key variant of `create_vault`, registered
+ * only on `/mcp/agent` (AGENT_MCP_PATH). A key is bound to one vault and can't
+ * be extended, so the result carries a NEW key for the new vault instead.
+ * `/mcp` never offers it to a `bz_` key: that endpoint hands out no API keys.
+ * Same name and shapes as OAUTH_MCP_TOOLS' entry; the two never share a server.
+ */
+export const AGENT_KEY_MCP_TOOLS = [
+  {
+    ...CREATE_VAULT_TOOL,
+    description:
+      "Create a new, empty vault owned by this workspace's account. This API key stays bound to its own " +
+      "vault; the result carries a new API key for the new vault (`apiKey`, shown only in this result). " +
+      "Each account has a vault limit and an hourly creation limit.",
+  },
+] as const;
+
+export type OAuthMcpTool = (typeof OAUTH_MCP_TOOLS)[number];
+export type OAuthMcpToolName = OAuthMcpTool["name"];
+export type CreateVaultInput = z.infer<typeof createVaultInputSchema>;
+export type CreateVaultOutput = z.infer<typeof createVaultOutputSchema>;
+
+export const OAUTH_MCP_TOOL_NAMES = OAUTH_MCP_TOOLS.map((t) => t.name) as readonly OAuthMcpToolName[];
+
 export const PUBLIC_MCP_TOOL_NAMES = PUBLIC_MCP_TOOLS.map(
   (t) => t.name,
 ) as readonly PublicMcpToolName[];
@@ -1298,3 +1388,16 @@ export interface MultiVaultMcpToolDef {
 
 const _multiVaultMcpToolDefs: readonly MultiVaultMcpToolDef[] = MULTI_VAULT_MCP_TOOLS;
 void _multiVaultMcpToolDefs;
+
+/** Widened view of an account-tool entry (OAUTH_MCP_TOOLS / AGENT_KEY_MCP_TOOLS). */
+export interface OAuthMcpToolDef {
+  readonly name: OAuthMcpToolName;
+  readonly title: string;
+  readonly description: string;
+  readonly inputSchema: z.AnyZodObject;
+  readonly outputSchema: z.ZodTypeAny;
+  readonly annotations: ToolAnnotations;
+}
+
+const _oauthMcpToolDefs: readonly OAuthMcpToolDef[] = [...OAUTH_MCP_TOOLS, ...AGENT_KEY_MCP_TOOLS];
+void _oauthMcpToolDefs;

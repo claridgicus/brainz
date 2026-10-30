@@ -40,6 +40,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
   apiKeyCreateResponseSchema,
   oauthAuthorizationServerMetadataSchema,
@@ -59,6 +60,7 @@ import {
   AGENT_MCP_PATH,
   DIRECTORY_MCP_TOOL_NAMES,
   listVaultsOutputSchema,
+  createVaultOutputSchema,
   memberListResponseSchema,
   onboardCompleteOutputSchema,
   onboardStatusOutputSchema,
@@ -1105,7 +1107,7 @@ async function main() {
     const dirNames = (await dir.listTools()).tools.map((t) => t.name);
     step(
       "unauthenticated /mcp tools/list is the directory vault tools only (no API-key handout)",
-      JSON.stringify(dirNames) === JSON.stringify([...DIRECTORY_MCP_TOOL_NAMES]) &&
+      JSON.stringify(dirNames) === JSON.stringify([...DIRECTORY_MCP_TOOL_NAMES, "create_vault"]) &&
         !["signup", "sign_in", "session_hook", "claim"].some((n) => dirNames.includes(n)),
       dirNames.join(", "),
     );
@@ -1235,8 +1237,8 @@ async function main() {
     await agentPathMcp.connect(agentPathTransport);
     const agentPathNames = (await agentPathMcp.listTools()).tools.map((t) => t.name);
     step(
-      "the signup apiKey also works on /mcp/agent (full vault toolset + claim)",
-      JSON.stringify([...agentPathNames].sort()) === JSON.stringify([...MCP_TOOL_NAMES, "claim"].sort()),
+      "the signup apiKey also works on /mcp/agent (full vault toolset + claim + create_vault)",
+      JSON.stringify([...agentPathNames].sort()) === JSON.stringify([...MCP_TOOL_NAMES, "claim", "create_vault"].sort()),
       `${agentPathNames.length} tools`,
     );
     await agentPathMcp.close();
@@ -2756,8 +2758,8 @@ async function main() {
     await oauthMcp.connect(oauthTransport);
     const oauthTools = (await oauthMcp.listTools()).tools.map((t) => t.name);
     step(
-      "MCP over the OAuth token: the directory vault toolset — no claim, no session_hook",
-      JSON.stringify(oauthTools) === JSON.stringify([...DIRECTORY_MCP_TOOL_NAMES]),
+      "MCP over the OAuth token: the directory vault toolset + create_vault — no claim, no session_hook",
+      JSON.stringify(oauthTools) === JSON.stringify([...DIRECTORY_MCP_TOOL_NAMES, "create_vault"]),
       oauthTools.length + " tools",
     );
     const oauthOnAgent = await agentRpc({ jsonrpc: "2.0", id: 5, method: "tools/list" }, { authorization: `Bearer ${live.json?.access_token}` });
@@ -2821,9 +2823,12 @@ async function main() {
     );
     const multiTools = (await multiMcp.listTools()).tools;
     step(
-      "multi-vault MCP: list_vaults + the directory tools, each with a required vault arg",
-      JSON.stringify(multiTools.map((t) => t.name)) === JSON.stringify(["list_vaults", ...DIRECTORY_MCP_TOOL_NAMES]) &&
-        multiTools.filter((t) => t.name !== "list_vaults").every((t) => t.inputSchema.required?.includes("vault")),
+      "multi-vault MCP: list_vaults + the directory tools, each with a required vault arg, + create_vault",
+      JSON.stringify(multiTools.map((t) => t.name)) ===
+        JSON.stringify(["list_vaults", ...DIRECTORY_MCP_TOOL_NAMES, "create_vault"]) &&
+        multiTools
+          .filter((t) => t.name !== "list_vaults" && t.name !== "create_vault")
+          .every((t) => t.inputSchema.required?.includes("vault")),
       multiTools.length + " tools",
     );
     const listed = await multiMcp.callTool({ name: "list_vaults", arguments: {} });
@@ -2849,6 +2854,130 @@ async function main() {
     const noVault = await multiMcp.callTool({ name: "get_concept", arguments: { id: "oauth-probe" } });
     step("a vault tool without `vault` is refused on a multi-vault connection", noVault.isError === true);
     await multiMcp.close();
+
+    // create_vault (SPEC-CLOUD "Creating a vault over MCP"). A fresh consent
+    // per connection; each mints its own grant.
+    const consentTokens = async (state, fields) => {
+      const form = new URLSearchParams(authorizeQs);
+      form.set("state", state);
+      for (const [k, v] of fields) form.append(k, v);
+      const res = await fetch(`${BASE}/oauth/authorize?/approve`, {
+        method: "POST",
+        redirect: "manual",
+        headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html", origin: BASE, cookie: cookieHeader(reviewerJar) },
+        body: form.toString(),
+      });
+      const c = new URL(res.headers.get("location") ?? "http://x.invalid/").searchParams.get("code");
+      return tokenCall({ grant_type: "authorization_code", code: c, code_verifier: verifier, redirect_uri: redirectUri, client_id: clientId });
+    };
+    const mcpOver = async (accessToken, name, onListChanged) => {
+      const c = new Client({ name, version: "0.0.0" });
+      if (onListChanged) c.setNotificationHandler(ToolListChangedNotificationSchema, onListChanged);
+      await c.connect(
+        new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), {
+          requestInit: { headers: { authorization: `Bearer ${accessToken}` } },
+        }),
+      );
+      return c;
+    };
+    const parseCreate = (result) => (result.isError ? null : createVaultOutputSchema.safeParse(JSON.parse(result.content[0].text)).data ?? null);
+
+    // Single → multi: the next request is the routed surface.
+    const singleTokens = await consentTokens("e2e-state-create-single", [["vault_id", reviewerVaultId]]);
+    let listChangedSeen = 0;
+    const singleMcp = await mcpOver(singleTokens.json?.access_token, "brainz-e2e-create-single", () => {
+      listChangedSeen++;
+    });
+    const madeSingle = parseCreate(await singleMcp.callTool({ name: "create_vault", arguments: { name: "Made over MCP" } }));
+    step(
+      "create_vault on a single-vault connection: the new vault joins it (2 vaults, notice says so)",
+      madeSingle?.vault.slug === "made-over-mcp" &&
+        JSON.stringify(madeSingle.vaults.map((v) => v.slug).sort()) === JSON.stringify(["made-over-mcp", "reviewer-demo"]) &&
+        madeSingle.includesFutureVaults === false &&
+        madeSingle.apiKey === undefined &&
+        /now covers 2 vaults/.test(madeSingle.notice) &&
+        /list_vaults/.test(madeSingle.notice),
+      JSON.stringify(madeSingle).slice(0, 120),
+    );
+    step("…and the call sends notifications/tools/list_changed on its response stream", listChangedSeen === 1, `seen ${listChangedSeen}`);
+    const afterTools = (await singleMcp.listTools()).tools;
+    step(
+      "…the same token's next tools/list is the routed surface (list_vaults, required `vault`)",
+      afterTools[0]?.name === "list_vaults" &&
+        afterTools.find((t) => t.name === "get_concept")?.inputSchema.required?.includes("vault") === true,
+      afterTools.map((t) => t.name).slice(0, 3).join(", "),
+    );
+    const intoNew = await singleMcp.callTool({
+      name: "upsert_concept",
+      arguments: { vault: "made-over-mcp", id: "made-probe", title: "Made probe", body: "Written into the vault made over MCP." },
+    });
+    step("…and it writes into the new vault by slug", !intoNew.isError, JSON.stringify(intoNew.content).slice(0, 80));
+    await singleMcp.close();
+
+    // "All my vaults": already covers the new vault.
+    const allTokens = await consentTokens("e2e-state-create-all", [["all_vaults", "on"]]);
+    const allMcp = await mcpOver(allTokens.json?.access_token, "brainz-e2e-create-all");
+    const madeAll = parseCreate(await allMcp.callTool({ name: "create_vault", arguments: { name: "Made under all" } }));
+    step(
+      "create_vault on an \"all my vaults\" connection: covered already, includesFutureVaults",
+      madeAll?.includesFutureVaults === true && madeAll.vaults.some((v) => v.slug === "made-under-all") && madeAll.vaults.length >= 4,
+      JSON.stringify(madeAll).slice(0, 120),
+    );
+
+    // bz_ keys: not offered on /mcp; on /mcp/agent it returns a new key.
+    const reviewerKey = await api("POST", `/api/vaults/${reviewerVaultId}/keys`, { body: { name: "e2e create_vault" }, jar: reviewerJar });
+    const keyOnMcp = await rpc({ jsonrpc: "2.0", id: 6, method: "tools/list" }, { authorization: `Bearer ${reviewerKey.json?.key}` });
+    const keyOnMcpText = await keyOnMcp.text();
+    step(
+      "a bz_ key on /mcp is not offered create_vault (no keys handed out there)",
+      keyOnMcp.status === 200 && keyOnMcpText.includes('"claim"') && !keyOnMcpText.includes('"create_vault"'),
+      `status ${keyOnMcp.status}`,
+    );
+    const keyAgent = new Client({ name: "brainz-e2e-create-agent", version: "0.0.0" });
+    await keyAgent.connect(
+      new StreamableHTTPClientTransport(new URL(`${BASE}${AGENT_MCP_PATH}`), {
+        requestInit: { headers: { authorization: `Bearer ${reviewerKey.json?.key}` } },
+      }),
+    );
+    const madeAgent = parseCreate(await keyAgent.callTool({ name: "create_vault", arguments: { name: "Made by agent" } }));
+    await keyAgent.close();
+    step(
+      "create_vault on /mcp/agent with a bz_ key → the new vault + a new key for it",
+      madeAgent?.vault.slug === "made-by-agent" && /^bz_/.test(madeAgent.apiKey ?? "") && madeAgent.vaults[0]?.slug === "reviewer-demo",
+      JSON.stringify(madeAgent?.vault),
+    );
+    const newKeyMcp = new Client({ name: "brainz-e2e-new-key", version: "0.0.0" });
+    await newKeyMcp.connect(
+      new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), {
+        requestInit: { headers: { authorization: `Bearer ${madeAgent?.apiKey}` } },
+      }),
+    );
+    await newKeyMcp.callTool({ name: "upsert_concept", arguments: { id: "agent-made", title: "Agent made", body: "x" } });
+    const newKeyRead = await newKeyMcp.callTool({ name: "get_concept", arguments: { id: "agent-made" } });
+    await newKeyMcp.close();
+    const madeAgentKeys = await api("GET", `/api/vaults/${madeAgent?.vault.id}/keys`, { jar: reviewerJar });
+    step(
+      "…the returned key works on the new vault, and the dashboard lists it (hash only)",
+      !newKeyRead.isError && madeAgentKeys.json?.keys?.length === 1 && !JSON.stringify(madeAgentKeys.json).includes(madeAgent?.apiKey ?? "bz_none"),
+      JSON.stringify(madeAgentKeys.json?.keys?.map((k) => k.name)),
+    );
+
+    // The hourly creation limit (VAULT_CREATE_RATE_LIMIT, default 10) is
+    // shared by every create path. The reviewer has created several vaults in
+    // this hour already, so it trips within 10 more.
+    let limited = null;
+    for (let i = 0; i < 10 && !limited; i++) {
+      const r = await allMcp.callTool({ name: "create_vault", arguments: { name: `Burst ${i}` } });
+      if (r.isError) limited = r.content[0].text;
+    }
+    step("create_vault past the hourly limit → isError naming the limit", /at most 10 per hour/.test(limited ?? ""), limited ?? "never limited");
+    const restLimited = await api("POST", "/api/vaults", { body: { name: "One more" }, jar: reviewerJar });
+    step(
+      "…and POST /api/vaults hits the same limit → 429",
+      restLimited.status === 429 && /per hour/.test(JSON.stringify(restLimited.json)),
+      `status ${restLimited.status}`,
+    );
+    await allMcp.close();
     const crossSiteRegister = await fetch(`${BASE}/oauth/register`, {
       method: "POST",
       headers: { "content-type": "text/plain" },

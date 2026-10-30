@@ -49,6 +49,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   DIRECTORY_MCP_TOOL_NAMES,
   MCP_TOOLS,
+  OAUTH_MCP_TOOLS,
   PUBLIC_MCP_TOOLS,
   signInInputSchema,
   signupInputSchema,
@@ -317,7 +318,8 @@ export function buildPublicMcpServer(deps: SignupDeps): McpServer {
 
 /**
  * Build the unauthenticated DIRECTORY listing (`/mcp`, no auth): the directory
- * vault tools, listed for lazy authentication, with the neutral server
+ * vault tools plus `create_vault` (OAUTH_MCP_TOOLS), listed for lazy
+ * authentication, with the neutral server
  * instructions. The route 401s every `tools/call` before the SDK runs; the
  * handlers here only answer if that gate is ever bypassed.
  */
@@ -327,8 +329,12 @@ export function buildDirectoryListingMcpServer(): McpServer {
     { instructions: serverInstructions() },
   );
   const listed = new Set<string>(DIRECTORY_MCP_TOOL_NAMES);
-  for (const tool of MCP_TOOLS as readonly McpToolDef[]) {
-    if (!listed.has(tool.name)) continue;
+  // The single-vault OAuth surface: the directory vault tools, then create_vault.
+  const tools = [
+    ...(MCP_TOOLS as readonly McpToolDef[]).filter((t) => listed.has(t.name)),
+    ...OAUTH_MCP_TOOLS,
+  ];
+  for (const tool of tools) {
     server.registerTool(
       tool.name,
       {

@@ -27,7 +27,9 @@ It is exposed as an MCP server (Streamable HTTP) at two endpoints:
 - Unauthenticated connections to `/mcp/agent` see two tools: `signup` and
   `sign_in`. Self-signup lives only there.
 - Connections with `Authorization: Bearer bz_...` see the full vault toolset
-  plus `claim`, on either endpoint.
+  plus `claim`, on either endpoint. On `/mcp/agent` they also see
+  `create_vault`, which makes another vault for the same account and returns a
+  NEW API key for it (the key you used stays bound to its own vault).
 - Unauthenticated connections to `/mcp` can list the vault tools; calling one
   starts OAuth sign-in (for clients such as Claude and ChatGPT).
 
@@ -157,6 +159,15 @@ Authenticated toolset:
   - `create_task {title, body, domain?, realizes?, governedBy?, codeAreas?, tags?}`
     — turn findings into first-class work items.
 
+More vaults (on `/mcp/agent` only):
+
+- `create_vault {name, slug?}` — a new, empty vault for the same account (one
+  vault per product is the usual split). The result carries `apiKey`, a NEW key
+  for the new vault, shown only once: put it straight into a separate MCP client
+  entry and follow SECURITY RULE 1 for it too. An account can own up to 20
+  vaults and create up to 10 per hour; past either limit the call errors — wait
+  or tell your human, do not retry in a loop.
+
 Make it the default (do this once per repository):
 
 - `session_hook {client?, serverName?}` — returns a playbook for installing a
@@ -194,6 +205,8 @@ Cadence:
 - Other 401 → the key is wrong or revoked; re-check the MCP client config with
   your human. Never paste the key into chat to debug it.
 - `signup` rate-limited → wait; do not retry in a loop.
+- `create_vault` "vault limit reached" / "too many vaults created" → tell your
+  human; deleting a vault (dashboard) frees a slot, the hourly limit resets.
 - `claim` on an already-claimed workspace → nothing to do; keys are managed in
   the dashboard settings.
 ````

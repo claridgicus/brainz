@@ -16,6 +16,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   DIRECTORY_MCP_TOOL_NAMES,
   MCP_TOOLS,
+  OAUTH_MCP_TOOLS,
+  OAUTH_MCP_TOOL_NAMES,
   PUBLIC_MCP_TOOLS,
   PUBLIC_MCP_TOOL_NAMES,
   signInOutputSchema,
@@ -87,12 +89,12 @@ describe("directory listing (unauthenticated /mcp)", () => {
     const { tools } = await client.listTools();
     // Wave OA: the gated vault tools are LISTED so directory clients know they
     // exist; calling one is answered by the /mcp route's 401 OAuth challenge.
-    expect(tools.map((t) => t.name)).toEqual([...DIRECTORY_MCP_TOOL_NAMES]);
+    expect(tools.map((t) => t.name)).toEqual([...DIRECTORY_MCP_TOOL_NAMES, ...OAUTH_MCP_TOOL_NAMES]);
     for (const name of ["signup", "sign_in", "session_hook", "claim"]) {
       expect(tools.map((t) => t.name)).not.toContain(name);
     }
     for (const tool of tools) {
-      const contract = MCP_TOOLS.find((t) => t.name === tool.name)!;
+      const contract = [...MCP_TOOLS, ...OAUTH_MCP_TOOLS].find((t) => t.name === tool.name)!;
       expect(tool.annotations).toEqual({ title: contract.title, ...contract.annotations });
     }
   });

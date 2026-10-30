@@ -20,8 +20,10 @@ import {
   type McpToolDef,
   type McpToolInput,
   type McpToolName,
+  type OAuthMcpToolDef,
   type VaultRole,
 } from "@brainz/contracts";
+import type { ServerNotification } from "@modelcontextprotocol/sdk/types.js";
 import {
   ONBOARDING_NOTICE,
   ONBOARDING_NUDGE,
@@ -73,10 +75,23 @@ type ToolHandlers = {
   [N in McpToolName]: (args: McpToolInput<N>) => Promise<ToolResult>;
 };
 
-/** A cloud-only tool registration: contract def (CLOUD_MCP_TOOLS) + handler. */
+/**
+ * What an extra tool's handler gets besides its arguments: a way to send a
+ * notification on the call's own response stream (the server is stateless,
+ * so there is no standing stream; `create_vault` uses it for
+ * `notifications/tools/list_changed`).
+ */
+export interface ToolCallContext {
+  sendNotification(notification: ServerNotification): Promise<void>;
+}
+
+/**
+ * A cloud-only tool registration: contract def (CLOUD_MCP_TOOLS,
+ * OAUTH_MCP_TOOLS or AGENT_KEY_MCP_TOOLS) + handler.
+ */
 export interface ExtraTool {
-  readonly def: CloudMcpToolDef;
-  handler(args: Record<string, unknown>): Promise<ToolResult>;
+  readonly def: CloudMcpToolDef | OAuthMcpToolDef;
+  handler(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolResult>;
 }
 
 export interface McpServerHooks {
@@ -95,11 +110,19 @@ export interface McpServerHooks {
   onSynced?: (lastSyncedAt: Date) => Promise<void>;
   /**
    * Cloud-only tools registered ALONGSIDE the vault tools (e.g. `claim` from
-   * CLOUD_MCP_TOOLS — account concerns that only exist on Brainz Cloud). The
-   * route supplies the wired handlers; the local stdio server never sees
-   * these. Handlers must follow the isError convention (use `guarded`).
+   * CLOUD_MCP_TOOLS, `create_vault` from AGENT_KEY_MCP_TOOLS — account
+   * concerns that only exist on Brainz Cloud). The route supplies the wired
+   * handlers; the local stdio server never sees these. Handlers must follow
+   * the isError convention (use `guarded`).
    */
   extraTools?: readonly ExtraTool[];
+  /**
+   * Tools that act on the signed-in USER's account rather than this vault
+   * (`create_vault` from OAUTH_MCP_TOOLS). Unlike `extraTools` they are
+   * registered even with `only`: an OAuth viewer may still create a vault of
+   * their own. The public-token server never passes any.
+   */
+  accountTools?: readonly ExtraTool[];
   /**
    * Restrict the registered vault tools to this allow-list (public vaults):
    * a VIEWER-scoped public-token connection gets ONLY the read tools
@@ -672,9 +695,17 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
     );
   }
 
-  // Cloud-only extras (e.g. the `claim` tool) — never part of MCP_TOOLS, and
-  // never exposed to a viewer-scoped public connection.
-  for (const extra of allow ? [] : (hooks.extraTools ?? [])) {
+  // Cloud-only extras (e.g. `claim`) — never part of MCP_TOOLS, and never
+  // exposed to a viewer-scoped connection. Account tools are the user's own
+  // (create_vault), so a viewer gets them too.
+  registerExtraTools(server, allow ? [] : (hooks.extraTools ?? []));
+  registerExtraTools(server, hooks.accountTools ?? []);
+
+  return server;
+}
+
+function registerExtraTools(server: McpServer, extras: readonly ExtraTool[]): void {
+  for (const extra of extras) {
     server.registerTool(
       extra.def.name,
       {
@@ -683,11 +714,10 @@ export function buildMcpServer(vault: VaultClient, hooks: McpServerHooks = {}): 
         inputSchema: extra.def.inputSchema.shape,
         annotations: { title: extra.def.title, ...extra.def.annotations },
       },
-      async (args: Record<string, unknown>) => extra.handler(args ?? {}),
+      async (args: Record<string, unknown>, sdkExtra: ToolCallContext) =>
+        extra.handler(args ?? {}, { sendNotification: (n) => sdkExtra.sendNotification(n) }),
     );
   }
-
-  return server;
 }
 
 /**
@@ -721,6 +751,8 @@ export interface MultiVaultServerOptions {
   open(vaultId: string): { client: VaultClient; hooks?: Pick<McpServerHooks, "onOnboarded" | "onSynced"> };
   /** Vault tools to leave unregistered (DIRECTORY_HIDDEN_TOOL_NAMES on OAuth). */
   exclude?: readonly McpToolName[];
+  /** Account tools registered after the vault tools (`create_vault` on OAuth); no `vault` arg. */
+  accountTools?: readonly ExtraTool[];
 }
 
 const READ_TOOLS: ReadonlySet<McpToolName> = new Set(PUBLIC_VAULT_READ_TOOL_NAMES);
@@ -828,6 +860,8 @@ export function buildMultiVaultMcpServer(opts: MultiVaultServerOptions): McpServ
         }),
     );
   }
+
+  registerExtraTools(server, opts.accountTools ?? []);
 
   return server;
 }

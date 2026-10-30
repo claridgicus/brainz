@@ -334,12 +334,20 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 			<code>list_vaults</code> lists them. To change the set, connect again.
 		</li>
 		<li>
+			<strong>It can create vaults for you.</strong> Ask for a new vault and the client calls
+			<code>create_vault</code> (a name, optionally a slug). The vault is yours, and it joins this
+			connection: a one-vault connection becomes a two-vault one, so its tools start taking a
+			<code>vault</code> argument and <code>list_vaults</code> appears. Some clients pick up the
+			new tool list only after you reconnect or start a new chat. An account can own up to 20
+			vaults and create up to 10 an hour.
+		</li>
+		<li>
 			<strong>Your role decides the tools, on every call.</strong> Owners and editors get sixteen
-			tools: every vault tool in <a href="#tools">the table below</a> except
+			vault tools: every tool in <a href="#tools">the table below</a> except
 			<code>session_hook</code>. Viewers get six read tools (<code>search_concepts</code>,
 			<code>get_concept</code>, <code>get_related</code>, <code>get_context</code>,
 			<code>list_concepts</code>, <code>vault_stats</code>), so a viewer's connection is
-			read-only. If an owner changes your role or removes you from the vault,
+			read-only for that vault. Everyone also gets <code>create_vault</code>. If an owner changes your role or removes you from the vault,
 			the connection follows straight away.
 		</li>
 		<li>

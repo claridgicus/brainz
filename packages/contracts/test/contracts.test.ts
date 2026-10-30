@@ -15,6 +15,8 @@ import {
   claimOutputSchema,
   CLOUD_MCP_TOOLS,
   MULTI_VAULT_MCP_TOOLS,
+  OAUTH_MCP_TOOLS,
+  AGENT_KEY_MCP_TOOLS,
   CLOUD_MCP_TOOL_NAMES,
   CONCEPT_TYPES,
   conceptTypeCreateRequestSchema,
@@ -50,7 +52,10 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "21"', () => {
+  it('is "22"', () => {
+    // 22: `create_vault` — OAUTH_MCP_TOOLS (OAuth connections; the new vault
+    //     joins the grant) and AGENT_KEY_MCP_TOOLS (bz_ keys on /mcp/agent;
+    //     returns a new key), createVaultInput/OutputSchema. Additive.
     // 21: support inbox — supportReplyRequestSchema / supportReplyResponseSchema
     //     for POST /api/support/replies (REST only, not an MCP tool). Additive.
     // 20: multi-vault OAuth grants — MULTI_VAULT_MCP_TOOLS (`list_vaults`) and
@@ -92,7 +97,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("21");
+    expect(CONTRACTS_VERSION).toBe("22");
   });
 });
 
@@ -780,7 +785,13 @@ describe("directory surfaces", () => {
       /\bUse this first\b/i,
       /\bCall (this )?once\b/i,
     ];
-    for (const tool of [...MCP_TOOLS, ...CLOUD_MCP_TOOLS, ...MULTI_VAULT_MCP_TOOLS]) {
+    for (const tool of [
+      ...MCP_TOOLS,
+      ...CLOUD_MCP_TOOLS,
+      ...MULTI_VAULT_MCP_TOOLS,
+      ...OAUTH_MCP_TOOLS,
+      ...AGENT_KEY_MCP_TOOLS,
+    ]) {
       for (const re of steering) {
         expect(`${tool.name}: ${tool.description}`).not.toMatch(re);
       }

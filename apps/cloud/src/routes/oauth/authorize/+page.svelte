@@ -138,7 +138,7 @@
 				<dt>It will be able to</dt>
 				<dd>
 					Search, read and write the concepts and tasks in {scopeText} (read only where you're a
-					viewer)
+					viewer), and create new vaults for you, which it can then use too
 				</dd>
 			</div>
 			<div>

@@ -31,6 +31,10 @@ export interface CloudEnv {
   BYOK_ENCRYPTION_KEY?: string;
   /** OAuth refresh-reuse grace window in seconds (default 60; the E2E shortens it). */
   OAUTH_REFRESH_GRACE_SECONDS?: string;
+  /** Most vaults one account may own (default 20; see $lib/server/vaults). */
+  MAX_VAULTS_PER_USER?: string;
+  /** Most vaults one account may create per rolling hour (default 10). */
+  VAULT_CREATE_RATE_LIMIT?: string;
   /** OpenAI plugin-portal domain-verification token served at `/.well-known/openai-apps-challenge` (unset → 404). */
   OPENAI_APPS_CHALLENGE?: string;
   /** Support inbox: vault id whose tasks hold support@ threads (unset → every message is forwarded). */

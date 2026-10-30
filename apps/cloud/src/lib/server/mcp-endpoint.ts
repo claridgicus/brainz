@@ -17,7 +17,9 @@
  * Auth split (both endpoints unless noted):
  * - `Authorization: Bearer bz_...` (valid) → SHA-256 → D1 api_key lookup →
  *   that key's vault DO, serving the authenticated vault tools PLUS the
- *   cloud-only `claim` tool (CLOUD_MCP_TOOLS in @brainz/contracts).
+ *   cloud-only `claim` tool (CLOUD_MCP_TOOLS in @brainz/contracts). On
+ *   `/mcp/agent` only, also `create_vault` (AGENT_KEY_MCP_TOOLS), which
+ *   returns a new key for the new vault; `/mcp` hands out no keys.
  *   Wave M pinned decision (documented in $lib/server/vault-access): keys
  *   carry EDITOR-equivalent data-plane scope — every vault tool (reads AND
  *   writes) works over any valid key; the viewer role constrains only
@@ -35,8 +37,10 @@
  *   owner/editor get the directory vault tools, a viewer gets the read tools
  *   only. A multi-vault grant gets buildMultiVaultMcpServer instead: a
  *   required `vault` arg on every vault tool, `list_vaults`, and the role
- *   checked per call. No `claim` (an OAuth user is already a signed-in human)
- *   and no `session_hook`.
+ *   checked per call. Every OAuth connection also gets `create_vault`
+ *   (OAUTH_MCP_TOOLS): the vault is the user's and joins this grant. No
+ *   `claim` (an OAuth user is already a signed-in human) and no
+ *   `session_hook`.
  * - Authorization header present but invalid/revoked/expired → 401. On `/mcp`
  *   every bearer 401 carries `WWW-Authenticate: Bearer ... resource_metadata=...`
  *   so OAuth clients refresh or re-authorize; `/mcp/agent` is not an OAuth
@@ -54,7 +58,13 @@
 import type { RequestEvent } from "@sveltejs/kit";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
-import { CLOUD_MCP_TOOLS, DIRECTORY_HIDDEN_TOOL_NAMES } from "@brainz/contracts";
+import {
+  AGENT_KEY_MCP_TOOLS,
+  CLOUD_MCP_TOOLS,
+  DIRECTORY_HIDDEN_TOOL_NAMES,
+  OAUTH_MCP_TOOLS,
+  PUBLIC_VAULT_READ_TOOL_NAMES,
+} from "@brainz/contracts";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { apiError, HttpError, requirePlatform } from "./api-util";
@@ -66,7 +76,8 @@ import { guardDepsFromDb, guardMagicLinkRequest } from "./magic-link-guard";
 import { magicLinkSender } from "./magic-link";
 import { parseBearer } from "./api-keys";
 import { resolveApiKey, WORKSPACE_EXPIRED_MESSAGE } from "./vault-access";
-import { buildMcpServer, buildMultiVaultMcpServer, buildPublicVaultMcpServer } from "./mcp";
+import { buildMcpServer, buildMultiVaultMcpServer, buildPublicVaultMcpServer, type ExtraTool } from "./mcp";
+import { handleAgentCreateVault, handleOAuthCreateVault, type CreateVaultDeps } from "./mcp-create-vault";
 import {
   callsGatedTool,
   isAccessTokenFormat,
@@ -82,6 +93,7 @@ import {
 import { recordAndCheckPublicRead, resolvePublicVault } from "./public-vault";
 import { resolveRateLimitIp } from "./rate-limit";
 import { vaultClient } from "./vault-client";
+import { vaultLimitsFromEnv } from "./vaults";
 
 /** Which cloud MCP endpoint is serving the request (see the module doc). */
 export type McpSurface = "directory" | "agent";
@@ -154,6 +166,9 @@ export async function handleMcpRequest(event: RequestEvent, surface: McpSurface)
     ip,
     now: () => new Date(),
   };
+  // create_vault (OAuth on /mcp, bz_ keys on /mcp/agent): the shared create
+  // path with the env's per-account limits.
+  const createVaultDeps: CreateVaultDeps = { db: platform.env.DB, limits: vaultLimitsFromEnv(platform.env) };
 
   let server: McpServer;
   const bearerToken = parseBearer(event.request.headers.get("authorization"));
@@ -235,18 +250,26 @@ export async function handleMcpRequest(event: RequestEvent, surface: McpSurface)
         { tokenPresented: true },
       );
     }
+    // create_vault on every OAuth connection (a viewer too: the new vault is
+    // theirs). The vault joins this grant.
+    const oauthTools: ExtraTool[] = OAUTH_MCP_TOOLS.map((def) => ({
+      def,
+      handler: (args, ctx) => handleOAuthCreateVault(args, ctx, createVaultDeps, access),
+    }));
     if (access.vaultScope === "single") {
       const [only] = access.vaults;
       const vault = vaultClient(platform.env.VAULT_DO, only.id);
       server =
         only.role === "viewer"
-          ? buildPublicVaultMcpServer(vault)
+          ? // The public-token read surface plus create_vault.
+            buildMcpServer(vault, { only: PUBLIC_VAULT_READ_TOOL_NAMES, notices: "neutral", accountTools: oauthTools })
           : buildMcpServer(vault, {
               ...mirrorHooks(platform.env.DB, only.id),
               // Directory surface: no session_hook (and no claim) for OAuth,
               // and onboarding/sync notices that don't steer the model.
               exclude: DIRECTORY_HIDDEN_TOOL_NAMES,
               notices: "neutral",
+              accountTools: oauthTools,
             });
     } else {
       // Multi-vault grant: every vault tool takes a required `vault` arg, the
@@ -259,6 +282,7 @@ export async function handleMcpRequest(event: RequestEvent, surface: McpSurface)
           hooks: mirrorHooks(platform.env.DB, vaultId),
         }),
         exclude: DIRECTORY_HIDDEN_TOOL_NAMES,
+        accountTools: oauthTools,
       });
     }
   } else {
@@ -323,15 +347,27 @@ export async function handleMcpRequest(event: RequestEvent, surface: McpSurface)
     }
     const vaultId = resolved.vault.id;
     const ownerId = resolved.vault.ownerId;
+    const keyVault = resolved.vault;
     server = buildMcpServer(vaultClient(platform.env.VAULT_DO, vaultId), {
       ...mirrorHooks(platform.env.DB, vaultId),
-      // Cloud-only claim tool: attach this workspace to a human's email. The
-      // approval link is EMAILED — never present in the tool result.
-      extraTools: CLOUD_MCP_TOOLS.map((def) => ({
-        def,
-        handler: (args: Record<string, unknown>) =>
-          handleClaimTool(args, { ...claimDeps, ownerId }),
-      })),
+      extraTools: [
+        // Cloud-only claim tool: attach this workspace to a human's email. The
+        // approval link is EMAILED — never present in the tool result.
+        ...CLOUD_MCP_TOOLS.map((def) => ({
+          def,
+          handler: (args: Record<string, unknown>) =>
+            handleClaimTool(args, { ...claimDeps, ownerId }),
+        })),
+        // create_vault returns a new bz_ key, so /mcp/agent only: /mcp (the
+        // directory endpoint) hands out no API keys.
+        ...(surface === "agent"
+          ? AGENT_KEY_MCP_TOOLS.map((def) => ({
+              def,
+              handler: (args: Record<string, unknown>) =>
+                handleAgentCreateVault(args, createVaultDeps, { vault: keyVault }),
+            }))
+          : []),
+      ],
     });
   }
 

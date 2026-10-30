@@ -289,9 +289,14 @@ async function main() {
   run("npx", ["wrangler", "d1", "migrations", "apply", "brainz", "--local", "--persist-to", STATE_DIR]);
 
   console.log(`-- starting wrangler dev on :${PORT}…`);
+  // The consent journey creates ~10 vaults for one user within minutes; lift
+  // the hourly creation limit (default 10) so it never trips here.
   const dev = spawn(
     "npx",
-    ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", STATE_DIR, "--show-interactive-dev-session=false"],
+    [
+      "wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", STATE_DIR, "--show-interactive-dev-session=false",
+      "--var", "VAULT_CREATE_RATE_LIMIT:100",
+    ],
     { cwd: appDir, stdio: ["ignore", "pipe", "pipe"] },
   );
   let devLog = "";

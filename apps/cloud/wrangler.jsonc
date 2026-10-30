@@ -48,7 +48,14 @@
   // switch lives in D1 (control_flag) — set DREAMING_AI_DISABLED here
   // ("workers-ai" | "all") only to force it from config. BYOK_ENCRYPTION_KEY
   // is a secret: wrangler secret put BYOK_ENCRYPTION_KEY.
-  "vars": { "DREAM_DAILY_USD_PER_ACCOUNT": "1" },
+  // Vault creation limits (SPEC-CLOUD "Creating a vault over MCP"): most
+  // vaults one account owns, and most it creates per rolling hour. They apply
+  // to POST /api/vaults, the consent page and the MCP create_vault tool.
+  "vars": {
+    "DREAM_DAILY_USD_PER_ACCOUNT": "1",
+    "MAX_VAULTS_PER_USER": "20",
+    "VAULT_CREATE_RATE_LIMIT": "10"
+  },
   // Daily housekeeping (src/lib/server/scheduled.ts): purges expired/revoked
   // OAuth codes, tokens and grants and idle DCR clients. The `scheduled`
   // handler is attached by scripts/patch-worker.mjs.

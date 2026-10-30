@@ -281,6 +281,12 @@ lives in `src/lib/server/oauth.ts`, `src/routes/oauth/**` and
   "All my vaults". A multi-vault connection adds `list_vaults`, and every
   vault tool then takes a required `vault` (slug or id). See SPEC-CLOUD.md
   "Multi-vault grants".
+- Every OAuth connection also has `create_vault`: the new vault is the user's
+  and joins the connection (a one-vault connection becomes a two-vault one).
+  `bz_` keys get it on `/mcp/agent` only, where it returns a new key for the
+  new vault. Limits for every create path (REST, consent page, MCP) are wrangler
+  vars: `MAX_VAULTS_PER_USER` (default 20) and `VAULT_CREATE_RATE_LIMIT` per
+  rolling hour (default 10). See SPEC-CLOUD.md "Creating a vault over MCP".
 - **Reviewer accounts** (password login with no email step, for directory
   reviewers). The script writes the user and credential rows and can seed
   a "Brainz demo" vault from `examples/demo-vault`:
