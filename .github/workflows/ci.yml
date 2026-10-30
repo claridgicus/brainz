@@ -18,4 +18,9 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      # Warn-only: a demo clip whose sources changed since it was recorded
+      # (demos/README.md). Shows as a failed step; never fails the job.
+      - name: demos are fresh
+        run: npm run demos:check
+        continue-on-error: true
       - run: npm run test:all

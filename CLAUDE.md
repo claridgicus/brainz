@@ -5,7 +5,7 @@
 
 ## Layout
 
-npm workspaces monorepo (Node >= 20, TypeScript ~5.5, ESM throughout; workspaces `packages/*` + `apps/*`):
+npm workspaces monorepo (Node >= 20, TypeScript ~5.5, ESM throughout; workspaces `packages/*` + `apps/*` + `demos`):
 
 - `packages/engine` — `@brainz/engine`, pure platform-agnostic logic (parse, slugify, RRF/cosine, BFS, context assembly, graph validation) — no fs/sqlite/node-only APIs, must stay Cloudflare Workers-compatible
 - `packages/contracts` — `@brainz/contracts`, zod source of truth for every wire shape (MCP tool registry `MCP_TOOLS`, cloud REST API, CLI `--json`); mcp-server/cli consume it — Workers-compatible like engine
@@ -15,6 +15,7 @@ npm workspaces monorepo (Node >= 20, TypeScript ~5.5, ESM throughout; workspaces
 - `packages/web` — `@brainz/web`, graph-view server + esbuild-bundled frontend (`frontend/` → `dist/public`)
 - `apps/cloud` — `@brainz/cloud`, SvelteKit app deployed as ONE Cloudflare Worker (https://brainz.brownmatter.ai): dashboard + REST API + remote MCP `/mcp`. One Durable Object per vault (`VaultDO`, DO SQLite = all vault content); D1 is only the control plane (Better Auth, vault registry, hashed API keys)
 - `examples/demo-vault` — seeded demo vault used by tests and manual verification
+- `demos` — `@brainz/demos`, the screencast recorder (Playwright + ffmpeg, ported from manifold): records `apps/cloud` on the root `compose.yaml` stack into `apps/marketing/static/demos/`, embedded with `$lib/components/Demo.svelte`. `mheavy npm run demos:record`, `npm run demos:check` (CI, warn-only). See demos/README.md
 
 ### apps/cloud specifics
 

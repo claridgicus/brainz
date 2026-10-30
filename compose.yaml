@@ -1,0 +1,42 @@
+# Local stack for the demo recorder (demos/): Brainz Cloud under
+# `wrangler dev --local`, inside a container rather than raw on the host.
+#
+# demos/src/stack.ts drives it (`npm run demos:stack -- up|down`): it names the
+# project after the worktree (`-p brainz-demos-<dir>`), picks its port and
+# passes the uid/gid and the job's CPU block. Build the app first
+# (`npm run build -w @brainz/cloud`); the worker served is the one in
+# apps/cloud/.svelte-kit/cloudflare. D1 and Durable Object state live on a
+# tmpfs: every `up` starts empty, every `down` forgets.
+#
+# The dev secrets below are the insecure ones from apps/cloud/.dev.vars.example.
+services:
+  cloud:
+    image: node:24-bookworm-slim
+    user: "${BRAINZ_DEMOS_UID:-1000}:${BRAINZ_DEMOS_GID:-1000}"
+    cpuset: "${BRAINZ_DEMOS_CPUS:-8-15}"
+    # Docker's default bridge: one service needs no network of its own, and a
+    # busy machine can run out of address pools for new ones.
+    network_mode: bridge
+    working_dir: /repo/apps/cloud
+    volumes:
+      - .:/repo
+    tmpfs:
+      - /state:mode=1777
+      - /home/node:mode=1777
+    environment:
+      HOME: /home/node
+      WRANGLER_SEND_METRICS: "false"
+      CI: "1"
+    ports:
+      # The same port inside and out: wrangler rebuilds the request URL from its
+      # own port, and Better Auth only answers on the BETTER_AUTH_URL origin.
+      - "127.0.0.1:${BRAINZ_DEMOS_PORT:-8800}:${BRAINZ_DEMOS_PORT:-8800}"
+    command:
+      - sh
+      - -c
+      - >-
+        npx wrangler d1 migrations apply brainz --local --persist-to /state &&
+        exec npx wrangler dev --local --ip 0.0.0.0 --port ${BRAINZ_DEMOS_PORT:-8800} --persist-to /state
+        --show-interactive-dev-session=false
+        --var BETTER_AUTH_SECRET:dev-insecure-secret-change-me
+        --var BYOK_ENCRYPTION_KEY:dev-insecure-byok-key-change-me

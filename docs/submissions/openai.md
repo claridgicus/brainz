@@ -26,7 +26,7 @@ No secrets are in this file or in `openai-plugin/`. The reviewer credentials liv
 | 1 | Verify the OpenAI Platform org as a **business: Plutocracy Pty Ltd** (James's choice, 2026-10-30; the org name stays "Plutocracy") | **in progress**: on 2026-10-30 Settings → Organization → General → Verifications → Business → **Start** was clicked and the Persona link generated. James completes the business identity check in Persona (**Start ID Check**). Until it passes, the portal refuses **Upload plugin** with "You need a verified developer identity before you can create or upload a plugin", so the draft ZIP, the automated scan and the domain-verification token all wait on this | `james-verify-the-openai-platform-organization-for-the-brainz-listing` |
 | 2 | Serve the domain-verification token at `/.well-known/openai-apps-challenge` (it 404s today) | **code done, needs deploy + secret** (route returns `OPENAI_APPS_CHALLENGE` as text/plain, 404 while unset) | `serve-the-openai-domain-verification-token-at-well-known-openai-apps-challenge` |
 | 3 | Run the 8 test cases in ChatGPT (developer mode) as the OpenAI reviewer | **gap** (read cases verified over curl; not run in ChatGPT on 2026-10-29, as the live run stopped before ChatGPT. The UI path is now Plugins → Add → **Add custom MCP server** (auth OAuth / No authentication / Mixed), with no separate Developer-mode toggle. The ChatGPT redirect URI is still unrecorded) | `james-live-client-tests-claude-ai-claude-code-and-chatgpt-against-production` |
-| 4 | Record and host the demo video; add its URL to `plugin.json` | **gap** | `james-record-and-host-the-openai-review-demo-video` |
+| 4 | Record and host the demo video; add its URL to `plugin.json` | **gap** (Brainz-side shots recorded: `apps/marketing/static/demos/openai-review.mp4`; the ChatGPT shots are recorded by hand, see "Recording the demo video") | `james-record-and-host-the-openai-review-demo-video` |
 | 5 | No Cloudflare WAF/bot rule blocks ChatGPT's egress | **unknown** | `james-confirm-no-cloudflare-waf-bot-rule-blocks-claude-or-chatgpt-on-brainz-brownmatter-ai` |
 | 6 | support@brownmatter.ai monitored (review feedback arrives by email) | **unknown** | `james-make-support-brownmatter-ai-a-monitored-inbox` |
 | 7 | Docs: "Connect from ChatGPT" section | **gap** | `docs-add-connect-from-claude-and-connect-from-chatgpt-setup-sections` |
@@ -252,6 +252,70 @@ blur it.
 
 Afterwards, reset the reviewer vault, delete the PostHog decision by hand, and host the video
 unlisted (YouTube unlisted, Loom or a public R2 object) so reviewers can open it without signing in.
+
+## Recording the demo video
+
+Checked 2026-10-30 against the official pages.
+
+**Does the video have to show ChatGPT?** The docs don't say so outright. The submission page
+asks for "**A video walkthrough.** Demonstrate the test cases and plugin functionality, and
+provide an accessible recording URL" (`review.demo_recording_url`: "Reviewer-accessible video
+walkthrough URL", required for MCP review), and app review says "Ensure that all test cases pass
+on the supported ChatGPT and Codex surfaces". The test cases are ChatGPT prompts, so
+demonstrating them means showing ChatGPT. A Brainz-only recording would not cover them.
+([submission](https://developers.openai.com/plugins/deploy/submission),
+[app review](https://developers.openai.com/plugins/deploy/app-review). The guidelines page has
+nothing on the video.)
+
+**Can a script drive chatgpt.com to record it?** No. OpenAI's Terms of Use list among what you
+may not do: "Automatically or programmatically extract data or Output", and interfering with the
+Services, "including circumvent[ing] any rate limits or restrictions or bypass[ing] any
+protective measures". A Playwright take that drives ChatGPT and screencasts its answers is
+programmatic extraction of Output. chatgpt.com's bot protection also blocks automated browsers,
+and getting past it would be bypassing a protective measure. openai.com/policies returned 403
+to the fetcher, so this wording comes from the indexed copy of the terms (openai.com/en-GB/policies/terms-of-use/).
+Re-read the live page before relying on it. So the ChatGPT parts are screen-recorded by hand,
+and the recorder (`demos/`) makes only the Brainz-side shots.
+
+**What the recorder makes:** `npm run demos:record -- openai-review` (via `mheavy`) writes
+`apps/marketing/static/demos/openai-review.mp4` (1920×1080, 60fps, H.264, about 28 s, no audio)
+and `-bleed.mp4` (edge to edge; use this one in the edit). It runs on a local stack as a fresh
+demo account seeded with the same sample product as the reviewer vault, so it never touches the
+reviewer account. Cut it at:
+
+| In the clip | Use as | Contents |
+|---|---|---|
+| 0:00–0:06 | Shot 1 | Title card: Brainz mark, "Brainz for ChatGPT — review walkthrough", brownmatter.ai |
+| 0:06–0:21 | Shot 11 | Brainz graph: search "PostHog" → "Decision: use PostHog for product analytics" → its link to Lead Scoring, whose panel lists the decision among incoming links |
+| 0:21–0:28 | Shot 15 | End card: docs, support, privacy and terms |
+
+Shot 11's decision has the id and title P5 is expected to produce. If ChatGPT names it
+differently in your take, either re-record shot 11 by hand from the reviewer vault after P5, or
+change `POSTHOG_DECISION` in `demos/src/flows/openai-review.ts` and re-record.
+
+**What James records by hand** (1920×1080, desktop Chrome, chatgpt.com signed in to his own
+account; the sizes match the clip, so no rescaling):
+
+1. Before: reset the reviewer vault (see "Reviewer vault upkeep"), remove any earlier Brainz
+   connector in ChatGPT, close other tabs, hide bookmarks, and set the window to exactly
+   1920×1080 (or record a 1920×1080 region). Turn off notifications.
+2. **Shot 2** (~15 s): Settings → Apps & Connectors → add a custom MCP server
+   `https://brainz.brownmatter.ai/mcp`, auth OAuth → Connect.
+3. **Shot 3** (~15 s): the Brainz sign-in page → "Sign in with a password" → reviewer email.
+   Pause the recording while typing the password, or blur it in the edit.
+4. **Shot 4** (~15 s): the consent screen. Hold on it for 3 s so the "Connect … to Brainz" heading,
+   the "It will be able to" row and the vault picker are readable. Tick "Brainz demo (owner)",
+   then Allow access.
+5. **Shot 5** (~10 s): back in ChatGPT, Brainz shown as connected; open a new chat.
+6. **Shots 6–10**: P1–P5, one prompt each, typed in full (paste is fine). After each answer,
+   expand the tool-call details so the tool name shows, then hold 2 s. For P4 scroll the
+   briefing; for P5 accept the confirmation if ChatGPT asks.
+7. **Shots 12–14**: N1–N3, same way. Make sure the answer shows Brainz was not called (N1), or
+   only the connected vault was used (N2), or no email was sent (N3).
+8. Edit: clip 0:00–0:06 → shots 2–10 → clip 0:06–0:21 → shots 12–14 → clip 0:21–0:28.
+   Add the narration from the script above as voice-over or captions. Export 1080p H.264.
+9. After: reset the reviewer vault and delete the PostHog decision (see upkeep). Upload the
+   video unlisted, and put the URL in `review.demo_recording_url`.
 
 ## Screenshots to capture
 

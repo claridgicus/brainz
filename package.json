@@ -5,7 +5,8 @@
   "type": "module",
   "workspaces": [
     "packages/*",
-    "apps/*"
+    "apps/*",
+    "demos"
   ],
   "engines": {
     "node": ">=20"
@@ -15,6 +16,9 @@
     "test": "npm test --workspaces --if-present && npm run test:integrations",
     "test:all": "node scripts/test-all.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test:integrations": "node --test integrations/claude-code/brainz-orchestrate/test/brainz-orch.test.mjs"
+    "test:integrations": "node --test integrations/claude-code/brainz-orchestrate/test/brainz-orch.test.mjs",
+    "demos:record": "npm run record -w @brainz/demos --",
+    "demos:check": "npm run check -w @brainz/demos --",
+    "demos:stack": "npm run stack -w @brainz/demos --"
   }
 }
