@@ -347,8 +347,8 @@ the seeded task states (4 open, 1 taken, 1 done), so it needed no reseed, and th
 revoked (200).
 
 Note: `dream status` reported dreaming **enabled** on the reviewer vault (24 h cadence). A nightly
-sweep could merge or tombstone seeded concepts while a review is in progress. Consider
-`dream {action:"configure", enabled:false}` on that vault, or re-run the seed after reviews.
+sweep could merge or tombstone seeded concepts while a review is in progress. It was turned off on
+2026-10-30 (see "Reviewer vault upkeep").
 
 ## Screenshots
 
@@ -366,3 +366,4 @@ vault picker, and a Claude conversation running `get_context`.
 - Seed or reset: `node docs/submissions/seed-reviewer-vault.mjs ~/.config/brainz-reviewers/anthropic.json`. This runs on top of `apps/cloud/scripts/reviewer-account.mjs --seed`, is idempotent, and puts the tasks back to their seeded states.
 - If the account is ever re-created, mark the vault onboarded again (`onboard {action:"complete"}` over an OAuth connection) so tool results carry no onboarding notice.
 - Delete anything a review created, e.g. the PostHog decision, by hand or from the reviewer's own Claude connection.
+- **Dreaming is OFF** on this vault (and on the OpenAI reviewer vault) since 2026-10-30, with James's approval. It was done with the reviewer's own access: a password session minted a temporary vault key, called `dream {action:"configure", enabled:false}` on `/mcp`, and revoked the key. `dream status` now shows `enabled: false`, `nextDreamAt: null`. **Turn it back on after both reviews** the same way with `enabled: true` (24 h cadence). The last sweep, on 2026-10-29 at 09:53 UTC, changed 24 concepts in its light stage.
