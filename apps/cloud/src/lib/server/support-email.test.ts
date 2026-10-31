@@ -5,7 +5,7 @@ import { handleInbound, purgeSupportMail, type InboundEmail } from "./support-em
 import {
   ESCALATION_HOURLY_LIMIT,
   GLOBAL_HOURLY_LIMIT,
-  PRIORITY_ESCALATION_HOURLY_LIMIT,
+  LEGAL_ESCALATION_HOURLY_LIMIT,
   SENDER_HOURLY_LIMIT,
 } from "./support-inbox";
 
@@ -193,7 +193,7 @@ describe("handleInbound", () => {
     expect((await handleInbound(message(raw).m, env, vault, at(0))).disposition).toBe("dropped");
   });
 
-  it("rate-limits a sender but never an authenticated legal escalation", async () => {
+  it("rate-limits a sender, even for authenticated legal mail", async () => {
     const { vault, env } = setup();
     for (let i = 0; i < SENDER_HOURLY_LIMIT; i++) {
       const out = await handleInbound(message(rawEmail({ auth: PASS, messageId: `n${i}@x` })).m, env, vault, at(i));
@@ -203,11 +203,31 @@ describe("handleInbound", () => {
     expect((await handleInbound(limited.m, env, vault, at(30))).disposition).toBe("rejected");
     expect(limited.rejects[0]).toMatch(/Too many/);
     const legal = message(rawEmail({ auth: PASS, messageId: "legal@x", subject: "GDPR request" }));
-    expect((await handleInbound(legal.m, env, vault, at(31))).disposition).toBe("escalated");
+    expect((await handleInbound(legal.m, env, vault, at(31))).disposition).toBe("rejected");
+    expect(legal.forwards).toHaveLength(0);
     // An `unsure` escalation is mail anyone can send: it is rate-limited.
     const unsure = message(rawEmail({ auth: PASS, messageId: "u@x", subject: "Hello", body: "Pricing?" }));
     expect((await handleInbound(unsure.m, env, vault, at(32))).disposition).toBe("rejected");
     expect(unsure.forwards).toHaveLength(0);
+  });
+
+  it("exempts authenticated legal and reviewer mail from the inbox limit only", async () => {
+    const { d1, vault, env } = setup();
+    seedRows(d1, GLOBAL_HOURLY_LIMIT, { disposition: "task" });
+    const howto = message(rawEmail({ auth: PASS }));
+    expect((await handleInbound(howto.m, env, vault, at(1))).disposition).toBe("rejected");
+    const legal = message(rawEmail({ auth: PASS, messageId: "legal@x", subject: "GDPR request" }));
+    expect((await handleInbound(legal.m, env, vault, at(2))).disposition).toBe("escalated");
+    const reviewer = message(
+      rawEmail({
+        from: "rev@anthropic.com",
+        messageId: "rev@anthropic.com",
+        subject: "Directory review",
+        auth: "spf=pass; dkim=pass header.d=anthropic.com; dmarc=pass header.from=anthropic.com",
+      }),
+      { from: "rev@anthropic.com" },
+    );
+    expect((await handleInbound(reviewer.m, env, vault, at(3))).disposition).toBe("escalated");
   });
 
   it("counts only kept mail toward the inbox's hourly limit", async () => {
@@ -234,12 +254,22 @@ describe("handleInbound", () => {
     expect((await handleInbound(legal.m, env, vault, at(2))).forwarded).toBe(true);
   });
 
-  it("caps priority escalation forwards too", async () => {
+  it("caps legal forwards in their own budget, which never blocks reviewer mail", async () => {
     const { d1, vault, env } = setup();
-    seedRows(d1, PRIORITY_ESCALATION_HOURLY_LIMIT, { disposition: "escalated", category: "legal", authenticated: true });
+    seedRows(d1, LEGAL_ESCALATION_HOURLY_LIMIT, { disposition: "escalated", category: "legal", authenticated: true });
     const legal = message(rawEmail({ auth: PASS, subject: "GDPR request" }));
     const out = await handleInbound(legal.m, env, vault, at(1));
     expect(out).toMatchObject({ forwarded: false, disposition: "task" });
+    const reviewer = message(
+      rawEmail({
+        from: "rev@openai.com",
+        messageId: "rev@openai.com",
+        subject: "Directory review",
+        auth: "spf=pass; dkim=pass header.d=openai.com; dmarc=pass header.from=openai.com",
+      }),
+      { from: "rev@openai.com" },
+    );
+    expect(await handleInbound(reviewer.m, env, vault, at(2))).toMatchObject({ category: "reviewer", forwarded: true });
   });
 
   it("rejects when the forward cap is spent and no vault can keep the mail", async () => {

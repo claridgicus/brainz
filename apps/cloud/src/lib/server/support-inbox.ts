@@ -33,8 +33,13 @@ export const GLOBAL_HOURLY_LIMIT = 200;
  * forwarded.
  */
 export const ESCALATION_HOURLY_LIMIT = 20;
-/** The separate, higher forward ceiling for authenticated reviewer and legal mail. */
-export const PRIORITY_ESCALATION_HOURLY_LIMIT = 50;
+/** The separate forward ceiling for authenticated legal mail. */
+export const LEGAL_ESCALATION_HOURLY_LIMIT = 50;
+/**
+ * The separate forward ceiling for authenticated reviewer mail (only the
+ * reviewer domains can produce it, so legal floods can't starve it).
+ */
+export const REVIEWER_ESCALATION_HOURLY_LIMIT = 50;
 /** Outbound replies per hour across the inbox. */
 export const OUTBOUND_HOURLY_LIMIT = 20;
 /** "Draft reply waiting" notices to the escalation address per hour. */
@@ -177,7 +182,7 @@ export interface SenderAuth {
   /** Signing domains of the passing DKIM signatures. */
   dkimDomains: string[];
   dmarc: AuthVerdict;
-  /** The header.from domain DMARC was evaluated for, when stated. */
+  /** The header.from domain of the dmarc clause (null when absent or ambiguous). */
   dmarcFrom: string | null;
   /** The verdicts came from Cloudflare's own header (see parseAuthResults). */
   trusted: boolean;
@@ -200,13 +205,145 @@ function verdict(value: string | undefined): AuthVerdict {
  */
 export const CLOUDFLARE_AUTHSERV_ID = "mx.cloudflare.net";
 
+/** One resinfo clause of an Authentication-Results header (RFC 8601 §2.2). */
+export interface ResInfo {
+  /** Method, lowercased, without a `/version` suffix (e.g. "dkim"). */
+  method: string;
+  /** Result, lowercased (e.g. "pass"). */
+  result: string;
+  /** `ptype.property` → value (key lowercased, quotes removed), e.g. "header.d". */
+  props: Map<string, string>;
+}
+
+export interface AuthResultsHeader {
+  /** The authserv-id, lowercased ("" when absent). */
+  authservId: string;
+  results: ResInfo[];
+}
+
+/**
+ * Split an Authentication-Results value into its `;`-separated parts with
+ * comments removed, honouring quoted strings (a `;` or `(` inside quotes is
+ * data) and nested comments.
+ */
+function splitClauses(value: string): string[] {
+  const clauses: string[] = [];
+  let cur = "";
+  let depth = 0;
+  let quoted = false;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (quoted) {
+      cur += ch;
+      if (ch === "\\" && i + 1 < value.length) cur += value[++i];
+      else if (ch === '"') quoted = false;
+    } else if (depth > 0) {
+      if (ch === "\\") i++;
+      else if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+    } else if (ch === "(") {
+      depth = 1;
+      cur += " ";
+    } else if (ch === '"') {
+      quoted = true;
+      cur += ch;
+    } else if (ch === ";") {
+      clauses.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  clauses.push(cur);
+  return clauses;
+}
+
+/** The `key=value` / bare tokens of one clause (comments already removed). */
+function clauseTokens(clause: string): { key: string; value: string | null }[] {
+  const tokens: { key: string; value: string | null }[] = [];
+  let i = 0;
+  const ws = () => {
+    while (i < clause.length && /\s/.test(clause[i])) i++;
+  };
+  /** An atom or quoted string, up to whitespace (quotes removed, escapes resolved). */
+  const word = (stopAtEquals: boolean) => {
+    let out = "";
+    while (i < clause.length && !/\s/.test(clause[i]) && !(stopAtEquals && clause[i] === "=")) {
+      if (clause[i] === '"') {
+        i++;
+        while (i < clause.length && clause[i] !== '"') {
+          if (clause[i] === "\\" && i + 1 < clause.length) i++;
+          out += clause[i++];
+        }
+        i++;
+      } else {
+        out += clause[i++];
+      }
+    }
+    return out;
+  };
+  for (ws(); i < clause.length; ws()) {
+    const key = word(true);
+    ws();
+    if (clause[i] === "=") {
+      i++;
+      ws();
+      tokens.push({ key: key.toLowerCase(), value: word(false) });
+    } else {
+      tokens.push({ key: key.toLowerCase(), value: null });
+    }
+  }
+  return tokens;
+}
+
+/**
+ * Parse an Authentication-Results value per RFC 8601: the authserv-id, then
+ * one resinfo per `;` clause, whose leading `method=result` is the verdict and
+ * whose `ptype.property=value` pairs belong to that clause only. Values are
+ * single tokens or quoted strings, so sender-controlled data such as
+ * `smtp.mailfrom=dmarc=pass@evil.example` stays one property value and can
+ * never read as a result or another property.
+ */
+export function parseAuthResultsHeader(value: string): AuthResultsHeader {
+  const [head = "", ...rest] = splitClauses(value);
+  // A leading `key=value` is a result, not an authserv-id (the id is missing).
+  const id = clauseTokens(head)[0];
+  const authservId = id && id.value === null ? id.key : "";
+  const results: ResInfo[] = [];
+  for (const clause of rest) {
+    const [first, ...props] = clauseTokens(clause);
+    if (!first || first.value === null || first.value === "") continue;
+    const res: ResInfo = {
+      method: first.key.split("/")[0],
+      result: first.value.toLowerCase(),
+      props: new Map(),
+    };
+    for (const p of props) {
+      if (p.value !== null && p.key.includes(".") && !res.props.has(p.key)) res.props.set(p.key, p.value);
+    }
+    results.push(res);
+  }
+  return { authservId, results };
+}
+
 /** The authserv-id of an Authentication-Results value (lowercased, "" if none). */
 export function authservId(value: string): string {
-  const head = value.split(";", 1)[0] ?? "";
-  return head.replace(/\([^)]*\)/g, " ").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+  return parseAuthResultsHeader(value).authservId;
 }
 
 const NO_AUTH: SenderAuth = { spf: "none", dkim: "none", dkimDomains: [], dmarc: "none", dmarcFrom: null, trusted: false };
+
+/**
+ * Several clauses for one method, combined fail-closed: any fail is a fail, a
+ * pass needs every clause to pass. (Cloudflare writes one spf and one dmarc
+ * clause; a second one could only be smuggled in, and must not win.)
+ */
+function combine(results: readonly string[]): AuthVerdict {
+  if (results.length === 0) return "none";
+  if (results.includes("fail")) return "fail";
+  if (results.every((r) => r === "pass")) return "pass";
+  return verdict(results.find((r) => r !== "pass"));
+}
 
 /**
  * Read SPF/DKIM/DMARC from the TOPMOST Authentication-Results header, and only
@@ -214,23 +351,25 @@ const NO_AUTH: SenderAuth = { spf: "none", dkim: "none", dkimDomains: [], dmarc:
  * on receipt. Every other header (lower ones, or a topmost one with another
  * authserv-id, which means Cloudflare's is missing) may be sender-forged, so
  * anything else reads as "none" (`trusted: false`): never authenticated, never
- * a pass.
+ * a pass. Passing DKIM domains come from `header.d` of passing dkim clauses,
+ * and the DMARC domain from `header.from` of the dmarc clause(s).
  */
 export function parseAuthResults(authResults: string[]): SenderAuth {
-  const top = authResults[0] ?? "";
-  if (authservId(top) !== CLOUDFLARE_AUTHSERV_ID) return { ...NO_AUTH, dkimDomains: [] };
-  const first = (method: string) =>
-    new RegExp(`\\b${method}=([a-z]+)`, "i").exec(top)?.[1];
-  const dkimDomains = [...top.matchAll(/\bdkim=pass\b[^;]*?\bheader\.(?:d|i)=@?([a-z0-9.-]+)/gi)].map(
-    (m) => m[1].toLowerCase(),
-  );
-  const dkimAll = [...top.matchAll(/\bdkim=([a-z]+)/gi)].map((m) => m[1].toLowerCase());
-  const dmarcFrom = /\bdmarc=[a-z]+\b[^;]*?\bheader\.from=([a-z0-9.-]+)/i.exec(top)?.[1]?.toLowerCase() ?? null;
+  const header = parseAuthResultsHeader(authResults[0] ?? "");
+  if (header.authservId !== CLOUDFLARE_AUTHSERV_ID) return { ...NO_AUTH, dkimDomains: [] };
+  const of = (method: string) => header.results.filter((r) => r.method === method);
+  const dkim = of("dkim");
+  const dmarc = of("dmarc");
+  const dmarcFroms = new Set(dmarc.map((r) => r.props.get("header.from")?.toLowerCase() ?? ""));
+  const dmarcFrom = dmarcFroms.size === 1 ? [...dmarcFroms][0] || null : null;
   return {
-    spf: verdict(first("spf")),
-    dkim: dkimAll.includes("pass") ? "pass" : verdict(dkimAll[0]),
-    dkimDomains,
-    dmarc: verdict(first("dmarc")),
+    spf: combine(of("spf").map((r) => r.result)),
+    dkim: dkim.some((r) => r.result === "pass") ? "pass" : combine(dkim.map((r) => r.result)),
+    dkimDomains: dkim
+      .filter((r) => r.result === "pass")
+      .map((r) => (r.props.get("header.d") ?? "").toLowerCase())
+      .filter((d) => /^[a-z0-9.-]+$/.test(d)),
+    dmarc: combine(dmarc.map((r) => r.result)),
     dmarcFrom,
     trusted: true,
   };
@@ -246,14 +385,17 @@ function domainMatches(domain: string, root: string): boolean {
 }
 
 /**
- * The From domain is authenticated: DMARC passed, or a DKIM signature passed
- * for the From domain (or its organizational parent).
+ * The From domain is authenticated: DMARC passed for exactly that domain
+ * (`header.from` must be stated and equal it), or, only when the domain
+ * publishes no DMARC policy (`dmarc=none`), a DKIM signature passed for the
+ * From domain or a parent of it.
  */
 export function senderAuthenticated(from: string, auth: SenderAuth): boolean {
   if (!auth.trusted) return false;
   const domain = domainOf(from);
   if (!domain) return false;
-  if (auth.dmarc === "pass" && (auth.dmarcFrom === null || auth.dmarcFrom === domain)) return true;
+  if (auth.dmarc === "pass") return auth.dmarcFrom === domain;
+  if (auth.dmarc !== "none") return false;
   return auth.dkimDomains.some((d) => domainMatches(domain, d));
 }
 
@@ -329,13 +471,18 @@ export function classifyInbound(msg: ParsedInbound, auth: SenderAuth): Classific
 }
 
 /**
- * Escalations exempt from the per-sender and inbox limits (still under
- * PRIORITY_ESCALATION_HOURLY_LIMIT): an authenticated reviewer, or legal mail
- * from an authenticated sender. Everything else that escalates is mail anyone
- * can produce, so it is rate-limited like ordinary mail.
+ * Which hourly forward budget an escalation draws on. `reviewer` (an
+ * authenticated reviewer domain) and `legal` (legal wording from an
+ * authenticated sender) each have their own; everything else that escalates is
+ * mail anyone can produce (`ordinary`). Reviewer and legal mail skip the
+ * inbox-wide limit but not the per-sender one.
  */
-export function isPriorityEscalation(category: SupportCategory, authenticated: boolean): boolean {
-  return category === "reviewer" || (category === "legal" && authenticated);
+export type EscalationClass = "reviewer" | "legal" | "ordinary";
+
+export function escalationClass(category: SupportCategory, authenticated: boolean): EscalationClass {
+  if (category === "reviewer") return "reviewer";
+  if (category === "legal" && authenticated) return "legal";
+  return "ordinary";
 }
 
 // --------------------------------------------------------- auto-send policy

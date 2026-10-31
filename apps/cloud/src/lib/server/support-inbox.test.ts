@@ -5,9 +5,10 @@ import {
   authservId,
   classifyInbound,
   dropReason,
-  isPriorityEscalation,
+  escalationClass,
   newTaskBody,
   parseAuthResults,
+  parseAuthResultsHeader,
   parseIdList,
   parseInbound,
   quoteUntrusted,
@@ -71,7 +72,7 @@ describe("authentication", () => {
   it("reads the authserv-id", () => {
     expect(authservId("mx.cloudflare.net; spf=pass")).toBe("mx.cloudflare.net");
     expect(authservId(" MX.Cloudflare.NET 1 (comment); dkim=pass")).toBe("mx.cloudflare.net");
-    expect(authservId("spf=pass")).toBe("spf=pass");
+    expect(authservId("spf=pass")).toBe("");
   });
 
   it("trusts only a topmost header whose authserv-id is Cloudflare's", () => {
@@ -85,6 +86,68 @@ describe("authentication", () => {
     expect(bare.trusted).toBe(false);
     expect(senderAuthenticated("rev@anthropic.com", bare)).toBe(false);
     expect(parseAuthResults([]).trusted).toBe(false);
+  });
+
+  it("parses resinfo clauses per RFC 8601: per-clause properties, quotes and comments", () => {
+    const h = parseAuthResultsHeader(
+      'mx.cloudflare.net (Cloudflare; mx) 1; dkim=pass (2048-bit key; unprotected) header.d="example.com" header.s=cf; ' +
+        'spf = pass smtp.mailfrom="a;dmarc=pass"@x.example; dmarc/1=pass (p=REJECT sp=reject) header.from=example.com',
+    );
+    expect(h.authservId).toBe("mx.cloudflare.net");
+    expect(h.results.map((r) => [r.method, r.result])).toEqual([
+      ["dkim", "pass"],
+      ["spf", "pass"],
+      ["dmarc", "pass"],
+    ]);
+    expect(h.results[0].props.get("header.d")).toBe("example.com");
+    expect(h.results[1].props.get("smtp.mailfrom")).toBe("a;dmarc=pass@x.example");
+    expect(h.results[2].props.get("header.from")).toBe("example.com");
+  });
+
+  it("A: a dmarc=pass inside the envelope sender is not a DMARC result", () => {
+    const auth = parseAuthResults([
+      "mx.cloudflare.net; spf=pass smtp.mailfrom=dmarc=pass@evil.example; dkim=none; dmarc=fail header.from=victim.example",
+    ]);
+    expect(auth.dmarc).toBe("fail");
+    expect(senderAuthenticated("x@victim.example", auth)).toBe(false);
+  });
+
+  it("B: a dkim=pass header.d= inside the envelope sender is not a DKIM signature", () => {
+    const auth = parseAuthResults([
+      "mx.cloudflare.net; spf=pass smtp.mailfrom=dkim=pass.header.d=anthropic.com@evil.example; dkim=none; dmarc=none",
+    ]);
+    expect(auth.dkimDomains).toEqual([]);
+    expect(auth.dkim).toBe("none");
+    expect(senderAuthenticated("rev@anthropic.com", auth)).toBe(false);
+  });
+
+  it("ignores result-looking text in comments and quoted values", () => {
+    const auth = parseAuthResults([
+      'mx.cloudflare.net; spf=fail (dmarc=pass header.from=victim.example) smtp.mailfrom="dkim=pass header.d=victim.example"@e.x; dkim=none; dmarc=none',
+    ]);
+    expect(auth).toMatchObject({ spf: "fail", dkim: "none", dkimDomains: [], dmarc: "none" });
+  });
+
+  it("requires the dmarc clause to state header.from", () => {
+    const auth = parseAuthResults(["mx.cloudflare.net; spf=pass; dkim=none; dmarc=pass"]);
+    expect(auth.dmarcFrom).toBeNull();
+    expect(senderAuthenticated("x@example.com", auth)).toBe(false);
+  });
+
+  it("combines a smuggled second dmarc clause fail-closed", () => {
+    const auth = parseAuthResults([
+      "mx.cloudflare.net; dmarc=pass header.from=victim.example; dmarc=fail header.from=victim.example",
+    ]);
+    expect(auth.dmarc).toBe("fail");
+    const two = parseAuthResults(["mx.cloudflare.net; dmarc=pass header.from=a.example; dmarc=pass header.from=b.example"]);
+    expect(senderAuthenticated("x@a.example", two)).toBe(false);
+  });
+
+  it("uses a DKIM signature only when the domain publishes no DMARC policy", () => {
+    const none = parseAuthResults(["mx.cloudflare.net; dkim=pass header.d=example.com; dmarc=none"]);
+    expect(senderAuthenticated("x@example.com", none)).toBe(true);
+    const other = parseAuthResults(["mx.cloudflare.net; dkim=pass header.d=example.com; dmarc=temperror header.from=example.com"]);
+    expect(senderAuthenticated("x@example.com", other)).toBe(false);
   });
 
   it("does not count a DMARC pass evaluated for another From domain", () => {
@@ -218,11 +281,11 @@ describe("auto-send policy", () => {
     expect(autoSendBlocker([row({ replyTo: "other@evil.example" })], "howto")).toMatch(/Reply-To/);
   });
 
-  it("marks only authenticated reviewer/legal escalations as priority", () => {
-    expect(isPriorityEscalation("reviewer", true)).toBe(true);
-    expect(isPriorityEscalation("legal", true)).toBe(true);
-    expect(isPriorityEscalation("legal", false)).toBe(false);
-    expect(isPriorityEscalation("unsure", true)).toBe(false);
+  it("gives reviewer and authenticated legal escalations their own budgets", () => {
+    expect(escalationClass("reviewer", true)).toBe("reviewer");
+    expect(escalationClass("legal", true)).toBe("legal");
+    expect(escalationClass("legal", false)).toBe("ordinary");
+    expect(escalationClass("unsure", true)).toBe("ordinary");
   });
 });
 

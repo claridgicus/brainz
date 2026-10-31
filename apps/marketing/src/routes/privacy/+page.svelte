@@ -166,8 +166,9 @@
 			registration rate-limit records are deleted after an hour.
 		</li>
 		<li>
-			Support email: kept so we can follow up on your request. We do not yet delete it
-			automatically; email us to have your support messages deleted.
+			Support email: kept so we can follow up on your request. We delete the original raw copy
+			of each message after 90 days; the message text, attachments and our replies are kept
+			until you ask us to delete them, so email us to have your support messages deleted.
 		</li>
 		<li>Deleted data can remain in Cloudflare's point-in-time recovery for up to 30 days.</li>
 	</ul>

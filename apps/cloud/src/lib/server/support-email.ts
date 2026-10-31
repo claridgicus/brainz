@@ -28,7 +28,8 @@ import {
   GLOBAL_HOURLY_LIMIT,
   MAX_D1_RAW_BYTES,
   MAX_INBOUND_BYTES,
-  PRIORITY_ESCALATION_HOURLY_LIMIT,
+  LEGAL_ESCALATION_HOURLY_LIMIT,
+  REVIEWER_ESCALATION_HOURLY_LIMIT,
   RAW_RETENTION_DAYS,
   SENDER_HOURLY_LIMIT,
   type AttachmentMeta,
@@ -38,7 +39,8 @@ import {
   classifyInbound,
   dropReason,
   inboundSection,
-  isPriorityEscalation,
+  escalationClass,
+  type EscalationClass,
   newTaskBody,
   oneLine,
   parseAuthResults,
@@ -116,16 +118,23 @@ async function countSince(db: D1Like, where: string, binds: unknown[]): Promise<
 
 /** Inbound rows of mail that was kept (rejected/dropped mail leaves no row). */
 const KEPT_INBOUND = `direction = 'in' AND disposition IN ('task', 'escalated', 'stored')`;
-/** SQL twin of isPriorityEscalation() over a row's category + auth_json. */
-const PRIORITY_ROW = `(coalesce(category, '') = 'reviewer' OR (coalesce(category, '') = 'legal' AND coalesce(json_extract(auth_json, '$.authenticated'), 0) = 1))`;
+/** SQL twin of escalationClass() over a row's category + auth_json. */
+const REVIEWER_ROW = `coalesce(category, '') = 'reviewer'`;
+const LEGAL_ROW = `(coalesce(category, '') = 'legal' AND coalesce(json_extract(auth_json, '$.authenticated'), 0) = 1)`;
+const CLASS_ROW: Record<EscalationClass, string> = {
+  reviewer: REVIEWER_ROW,
+  legal: LEGAL_ROW,
+  ordinary: `NOT (${REVIEWER_ROW} OR ${LEGAL_ROW})`,
+};
+const CLASS_LIMIT: Record<EscalationClass, number> = {
+  reviewer: REVIEWER_ESCALATION_HOURLY_LIMIT,
+  legal: LEGAL_ESCALATION_HOURLY_LIMIT,
+  ordinary: ESCALATION_HOURLY_LIMIT,
+};
 
-/** Escalation forwards in the last hour, in the priority class or the ordinary one. */
-async function forwardsSince(db: D1Like, since: number, priority: boolean): Promise<number> {
-  return countSince(
-    db,
-    `direction = 'in' AND disposition = 'escalated' AND created_at >= ? AND ${priority ? "" : "NOT "}${PRIORITY_ROW}`,
-    [since],
-  );
+/** Escalation forwards in the last hour drawing on one class's budget. */
+async function forwardsSince(db: D1Like, since: number, cls: EscalationClass): Promise<number> {
+  return countSince(db, `direction = 'in' AND disposition = 'escalated' AND created_at >= ? AND ${CLASS_ROW[cls]}`, [since]);
 }
 
 /**
@@ -307,10 +316,9 @@ export async function handleInbound(
     return { rawKey: null, rawB64: raw.byteLength <= MAX_D1_RAW_BYTES ? base64(raw) : null };
   };
   /** Room left under the hourly forward cap? A D1 outage allows the forward. */
-  const mayForward = async (priority: boolean): Promise<boolean> => {
+  const mayForward = async (cls: EscalationClass): Promise<boolean> => {
     try {
-      const limit = priority ? PRIORITY_ESCALATION_HOURLY_LIMIT : ESCALATION_HOURLY_LIMIT;
-      return (await forwardsSince(db, since, priority)) < limit;
+      return (await forwardsSince(db, since, cls)) < CLASS_LIMIT[cls];
     } catch (err) {
       console.error("[support] forward-cap check failed; forwarding", err);
       return true;
@@ -333,7 +341,7 @@ export async function handleInbound(
     msg = await parseInbound(raw, message.from);
   } catch (err) {
     console.error("[support] parse failed", err);
-    if (await mayForward(false)) await forward("unparsed", "could not parse");
+    if (await mayForward("ordinary")) await forward("unparsed", "could not parse");
     let kept: { rawKey: string | null; rawB64: string | null } = { rawKey: null, rawB64: null };
     try {
       kept = await keepRaw(raw);
@@ -356,26 +364,27 @@ export async function handleInbound(
   }
 
   const classification = classifyInbound(msg, auth);
-  const priority = classification.escalate && isPriorityEscalation(classification.category, authenticated);
+  const cls: EscalationClass = classification.escalate
+    ? escalationClass(classification.category, authenticated)
+    : "ordinary";
 
   // 4. Rate limits (reject with a reason a real sender can read), counting only
-  // kept mail. A D1 outage skips the limit rather than losing mail. Only
-  // priority escalations (authenticated reviewer/legal) skip them.
-  if (!priority) {
-    try {
-      const fromSender = await countSince(db, `${KEPT_INBOUND} AND from_addr = ? AND created_at >= ?`, [msg.from, since]);
-      const total = await countSince(db, `${KEPT_INBOUND} AND created_at >= ?`, [since]);
-      const limited =
-        fromSender >= SENDER_HOURLY_LIMIT ? "sender" : total >= GLOBAL_HOURLY_LIMIT ? "inbox" : null;
-      if (limited) {
-        const note = `rate limited (${limited})`;
-        message.setReject("Too many messages to this inbox; please try again later.");
-        console.log(`[support] rejected: ${note}`);
-        return { disposition: "rejected", taskId: null, category: classification.category, forwarded, note };
-      }
-    } catch (err) {
-      console.error("[support] rate-limit check failed; continuing", err);
+  // kept mail. A D1 outage skips the limit rather than losing mail. Every
+  // message is under the per-sender limit; authenticated reviewer and legal
+  // escalations skip only the inbox-wide one.
+  try {
+    const fromSender = await countSince(db, `${KEPT_INBOUND} AND from_addr = ? AND created_at >= ?`, [msg.from, since]);
+    const total = cls === "ordinary" ? await countSince(db, `${KEPT_INBOUND} AND created_at >= ?`, [since]) : 0;
+    const limited =
+      fromSender >= SENDER_HOURLY_LIMIT ? "sender" : total >= GLOBAL_HOURLY_LIMIT ? "inbox" : null;
+    if (limited) {
+      const note = `rate limited (${limited})`;
+      message.setReject("Too many messages to this inbox; please try again later.");
+      console.log(`[support] rejected: ${note}`);
+      return { disposition: "rejected", taskId: null, category: classification.category, forwarded, note };
     }
+  } catch (err) {
+    console.error("[support] rate-limit check failed; continuing", err);
   }
 
   // 5. Escalate first, so storage trouble can't swallow it, unless this
@@ -383,7 +392,7 @@ export async function handleInbound(
   // rejected when there is no vault to keep it in.
   let notForwarded: string | undefined;
   if (classification.escalate || !vault) {
-    if (await mayForward(priority)) {
+    if (await mayForward(cls)) {
       await forward(classification.category, vault ? classification.reason : "support vault not configured");
     } else if (!vault) {
       const note = "forward cap reached and no support vault";
