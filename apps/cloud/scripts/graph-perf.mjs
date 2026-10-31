@@ -20,7 +20,10 @@
  *
  * Run: node scripts/graph-perf.mjs [--sizes 500,2000,5000]
  *      [--modes auto,all,all-flat-edges] [--json out.json] [--headed]
- *      [--software] [--dist dir]   (GRAPH_PERF_SKIP_BUILD=1 reuses a build)
+ *      [--software] [--dist dir] [--extra 'flatmax=1000&dsize=14']
+ *      (GRAPH_PERF_SKIP_BUILD=1 reuses a build; --extra appends bench URL params,
+ *      e.g. flatmax forces the flat layout up to that size — how FLAT_MAX_NODES
+ *      was picked)
  *
  * Headless Chrome rasterizes on the GPU (ANGLE over Vulkan) unless --software
  * is given — SwiftShader's CPU raster makes paint costs look many times worse
@@ -45,6 +48,7 @@ const jsonOut = arg("json", null);
 const headed = argv.includes("--headed");
 const software = argv.includes("--software");
 const dist = arg("dist", path.join(benchDir, "dist"));
+const extra = arg("extra", "");
 if (!software && !process.env.CHROME_FLAGS) {
 	process.env.CHROME_FLAGS = "--ignore-gpu-blocklist --use-angle=vulkan --enable-features=Vulkan --enable-gpu-rasterization";
 }
@@ -156,7 +160,7 @@ const rows = [];
 try {
 	for (const mode of modes) {
 		for (const n of sizes) {
-			const query = mode === "all-flat-edges" ? "mode=all&bundle=0" : `mode=${mode}`;
+			const query = (mode === "all-flat-edges" ? "mode=all&bundle=0" : `mode=${mode}`) + (extra ? `&${extra}` : "");
 			await page.navigate(`${server.url}/?n=${n}&${query}`);
 			await page.evaluate(METER);
 			const load = await phase(page, "load", () => sleep(PHASE_MS));

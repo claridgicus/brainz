@@ -9,7 +9,9 @@
  *   <prefix>-<n>-<mode>-close.png     zoomed in to k≈1.2 (concepts + strands)
  *
  * Run: node scripts/graph-shots.mjs [--out dir] [--prefix after]
- *      [--shots 2000:auto,5000:all,150:all]   (GRAPH_SHOTS_SKIP_BUILD=1 reuses a build)
+ *      [--shots 2000:auto,5000:all,150:all,300:auto:14]   (n:mode[:dsize[:orphans]]; dsize =
+ *      concepts per synthetic domain, 14 ≈ a real product vault)
+ *      (GRAPH_SHOTS_SKIP_BUILD=1 reuses a build)
  */
 import { spawnSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
@@ -28,8 +30,8 @@ const prefix = arg("prefix", "shot");
 const shots = arg("shots", "2000:auto,5000:all,150:all")
 	.split(",")
 	.map((s) => {
-		const [n, mode] = s.split(":");
-		return { n: Number(n), mode: mode ?? "auto" };
+		const [n, mode, dsize, orphans] = s.split(":");
+		return { n: Number(n), mode: mode ?? "auto", dsize: dsize ? Number(dsize) : null, orphans: orphans ? Number(orphans) : 0 };
 	});
 mkdirSync(out, { recursive: true });
 if (!process.env.CHROME_FLAGS) {
@@ -63,13 +65,13 @@ async function zoomTo(k) {
 	await settle();
 }
 try {
-	for (const { n, mode } of shots) {
-		await page.navigate(`${server.url}/?n=${n}&mode=${mode}`);
+	for (const { n, mode, dsize, orphans } of shots) {
+		await page.navigate(`${server.url}/?n=${n}&mode=${mode}${dsize ? `&dsize=${dsize}` : ""}${orphans ? `&orphans=${orphans}` : ""}`);
 		await sleep(1000);
 		await settle();
-		const base = path.join(out, `${prefix}-${n}-${mode}`);
+		const base = path.join(out, `${prefix}-${n}-${mode}${dsize ? `-d${dsize}` : ""}${orphans ? `-o${orphans}` : ""}`);
 		await page.screenshot(`${base}-overview.png`);
-		if (n > 250) {
+		if (n > 300) {
 			await zoomTo(0.5);
 			await page.screenshot(`${base}-zoomed.png`);
 		}

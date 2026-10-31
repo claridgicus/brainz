@@ -8,7 +8,8 @@
 		mode,
 		bundling = true,
 		budget,
-	}: { graph: GraphPayload; mode: "auto" | "all"; bundling?: boolean; budget?: number } = $props();
+		flatMax,
+	}: { graph: GraphPayload; mode: "auto" | "all"; bundling?: boolean; budget?: number; flatMax?: number } = $props();
 	let selectedId = $state<string | null>(null);
 	let graphRef = $state<ReturnType<typeof Graph>>();
 	// Exposed for the drivers: select/pan like the search box does.
@@ -32,6 +33,7 @@
 		{selectedId}
 		{bundling}
 		nodeBudget={budget}
+		flatMaxNodes={flatMax}
 		onselect={(id) => (selectedId = id)}
 	/>
 </div>

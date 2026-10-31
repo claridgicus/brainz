@@ -49,7 +49,6 @@
 		registryView,
 		serializeAnchors,
 		setAnchor,
-		typeClusterCenter,
 		typesVisibleAtZoom,
 		type AnchorMap,
 		type FilterMode,
@@ -58,19 +57,26 @@
 	import {
 		DEFAULT_NODE_BUDGET,
 		FLAT_MAX_NODES,
+		MIN_AUTO_MEMBERS,
+		MIN_AUTO_SHARE,
+		TREE_LOD_BOOST,
+		FLAT_LOD_BOOST,
 		allocateBudget,
 		bubbleRadius,
 		buildClusters,
 		clusterFootprint,
 		clusterLinks,
+		expandPolicyKey,
 		expandScaleFor,
 		expansionCandidates,
+		parseExpandPolicy,
 		fullDetailIds,
 		labelCollideRadius,
 		spiralSeed,
 		truncateLabel,
 		type ClusterGeom,
 		type ClusterIndex,
+		type ExpandPolicy,
 	} from "$lib/graph-lod";
 	import { buildBackbone, bundleEdges, straightPath, type Backbone, type BundleEnd, type BundleInput } from "$lib/graph-bundle";
 
@@ -100,6 +106,7 @@
 		focusId = null,
 		selectedId = null,
 		nodeBudget = DEFAULT_NODE_BUDGET,
+		flatMaxNodes = FLAT_MAX_NODES,
 		bundling = true,
 		onselect,
 		onlodchange,
@@ -117,6 +124,8 @@
 		selectedId?: string | null;
 		/** Hard cap on individually rendered nodes in the clustered layout. */
 		nodeBudget?: number;
+		/** Vaults with more concepts than this use the clustered layout (bench override). */
+		flatMaxNodes?: number;
 		/** Route edges as bundles ("ziptie"); false = plain straight edges. */
 		bundling?: boolean;
 		onselect: (id: string) => void;
@@ -241,6 +250,43 @@
 	let expanded = new Set<string>();
 	/** clusters the user opened (click) → the zoom they were opened at */
 	const manualOpen = new Map<string, number>();
+	/** Expand all / Collapse all / auto (size-driven), remembered per vault. */
+	let expandPolicy = $state<ExpandPolicy>("auto");
+	/** Reactive mirror of `mode === "tree"` (the expand control only shows then). */
+	let clustered = $state(false);
+	let policyFor = "";
+	function loadExpandPolicy(): void {
+		if (policyFor === vaultId) return;
+		policyFor = vaultId;
+		let raw: string | null = null;
+		try {
+			raw = typeof localStorage === "undefined" ? null : localStorage.getItem(expandPolicyKey(vaultId));
+		} catch {
+			/* storage disabled */
+		}
+		expandPolicy = parseExpandPolicy(raw);
+	}
+	/**
+	 * Set the cluster expansion policy (exported for parents/tests): "all" opens
+	 * every on-screen cluster within the node budget, "none" keeps them all
+	 * collapsed (click still opens one), "auto" lets on-screen size decide.
+	 */
+	export function setExpandPolicy(next: ExpandPolicy): void {
+		expandPolicy = next;
+		policyFor = vaultId;
+		if (next !== "none") manualOpen.clear();
+		try {
+			if (typeof localStorage !== "undefined") {
+				if (next === "auto") localStorage.removeItem(expandPolicyKey(vaultId));
+				else localStorage.setItem(expandPolicyKey(vaultId), next);
+			}
+		} catch {
+			/* storage full/disabled — in-memory policy still applies */
+		}
+		if (mode === "tree") scheduleLod();
+	}
+	/** The control's buttons: clicking the active one returns to auto. */
+	const togglePolicy = (p: ExpandPolicy): void => setExpandPolicy(expandPolicy === p ? "auto" : p);
 
 	const nodeEls = new Map<string, SVGGElement>();
 	const bubbleEls = new Map<string, SVGGElement>();
@@ -280,7 +326,10 @@
 	 */
 	function recomputeLod(): boolean {
 		if (filterMode !== "auto") return false;
-		const next = typesVisibleAtZoom(view.k, {
+		// Read the zoom boosted (most in the cluster map, which fits far smaller)
+		// so the fitted overview already shows domains + features/specs, and the
+		// rest reveal while clusters open — not only once zoomed far in.
+		const next = typesVisibleAtZoom(view.k * (mode === "tree" ? TREE_LOD_BOOST : FLAT_LOD_BOOST), {
 			prev: lodTypes,
 			view: regView,
 			types: orderedTypes,
@@ -396,9 +445,11 @@
 			nodeCR.set(n.id, labelCollideRadius(n.title, r));
 		}
 		index = buildClusters(graph.nodes, graph.edges);
-		const nextMode = graph.nodes.length > FLAT_MAX_NODES ? "tree" : "flat";
+		const nextMode = graph.nodes.length > flatMaxNodes ? "tree" : "flat";
 		if (nextMode !== mode) fitted = false;
 		mode = nextMode;
+		clustered = mode === "tree";
+		loadExpandPolicy();
 		local.clear();
 		builtFor = { graph, registry };
 	}
@@ -486,11 +537,20 @@
 		topSim?.stop();
 		topSim = null;
 		units = new Map();
-		// Cluster ordering (index → angle around the canvas): registry order when
-		// present, else the built-in palette. Mutable copy for typeClusterCenter.
-		const clusterOrder: string[] = [...orderedTypes];
 		const width = svg.clientWidth || 900;
 		const height = svg.clientHeight || 600;
+		// Community centres: each link community (the same clusters the large-vault
+		// layout uses) gets a spot on a phyllotaxis spiral sized from its members'
+		// collision radii, largest at the centre, so linked concepts pull together
+		// whatever their type.
+		const commList = [...index.clusters.values()];
+		const commSeed = spiralSeed(commList.map((c) => clusterFootprint(c.members.map((m) => nodeCR.get(m) ?? 20))), 60);
+		// Squeezed to ~0.6× the viewport (like the old type ring): they are only
+		// gentle targets — charge + collision do the real spacing.
+		const spread = Math.max(1, ...commSeed.map((p) => Math.hypot(p.x, p.y)));
+		const fit = Math.min(1, (Math.min(width, height) * 0.6) / spread);
+		const commCentre = new Map<string, P>(commList.map((c, i) => [c.id, { x: width / 2 + commSeed[i]!.x * fit, y: height / 2 + commSeed[i]!.y * fit }]));
+		const centreOf = (d: SimNode): P => commCentre.get(index.clusterOf.get(d.id) ?? "") ?? { x: width / 2, y: height / 2 };
 
 		// New nodes entering on a tier crossing: seed them near the canvas center
 		// (with a tiny jitter) so they ease in from the middle rather than flying
@@ -537,12 +597,11 @@
 			)
 			.force("charge", forceManyBody().strength(-800).distanceMax(1000))
 			.force("center", forceCenter(width / 2, height / 2).strength(0.02))
-			// Type clustering: each node is pulled toward its concept type's cluster
-			// center (types spread around a circle), so same-type nodes form discrete
-			// clouds. Cross-type edges (the link force) pull two clouds to overlap
-			// Venn-style — the more connections, the more they merge.
-			.force("x", forceX<SimNode>((d) => typeClusterCenter(d.data.type, clusterOrder, width, height).x).strength(0.07))
-			.force("y", forceY<SimNode>((d) => typeClusterCenter(d.data.type, clusterOrder, width, height).y).strength(0.07))
+			// Community clustering: each node is pulled toward its link community's
+			// centre, so concepts that link to each other form one cloud regardless
+			// of type; edges between communities pull neighbouring clouds together.
+			.force("x", forceX<SimNode>((d) => centreOf(d).x).strength(0.07))
+			.force("y", forceY<SimNode>((d) => centreOf(d).y).strength(0.07))
 			.force(
 				"collide",
 				forceCollide<SimNode>()
@@ -788,7 +847,8 @@
 			// A clicked-open cluster lapses once the user zooms well back out.
 			// (Not mid-animation: the jump that opened it starts zoomed out.)
 			if (!animating) for (const [id, k] of manualOpen) if (view.k < k * 0.6) manualOpen.delete(id);
-			const cands = expansionCandidates(geoms, vs, expanded, new Set(manualOpen.keys())).filter((c) => {
+			const manualIds = new Set(manualOpen.keys());
+			const cands = expansionCandidates(geoms, vs, expanded, manualIds, undefined, expandPolicy).filter((c) => {
 				if (local.has(c.id) || performance.now() - t0 < LOCAL_MS_PER_PASS) return true;
 				deferred = true;
 				return false;
@@ -813,7 +873,17 @@
 				inView.set(cand.id, list.map((x) => x.id));
 				counts.set(cand.id, list.length);
 			}
-			const alloc = allocateBudget(cands, counts, nodeBudget - forced.size);
+			// Size-driven opening only pays off when it shows something: a cluster
+			// whose members on screen are fewer than MIN_AUTO_MEMBERS or
+			// MIN_AUTO_SHARE of its counted size (e.g. just its domains, zoomed far
+			// out in auto mode) stays a bubble that shows its size. Expand all / a
+			// click still opens it.
+			const showsEnough = (cid: string): boolean => {
+				const size = clusterCount.get(cid) ?? 0;
+				return size <= 1 || (counts.get(cid) ?? 0) >= Math.max(MIN_AUTO_MEMBERS, Math.ceil(size * MIN_AUTO_SHARE));
+			};
+			const open = expandPolicy === "auto" ? cands.filter((c) => manualIds.has(c.id) || showsEnough(c.id)) : cands;
+			const alloc = allocateBudget(open, counts, nodeBudget - forced.size);
 			for (const [cid, n] of clusterCount) {
 				const u = units.get(cid)!;
 				const centre = { x: u.x ?? 0, y: u.y ?? 0 };
@@ -939,6 +1009,8 @@
 		svg.dataset["rendered"] = String(nodeEls.size);
 		svg.dataset["bubbles"] = String(bubbleEls.size);
 		svg.dataset["expanded"] = [...expanded].sort().join(",");
+		svg.dataset["expandPolicy"] = expandPolicy;
+		svg.dataset["clusters"] = String(mode === "tree" ? index.clusters.size : 0);
 		svg.dataset["edges"] = String(edgeEls.size);
 		draw();
 		svg.dataset["lodMs"] = (performance.now() - t0).toFixed(1);
@@ -1715,6 +1787,7 @@
 		focused = null;
 		focusReveal = new Set();
 		manualOpen.clear();
+		setExpandPolicy("auto");
 		// Re-layout from scratch.
 		units = new Map();
 		fitted = false;
@@ -1857,6 +1930,22 @@
 	{#if empty}
 		<div class="empty-hint">No nodes match the current filters.</div>
 	{/if}
+	{#if clustered}
+		<div class="expand-ctl" role="group" aria-label="Cluster expansion">
+			<button
+				type="button"
+				aria-pressed={expandPolicy === "all"}
+				title="Open every cluster in view, up to the node budget (click again for automatic)"
+				onclick={() => togglePolicy("all")}>Expand all</button
+			>
+			<button
+				type="button"
+				aria-pressed={expandPolicy === "none"}
+				title="Show every cluster as a bubble; click one to open it (click again for automatic)"
+				onclick={() => togglePolicy("none")}>Collapse all</button
+			>
+		</div>
+	{/if}
 	{#if legend.length > 0}
 		<ul class="edge-legend" aria-label="Edge colours by relation">
 			{#each legend as l (l.rel)}
@@ -1902,6 +1991,35 @@
 		font-size: 14px;
 	}
 
+	.expand-ctl {
+		position: absolute;
+		left: 12px;
+		top: 12px;
+		display: flex;
+		gap: 4px;
+		padding: 3px;
+		background: rgb(10 10 13 / 0.72);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+	}
+	.expand-ctl button {
+		font: inherit;
+		font-size: 11px;
+		padding: 3px 9px;
+		color: var(--text-dim);
+		background: transparent;
+		border: 1px solid transparent;
+		border-radius: 4px;
+		cursor: pointer;
+	}
+	.expand-ctl button:hover {
+		color: var(--text);
+	}
+	.expand-ctl button[aria-pressed="true"] {
+		color: var(--text);
+		border-color: var(--border);
+		background: rgb(124 58 237 / 0.18);
+	}
 	.edge-legend {
 		position: absolute;
 		right: 12px;

@@ -3,12 +3,16 @@ import type { Edge, GraphNode } from "@brainz/contracts";
 import {
 	COLLAPSE_PX,
 	EXPAND_PX,
+	MIN_AUTO_K,
 	allocateBudget,
 	bubbleRadius,
 	buildClusters,
 	clusterFootprint,
 	clusterLinks,
 	expandScaleFor,
+	expandPolicyKey,
+	OPEN_PX,
+	parseExpandPolicy,
 	expansionCandidates,
 	fullDetailIds,
 	labelCollideRadius,
@@ -28,68 +32,136 @@ const node = (id: string, type = "feature", extra: Partial<GraphNode> = {}): Gra
 });
 const partOf = (from: string, to: string): Edge => ({ from, to, relation: "part_of" });
 
+const link = (from: string, to: string, relation = "depends_on"): Edge => ({ from, to, relation });
+
 describe("buildClusters", () => {
-	it("groups concepts under the root of their part_of chain", () => {
+	it("groups a domain with what hangs off it and links to it, named after the domain", () => {
 		const nodes = [node("d", "domain"), node("f", "feature"), node("s", "story"), node("x", "spec")];
 		const edges = [partOf("f", "d"), partOf("s", "f"), { from: "x", to: "f", relation: "governs" }];
 		const { clusters, clusterOf } = buildClusters(nodes, edges);
-		expect(clusterOf.get("s")).toBe("@c:d");
-		expect(clusterOf.get("f")).toBe("@c:d");
-		expect(clusterOf.get("d")).toBe("@c:d");
+		// The parentless spec links into the domain's community — no "Unfiled spec" bucket.
+		for (const id of ["d", "f", "s", "x"]) expect(clusterOf.get(id)).toBe("@c:d");
 		const c = clusters.get("@c:d")!;
 		expect(c.head).toBe("d");
 		expect(c.title).toBe("d");
 		expect(c.type).toBe("domain");
-		// no part_of parent and no children → per-type fallback cluster
-		expect(clusterOf.get("x")).toBe("@c:~spec");
-		expect(clusters.get("@c:~spec")!.title).toBe("Unfiled spec");
+		expect(clusters.size).toBe(1);
 	});
 
-	it("is cycle-safe", () => {
-		const nodes = [node("a"), node("b")];
-		const { clusterOf } = buildClusters(nodes, [partOf("a", "b"), partOf("b", "a")]);
-		expect(clusterOf.get("a")).toBeDefined();
-		expect(clusterOf.get("b")).toBeDefined();
+	it("clusters by link, not by type: parentless tasks join the domain they link into", () => {
+		// Two domains, each with features; tasks have no part_of and link into one
+		// domain's features. The old rule put every task in one "Unfiled task" bucket.
+		const nodes = [node("a", "domain"), node("b", "domain")];
+		const edges: Edge[] = [];
+		for (const d of ["a", "b"]) {
+			for (let i = 0; i < 4; i++) {
+				nodes.push(node(`${d}-f${i}`, "feature"));
+				edges.push(partOf(`${d}-f${i}`, d));
+				if (i > 0) edges.push(link(`${d}-f${i}`, `${d}-f${i - 1}`, "related_to"));
+			}
+		}
+		for (let t = 0; t < 12; t++) {
+			const d = t % 2 === 0 ? "a" : "b";
+			nodes.push(node(`task-${t}`, "task"));
+			edges.push(link(`task-${t}`, `${d}-f${t % 4}`, "realizes"), link(`task-${t}`, `${d}-f${(t + 1) % 4}`));
+		}
+		const { clusters, clusterOf } = buildClusters(nodes, edges);
+		for (let t = 0; t < 12; t++) expect(clusterOf.get(`task-${t}`)).toBe(t % 2 === 0 ? "@c:a" : "@c:b");
+		expect([...clusters.keys()].sort()).toEqual(["@c:a", "@c:b"]);
+		for (const c of clusters.values()) {
+			expect(c.title.startsWith("Unfiled")).toBe(false);
+			expect(new Set(c.members.map((m) => nodes.find((n) => n.id === m)!.type)).size).toBeGreaterThan(1);
+		}
 	});
 
-	it("puts pending (broken-link) concepts in their own fallback cluster", () => {
-		const { clusterOf } = buildClusters([node("p", "concept", { pending: true })], []);
-		expect(clusterOf.get("p")).toBe("@c:~pending");
+	it("follows the links when they disagree with part_of", () => {
+		// x is filed under domain a but all its links go to b's members.
+		const nodes = [node("a", "domain"), node("a1"), node("a2"), node("b", "domain"), node("b1"), node("b2"), node("x")];
+		const edges = [
+			partOf("a1", "a"), partOf("a2", "a"), link("a1", "a2"),
+			partOf("b1", "b"), partOf("b2", "b"), link("b1", "b2"),
+			partOf("x", "a"),
+			link("x", "b"), link("x", "b1"), link("x", "b2"), link("b1", "x", "realizes"),
+		];
+		expect(buildClusters(nodes, edges).clusterOf.get("x")).toBe("@c:b");
 	});
 
-	it("splits oversized clusters by type, then into chunks", () => {
+	it("names a domain-less community after its best-connected concept", () => {
+		const nodes = [node("hub", "spec"), node("s1", "story"), node("s2", "task"), node("s3", "decision")];
+		const edges = [link("s1", "hub"), link("s2", "hub"), link("s3", "hub"), link("s1", "s2")];
+		const { clusters } = buildClusters(nodes, edges);
+		expect([...clusters.keys()]).toEqual(["@c:hub"]);
+		expect(clusters.get("@c:hub")!.type).toBe("spec");
+	});
+
+	it("attaches near-isolated concepts and groups only edgeless ones as loose", () => {
+		const nodes = [node("d", "domain"), node("f"), node("g"), node("leaf", "task"), node("lonely1", "task"), node("lonely2", "spec")];
+		const edges = [partOf("f", "d"), partOf("g", "d"), link("f", "g"), link("leaf", "f")];
+		const { clusters, clusterOf } = buildClusters(nodes, edges);
+		expect(clusterOf.get("leaf")).toBe("@c:d");
+		expect(clusterOf.get("lonely1")).toBe("@c:~loose");
+		expect(clusterOf.get("lonely2")).toBe("@c:~loose");
+		expect(clusters.get("@c:~loose")!.title).toBe("Loose concepts");
+		expect(clusters.size).toBe(2);
+	});
+
+	it("is cycle-safe and keeps pending concepts with what links to them", () => {
+		const { clusterOf } = buildClusters([node("a"), node("b")], [partOf("a", "b"), partOf("b", "a")]);
+		expect(clusterOf.get("a")).toBe(clusterOf.get("b"));
+		const p = buildClusters([node("d", "domain"), node("p", "concept", { pending: true })], [link("d", "p", "references")]);
+		expect(p.clusterOf.get("p")).toBe("@c:d");
+	});
+
+	it("is deterministic and independent of input order", () => {
+		const g = syntheticGraph(800, 7, 14);
+		const a = buildClusters(g.nodes, g.edges);
+		const b = buildClusters([...g.nodes].reverse(), [...g.edges].reverse());
+		expect([...b.clusterOf].sort()).toEqual([...a.clusterOf].sort());
+	});
+
+	it("splits oversized communities, every part under the cap", () => {
 		const nodes = [node("d", "domain")];
 		const edges: Edge[] = [];
-		for (let i = 0; i < 25; i++) {
-			nodes.push(node(`t${i}`, "task"));
+		for (let i = 0; i < 30; i++) {
+			nodes.push(node(`t${i}`, i % 5 ? "task" : "spec"));
 			edges.push(partOf(`t${i}`, "d"));
+			if (i > 0) edges.push(link(`t${i}`, `t${i - 1}`));
 		}
-		for (let i = 0; i < 5; i++) {
-			nodes.push(node(`s${i}`, "spec"));
-			edges.push(partOf(`s${i}`, "d"));
-		}
-		const { clusters, clusterOf } = buildClusters(nodes, edges, 10);
+		const { clusters } = buildClusters(nodes, edges, 10);
 		for (const c of clusters.values()) expect(c.members.length).toBeLessThanOrEqual(10);
 		const all = [...clusters.values()].flatMap((c) => c.members);
+		expect(all.length).toBe(nodes.length);
 		expect(new Set(all).size).toBe(nodes.length);
-		expect(clusterOf.get("s0")).toBe("@c:d/spec");
-		expect(clusters.get("@c:d/domain")!.head).toBe("d");
+		expect([...clusters.values()].every((c) => !c.title.startsWith("Unfiled"))).toBe(true);
+		expect([...clusters.values()].some((c) => c.head === "d")).toBe(true);
 	});
 
-	it("covers every concept of a synthetic vault exactly once", () => {
+	it("covers every concept of a synthetic vault exactly once, in link communities", () => {
 		const g = syntheticGraph(2000);
 		const { clusters, clusterOf } = buildClusters(g.nodes, g.edges);
 		expect(clusterOf.size).toBe(2000);
 		expect([...clusters.values()].reduce((s, c) => s + c.members.length, 0)).toBe(2000);
-		expect(clusters.size).toBe(50); // one per domain
+		// Synthetic domains are link-local, so communities track them (~one each).
+		expect(clusters.size).toBeGreaterThan(30);
+		expect(clusters.size).toBeLessThan(80);
+		expect([...clusters.keys()].every((id) => !id.startsWith("@c:~") || id.startsWith("@c:~loose"))).toBe(true);
+	});
+
+	it("runs within the per-load budget on a 5k vault", () => {
+		const g = syntheticGraph(5000);
+		const t0 = performance.now();
+		buildClusters(g.nodes, g.edges);
+		expect(performance.now() - t0).toBeLessThan(1500); // ~tens of ms in practice; loose bound for CI
 	});
 });
 
 describe("clusterLinks", () => {
 	it("aggregates edges between clusters with a weight, dropping intra-cluster edges", () => {
-		const nodes = [node("a", "domain"), node("a1"), node("b", "domain"), node("b1"), node("b2")];
+		const nodes = [node("a", "domain"), node("a1"), node("a2"), node("b", "domain"), node("b1"), node("b2")];
 		const edges = [
 			partOf("a1", "a"),
+			partOf("a2", "a"),
+			{ from: "a1", to: "a2", relation: "related_to" },
 			partOf("b1", "b"),
 			partOf("b2", "b"),
 			{ from: "a1", to: "b1", relation: "depends_on" },
@@ -165,6 +237,53 @@ describe("expansionCandidates", () => {
 		const small = c("small", 500, 400, 20);
 		expect(expansionCandidates([small], view, new Set(), new Set(["small"])).map((x) => x.id)).toEqual(["small"]);
 	});
+
+	it("bigger clusters on screen claim the budget before smaller ones at a similar distance", () => {
+		// Both centred 300px out; the big one's edge is nearer AND it gets the size bonus.
+		const bigFar = c("big", 500, 100, 120);
+		const smallNear = c("small", 500, 640, EXPAND_PX + 2);
+		expect(expansionCandidates([smallNear, bigFar], view, new Set()).map((x) => x.id)).toEqual(["big", "small"]);
+		// The size bonus alone flips a near-tie: same edge distance, bigger first.
+		const a = c("a", 500 + 200 + 60, 400, 60);
+		const b = c("b", 500 - 200 - 120, 400, 120);
+		expect(expansionCandidates([a, b], view, new Set()).map((x) => x.id)).toEqual(["b", "a"]);
+	});
+
+	it("the fitted overview of a mid-size vault qualifies (discs ~40–90px on screen)", () => {
+		const k = 0.3;
+		const discs = [150, 200, 300].map((R, i) => c(`d${i}`, (i - 1) * 900, 0, R));
+		const v = { x: 500, y: 400, k, width: 1000, height: 800 };
+		expect(expansionCandidates(discs, v, new Set()).map((x) => x.id).sort()).toEqual(["d0", "d1", "d2"]);
+	});
+
+	it("never auto-expands below MIN_AUTO_K (overview of a 2k+ vault), with hysteresis", () => {
+		const big = c("big", 0, 0, 600); // 72px on screen at k=0.12 — big enough, but too far out
+		const at = (k: number) => ({ x: 500, y: 400, k, width: 1000, height: 800 });
+		expect(expansionCandidates([big], at(MIN_AUTO_K * 0.8), new Set())).toEqual([]);
+		expect(expansionCandidates([big], at(MIN_AUTO_K), new Set()).map((x) => x.id)).toEqual(["big"]);
+		expect(expansionCandidates([big], at(MIN_AUTO_K * 0.9), new Set(["big"])).map((x) => x.id)).toEqual(["big"]);
+		expect(expansionCandidates([big], at(MIN_AUTO_K * 0.8), new Set(), new Set(), 120, "all").map((x) => x.id)).toEqual(["big"]);
+	});
+
+	it("policy 'all' drops the size test; 'none' admits only manual clusters", () => {
+		const small = c("small", 500, 400, 5);
+		const lone = c("lone", 100, 100, 10, 1);
+		const off = c("off", 5000, 400, 300);
+		expect(expansionCandidates([small, off], view, new Set(), new Set(), 120, "all").map((x) => x.id)).toEqual(["small"]);
+		expect(expansionCandidates([small, lone], view, new Set(), new Set(), 120, "none")).toEqual([]);
+		expect(expansionCandidates([small, lone], view, new Set(["small"]), new Set(["small"]), 120, "none").map((x) => x.id)).toEqual(["small"]);
+	});
+});
+
+describe("expand policy storage", () => {
+	it("parses known policies and falls back to auto", () => {
+		expect(parseExpandPolicy("all")).toBe("all");
+		expect(parseExpandPolicy("none")).toBe("none");
+		expect(parseExpandPolicy("auto")).toBe("auto");
+		expect(parseExpandPolicy(null)).toBe("auto");
+		expect(parseExpandPolicy("bogus")).toBe("auto");
+		expect(expandPolicyKey("v1")).toBe("brainz:graph-expand:v1");
+	});
 });
 
 describe("allocateBudget", () => {
@@ -230,6 +349,7 @@ describe("expandScaleFor", () => {
 	it("zooms in enough for the footprint to clear the expand threshold", () => {
 		const k = expandScaleFor(200, 0.2);
 		expect(200 * k).toBeGreaterThan(EXPAND_PX);
+		expect(200 * k).toBeCloseTo(OPEN_PX);
 		expect(expandScaleFor(200, 3)).toBe(3); // never zooms out
 		expect(expandScaleFor(1, 1)).toBe(8); // clamped
 	});

@@ -29,11 +29,16 @@ const MIX: [string, number][] = [
 	["concept", 0.06],
 ];
 
-/** A synthetic graph of `n` concepts (~n/40 domains, ~3.5 edges per concept). */
-export function syntheticGraph(n: number, seed = 42): GraphPayload {
+/**
+ * A synthetic graph of `n` concepts (~n/`domainSize` domains, ~3.5 edges per
+ * concept). `orphans` = share of non-domain concepts filed under no domain (no
+ * `part_of`) that still link locally — like a real vault's loose tasks/specs,
+ * which the old type-bucket clustering lumped into "Unfiled <type>".
+ */
+export function syntheticGraph(n: number, seed = 42, domainSize = 40, orphans = 0): GraphPayload {
 	const rand = rng(seed + n);
 	const pick = <T>(xs: T[]): T => xs[Math.floor(rand() * xs.length)]!;
-	const domainCount = Math.max(3, Math.round(n / 40));
+	const domainCount = Math.max(3, Math.round(n / domainSize));
 	const nodes: GraphNode[] = [];
 	const edges: Edge[] = [];
 	const domains: string[] = [];
@@ -60,7 +65,10 @@ export function syntheticGraph(n: number, seed = 42): GraphPayload {
 		const feats = features.get(domain)!;
 		// Stories/tasks hang off a feature when the domain has one (2-level part_of).
 		const parent = (type === "story" || type === "task") && feats.length > 0 && rand() < 0.7 ? pick(feats) : domain;
-		edges.push({ from: id, to: parent, relation: "part_of" });
+		// (rand() only consumed when orphans > 0, so the default graphs are unchanged.)
+		const orphan = orphans > 0 && rand() < orphans;
+		if (orphan) edges.push({ from: id, to: pick(feats.length > 0 ? feats : [domain]), relation: pick(["realizes", "depends_on", "references"]) });
+		else edges.push({ from: id, to: parent, relation: "part_of" });
 		if (type === "feature") feats.push(id);
 		const local = byDomain.get(domain)!;
 		const extra = Math.floor(rand() * 4);

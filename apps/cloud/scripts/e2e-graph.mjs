@@ -9,7 +9,10 @@
  * a "+N" bubble), distance-based detail tiers, jumping to a concept hidden in a
  * collapsed cluster (search/select path), selection keeps its neighbours
  * rendered, click-focus, bundled edges with cable-ties + edge hover highlight,
- * and the flat layout for small vaults.
+ * the flat layout for small vaults, mid-size vaults showing individual nodes at
+ * the default zoom (flat up to FLAT_MAX_NODES, auto-expanded clusters above), the
+ * Expand all / Collapse all control (budget-aware, remembered per vault) and
+ * link-community clusters (no "Unfiled <type>" buckets).
  *
  * Run: node scripts/e2e-graph.mjs   (E2E_GRAPH_SKIP_BUILD=1 reuses a build)
  */
@@ -62,9 +65,17 @@ async function zoomTo(k) {
 	await wheel(-steps);
 	await sleep(700); // trailing throttled LOD pass
 }
+/** Click a button of the cluster expand control by its label, then let the LOD pass run. */
+async function clickCtl(label) {
+	const pt = await page.evaluate(`(() => { const b = [...document.querySelectorAll('.expand-ctl button')].find((x) => x.textContent.trim() === ${JSON.stringify(label)}); if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+	if (!pt) throw new Error(`no expand control button "${label}"`);
+	await page.click(pt.x, pt.y);
+	await sleep(900);
+}
 async function open(query) {
 	await page.navigate(`${server.url}/?${query}`);
-	for (let i = 0; i < 40; i++) {
+	// The flat layout animates its settle (~4s at 300 concepts) before it fits the view.
+	for (let i = 0; i < 150; i++) {
 		if ((await page.evaluate(`${SVG}?.dataset.settled === '1'`)) === true) break;
 		await sleep(100);
 	}
@@ -76,7 +87,12 @@ try {
 	await open("n=2000&mode=all");
 	let s = await stats();
 	step("large vault uses the clustered layout", s.mode === "tree", `mode=${s.mode}`);
-	step("overview renders one bubble per cluster and no individual nodes", s.bubbles === "50" && s.rendered === "0", `bubbles=${s.bubbles} rendered=${s.rendered}`);
+	step("the 2k overview (too far out for nodes to read) stays one counted bubble per cluster", s.rendered === "0" && s.bubbles === s.clusters, `rendered=${s.rendered} bubbles=${s.bubbles}/${s.clusters}`);
+	const titles = await page.evaluate(`[...document.querySelectorAll('g.cluster:not(.residual) text:not(.count)')].map((t) => t.textContent)`);
+	step("clusters are link communities named after a concept, never 'Unfiled <type>'", titles.length > 0 && titles.every((t) => !/^Unfiled /.test(t)), titles.slice(0, 4).join(", "));
+	await clickCtl("Collapse all");
+	s = await stats();
+	step("Collapse all: one bubble per cluster and no individual nodes", s.expandPolicy === "none" && s.bubbles === s.clusters && s.rendered === "0", `bubbles=${s.bubbles}/${s.clusters} rendered=${s.rendered}`);
 	const sizes = await page.evaluate(`[...document.querySelectorAll('g.cluster text.count')].map((t) => Number(t.textContent))`);
 	step("bubbles show their cluster size (sizes sum to the vault)", sizes.reduce((a, b) => a + b, 0) === 2000, `sum=${sizes.reduce((a, b) => a + b, 0)}`);
 	step("edges between clusters are aggregated with weights", (await page.evaluate(`[...document.querySelectorAll('text.weight')].some((t) => t.style.display !== 'none' && Number(t.textContent) >= 2)`)) === true);
@@ -101,7 +117,20 @@ try {
 	await wheel(25);
 	await sleep(800);
 	s = await stats();
-	step("zooming out collapses clusters again", s.expanded === "" && s.rendered === "0", `expanded=${s.expanded || "∅"} rendered=${s.rendered}`);
+	step("zooming out collapses clicked clusters again", s.expanded === "" && s.rendered === "0", `expanded=${s.expanded || "∅"} rendered=${s.rendered}`);
+
+	console.log("Expand all / Collapse all (budget-aware, remembered per vault)");
+	await clickCtl("Expand all");
+	s = await stats();
+	step("Expand all opens clusters at any size, up to the node budget", s.expandPolicy === "all" && Number(s.rendered) > 300 && Number(s.rendered) <= 400, `rendered=${s.rendered} policy=${s.expandPolicy}`);
+	step("the active button is pressed", (await page.evaluate(`document.querySelector('.expand-ctl button[aria-pressed="true"]')?.textContent.trim()`)) === "Expand all");
+	await page.navigate(`${server.url}/?n=2000&mode=all&keep=1`);
+	await sleep(1500);
+	s = await stats();
+	step("the choice survives a reload (per vault)", s.expandPolicy === "all" && Number(s.rendered) > 300, `policy=${s.expandPolicy} rendered=${s.rendered}`);
+	await clickCtl("Expand all");
+	s = await stats();
+	step("clicking the active button returns to automatic", s.expandPolicy === "auto", `policy=${s.expandPolicy}`);
 
 	console.log("hard node budget (budget=60)");
 	await open("n=2000&mode=all&budget=60");
@@ -143,7 +172,7 @@ try {
 	await open("n=2000&mode=all");
 	const hidden = await page.evaluate(`(() => {
 		const g = window.__bench.graph();
-		const n = g.nodes.find((x) => x.type === 'story' && x.degree >= 3);
+		const n = g.nodes.find((x) => x.type === 'story' && x.degree >= 3 && !document.querySelector('g.node[data-id="' + x.id + '"]'));
 		const nbrs = g.edges.filter((e) => e.from === n.id || e.to === n.id).map((e) => (e.from === n.id ? e.to : e.from));
 		return { id: n.id, nbrs };
 	})()`);
@@ -165,7 +194,7 @@ try {
 	await page.click(nodePt.x, nodePt.y);
 	await sleep(400);
 	step("clicking a node focuses it (dims the rest)", (await page.evaluate(`${SVG}.classList.contains('focusing')`)) === true);
-	await page.click(20, 20);
+	await page.click(1380, 20); // empty top-right corner (the expand control sits top-left)
 	await sleep(300);
 	step("clicking empty canvas clears focus", (await page.evaluate(`${SVG}.classList.contains('focusing')`)) === false);
 	const hl = await page.evaluate(`(() => {
@@ -180,7 +209,14 @@ try {
 	console.log("auto (semantic zoom) mode");
 	await open("n=2000&mode=auto");
 	s = await stats();
-	step("auto mode also opens on the cluster overview with real cluster sizes", s.mode === "tree" && s.bubbles === "50", `bubbles=${s.bubbles}`);
+	step("auto mode at 2k opens on the counted cluster overview (domains-only tier stays bubbles)", s.mode === "tree" && Number(s.bubbles) >= Number(s.clusters) - 4, `bubbles=${s.bubbles}/${s.clusters} rendered=${s.rendered}`);
+
+	console.log("mid-size vaults show individual nodes at the default zoom");
+	for (const [q, min] of [["n=300&dsize=14&mode=all", 200], ["n=300&dsize=14&mode=auto", 60], ["n=301&dsize=14&mode=auto", 60], ["n=600&dsize=14&mode=auto", 60], ["n=1000&mode=auto", 60]]) {
+		await open(q);
+		s = await stats();
+		step(`${q}: ${s.mode} layout renders ≥${min} concept nodes on load`, Number(s.rendered) >= min && Number(s.rendered) <= 400, `mode=${s.mode} rendered=${s.rendered} bubbles=${s.bubbles} k=${(await scale()).toFixed(2)}`);
+	}
 
 	console.log("small vault keeps the flat layout");
 	await open("n=100&mode=all");

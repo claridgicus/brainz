@@ -1,27 +1,81 @@
 // Pure level-of-detail + clustering logic for the cloud graph workspace (no
 // DOM, no d3) so it is unit-testable and shared by Graph.svelte.
 //
-// Large vaults render HIERARCHICALLY: concepts are grouped into clusters (the
-// root of their `part_of` chain — a domain, normally), each cluster lays its
+// Large vaults render HIERARCHICALLY: concepts are grouped into clusters (link
+// communities — see graph-community.ts — named after their most central
+// concept, normally a domain), each cluster lays its
 // members out locally inside a disc ("footprint"), and only the cluster discs
 // take part in the top-level force layout. A cluster draws as one bubble until
-// it is big enough on screen and near enough to the viewport centre to expand,
-// subject to a hard budget on individually rendered nodes. See SPEC-CLOUD.md
+// it is big enough on screen and near enough to the viewport centre to expand
+// (or the user picks Expand all / Collapse all), subject to a hard budget on
+// individually rendered nodes. See SPEC-CLOUD.md
 // ("Graph workspace — level of detail").
 import type { Edge, GraphNode } from "@brainz/contracts";
+import { detectCommunities } from "./graph-community.js";
 
-/** Vaults with more concepts than this use the clustered (hierarchical) layout. */
-export const FLAT_MAX_NODES = 250;
+/**
+ * Vaults with more concepts than this use the clustered (hierarchical) layout.
+ * Picked from `npm run perf:graph -- --extra flatmax=100000` (forced flat, every
+ * type shown): flat holds ~55–60fps pan up to ~300 concepts and falls to 30–45fps
+ * by 400, while the clustered layout is budget-capped at any size.
+ */
+export const FLAT_MAX_NODES = 300;
 /** Default hard cap on individually rendered node elements (tuned for ~60fps). */
 export const DEFAULT_NODE_BUDGET = 400;
 /** Clusters larger than this are split (by type, then into chunks). */
 export const MAX_CLUSTER_SIZE = 400;
-/** A collapsed cluster expands once its footprint is at least this big on screen (px radius)… */
-export const EXPAND_PX = 110;
-/** …and an expanded one collapses again only below this (hysteresis). */
-export const COLLAPSE_PX = 80;
+/**
+ * A collapsed cluster auto-expands once its footprint is at least this big on
+ * screen (px radius) — low enough that the fitted overview of a few-hundred to
+ * ~1000-concept vault opens its clusters (their discs fit at ~40–90px)…
+ */
+export const EXPAND_PX = 40;
+/** …and an expanded one collapses again only below this (hysteresis, same ~0.7 ratio as before). */
+export const COLLAPSE_PX = 28;
+/**
+ * …and only at or above this zoom scale (an open cluster stays open down to
+ * 0.85× it): further out a member's mark is ~1px, so a counted bubble says
+ * more, and opening 400 dots at the 2k/5k overview (fits at ~0.12) only costs
+ * fps. Vaults up to ~1000 concepts fit at ~0.17–0.3, above it.
+ */
+export const MIN_AUTO_K = 0.15;
 /** Score bonus (screen px) an already-expanded cluster gets in the budget race, so it never thrashes. */
 export const STICKY_PX = 160;
+/** Priority weight on a cluster's on-screen radius: bigger clusters claim the budget first. */
+export const SIZE_PRIORITY = 0.5;
+/**
+ * An auto-expanded cluster must render at least this many members, and at least
+ * this share of its counted size, else it stays a (counted) bubble — a hull
+ * holding only its domain or two says less than the bubble's count.
+ */
+export const MIN_AUTO_MEMBERS = 2;
+export const MIN_AUTO_SHARE = 0.2;
+/** Clicking a bubble (or jumping into one) zooms until its footprint is this big on screen (px radius). */
+export const OPEN_PX = 176;
+/**
+ * Auto (semantic-zoom) type LOD reads the zoom scale multiplied by these, so the
+ * fitted overview shows domains plus rank-1 types (features, specs, constraints)
+ * instead of domains alone. The cluster map fits at a much smaller scale than a
+ * flat graph (~0.15–0.3 for up to ~1000 concepts vs ≥0.5) and clusters already
+ * declutter it, hence the bigger boost; at the 2k/5k overview (~0.12) it is
+ * still domains only, so those open as counted bubbles.
+ */
+export const TREE_LOD_BOOST = 5.5;
+export const FLAT_LOD_BOOST = 1.7;
+/**
+ * Cluster expansion policy, chosen with the graph's Expand all / Collapse all
+ * control and remembered per vault: `auto` = on-screen size decides; `all` =
+ * every on-screen cluster competes for the budget whatever its size; `none` =
+ * only clusters the user clicks open.
+ */
+export type ExpandPolicy = "auto" | "all" | "none";
+export const EXPAND_POLICIES: readonly ExpandPolicy[] = ["auto", "all", "none"];
+/** localStorage key holding a vault's expand policy. */
+export const expandPolicyKey = (vaultId: string): string => `brainz:graph-expand:${vaultId}`;
+/** Parse a stored policy; anything unknown → `auto`. */
+export function parseExpandPolicy(raw: string | null | undefined): ExpandPolicy {
+	return (EXPAND_POLICIES as readonly string[]).includes(raw ?? "") ? (raw as ExpandPolicy) : "auto";
+}
 /** Labels are cut to this many characters (full title stays in the tooltip). */
 export const LABEL_MAX_CHARS = 26;
 /** Approximate rendered width of one 11px label character. */
@@ -31,9 +85,9 @@ export interface Cluster {
 	/** Stable unit id: `@c:<key>` — never collides with a concept slug. */
 	id: string;
 	title: string;
-	/** Type used for the bubble's colour (the head's type, or the fallback type). */
+	/** Type used for the bubble's colour (the head's type; "concept" for the loose group). */
 	type: string;
-	/** The concept heading this cluster (its `part_of` root), if any. */
+	/** The concept heading (and naming) this cluster: its most central member; null for the loose group. */
 	head: string | null;
 	members: string[];
 }
@@ -58,13 +112,17 @@ export function labelCollideRadius(title: string, r: number): number {
 	return Math.max(r + 16, w / 2 + 8);
 }
 
+/** Title of the group holding concepts with no edges at all. */
+export const LOOSE_TITLE = "Loose concepts";
+
 /**
- * Group concepts into clusters. Default grouping is the root of each concept's
- * `part_of` chain (followed transitively, cycle-safe): that is how a vault is
- * structured (features/stories/specs hang off domains), so clusters match the
- * domains people navigate by and are stable across edits. Concepts with no
- * `part_of` parent and no children fall back to one cluster per type
- * ("Unfiled spec", …). Oversized clusters are split by type, then into chunks.
+ * Group concepts into clusters by graph proximity: link communities from
+ * `detectCommunities` (deterministic Louvain over the edge graph, seeded by
+ * `part_of` roots), never by type. Each cluster is named after its most central
+ * concept (a domain when it has one) and keyed `@c:<that concept's id>`; split
+ * parts of an oversized community each get their own head. Concepts with no
+ * edges at all share one "Loose concepts" group (`@c:~loose`, chunked past
+ * `maxSize`).
  */
 export function buildClusters(
 	nodes: readonly GraphNode[],
@@ -72,82 +130,21 @@ export function buildClusters(
 	maxSize = MAX_CLUSTER_SIZE,
 ): ClusterIndex {
 	const byId = new Map(nodes.map((n) => [n.id, n]));
-	const parent = new Map<string, string>();
-	const hasChildren = new Set<string>();
-	for (const e of edges) {
-		if (e.relation !== "part_of" || e.from === e.to) continue;
-		if (!byId.has(e.from) || !byId.has(e.to)) continue;
-		if (!parent.has(e.from)) parent.set(e.from, e.to);
-		hasChildren.add(e.to);
-	}
-	const rootOf = (id: string): string => {
-		let cur = id;
-		const seen = new Set([cur]);
-		for (let i = 0; i < 16; i++) {
-			const p = parent.get(cur);
-			if (!p || seen.has(p)) break;
-			seen.add(p);
-			cur = p;
-		}
-		return cur;
-	};
-	const groups = new Map<string, { head: string | null; type: string; members: string[] }>();
-	for (const n of nodes) {
-		const root = rootOf(n.id);
-		let key: string;
-		let head: string | null = null;
-		if (root !== n.id || hasChildren.has(n.id)) {
-			key = root;
-			head = root;
-		} else {
-			key = `~${n.pending ? "pending" : n.type}`;
-		}
-		let g = groups.get(key);
-		if (!g) {
-			const type = head ? (byId.get(head)?.type ?? n.type) : n.pending ? "pending" : n.type;
-			g = { head, type, members: [] };
-			groups.set(key, g);
-		}
-		g.members.push(n.id);
-	}
 	const clusters = new Map<string, Cluster>();
 	const clusterOf = new Map<string, string>();
 	const add = (id: string, title: string, type: string, head: string | null, members: string[]): void => {
 		clusters.set(id, { id, title, type, head, members });
 		for (const m of members) clusterOf.set(m, id);
 	};
-	const titleFor = (key: string, g: { head: string | null; type: string }): string =>
-		g.head ? (byId.get(g.head)?.title ?? g.head) : `Unfiled ${g.type}`;
-	for (const [key, g] of groups) {
-		const title = titleFor(key, g);
-		if (g.members.length <= maxSize) {
-			add(`@c:${key}`, title, g.type, g.head, g.members);
-			continue;
-		}
-		// Split: by type first (keeps the head with its own type's chunk)…
-		const byType = new Map<string, string[]>();
-		for (const m of g.members) {
-			const t = byId.get(m)?.type ?? "concept";
-			let list = byType.get(t);
-			if (!list) byType.set(t, (list = []));
-			list.push(m);
-		}
-		for (const [t, list] of byType) {
-			// …then into fixed-size chunks in a stable (id) order.
-			const sorted = [...list].sort();
-			const chunks = Math.ceil(sorted.length / maxSize);
-			for (let c = 0; c < chunks; c++) {
-				const part = sorted.slice(c * maxSize, (c + 1) * maxSize);
-				const head = g.head && part.includes(g.head) ? g.head : null;
-				add(
-					`@c:${key}/${t}${chunks > 1 ? `/${c + 1}` : ""}`,
-					`${title} · ${t}${chunks > 1 ? ` ${c + 1}` : ""}`,
-					head ? g.type : t,
-					head,
-					part,
-				);
-			}
-		}
+	const { communities, loose } = detectCommunities(nodes, edges, maxSize);
+	for (const c of communities) {
+		const h = byId.get(c.head);
+		add(`@c:${c.head}`, h?.title ?? c.head, h?.pending ? "pending" : (h?.type ?? "concept"), c.head, c.members);
+	}
+	const chunks = Math.ceil(loose.length / maxSize);
+	for (let i = 0; i < chunks; i++) {
+		const part = loose.slice(i * maxSize, (i + 1) * maxSize);
+		add(`@c:~loose${chunks > 1 ? `/${i + 1}` : ""}`, `${LOOSE_TITLE}${chunks > 1 ? ` ${i + 1}` : ""}`, "concept", null, part);
 	}
 	return { clusters, clusterOf };
 }
@@ -220,11 +217,14 @@ export interface ExpansionCandidate {
 
 /**
  * Which clusters may render their members individually at this view: the
- * cluster's footprint disc must intersect the (margined) viewport and be big
- * enough on screen — EXPAND_PX to open, COLLAPSE_PX to stay open (hysteresis).
- * Lone concepts (size 1) qualify whenever on screen. Sorted by priority: the
- * distance from the viewport centre to the disc's edge, minus a sticky bonus
- * for clusters already open and a large bonus for ones the user opened.
+ * cluster's footprint disc must intersect the (margined) viewport and, under the
+ * `auto` policy, be big enough on screen — EXPAND_PX to open, COLLAPSE_PX to stay
+ * open (hysteresis) — at a zoom of at least MIN_AUTO_K. `all` drops the size test; `none` admits only `manual`
+ * (clicked-open) clusters. Lone concepts (size 1) qualify whenever on screen
+ * (except under `none`). Sorted by priority: the distance from the viewport
+ * centre to the disc's edge, minus a size bonus (bigger on screen first), a
+ * sticky bonus for clusters already open and a large bonus for ones the user
+ * opened.
  */
 export function expansionCandidates(
 	clusters: readonly ClusterGeom[],
@@ -232,6 +232,7 @@ export function expansionCandidates(
 	prevExpanded: ReadonlySet<string>,
 	manual: ReadonlySet<string> = new Set(),
 	margin = 120,
+	policy: ExpandPolicy = "auto",
 ): ExpansionCandidate[] {
 	const cx = view.width / 2;
 	const cy = view.height / 2;
@@ -241,11 +242,15 @@ export function expansionCandidates(
 		const sy = c.y * view.k + view.y;
 		const rho = c.R * view.k;
 		const was = prevExpanded.has(c.id);
+		const isManual = manual.has(c.id);
 		const m = margin + (was ? 200 : 0);
 		if (sx + rho < -m || sx - rho > view.width + m || sy + rho < -m || sy - rho > view.height + m) continue;
-		if (c.size > 1 && !manual.has(c.id) && rho < (was ? COLLAPSE_PX : EXPAND_PX)) continue;
+		if (!isManual) {
+			if (policy === "none") continue;
+			if (policy === "auto" && c.size > 1 && (rho < (was ? COLLAPSE_PX : EXPAND_PX) || view.k < MIN_AUTO_K * (was ? 0.85 : 1))) continue;
+		}
 		const d = Math.max(0, Math.hypot(sx - cx, sy - cy) - rho);
-		out.push({ id: c.id, score: d - (was ? STICKY_PX : 0) - (manual.has(c.id) ? 1e6 : 0) });
+		out.push({ id: c.id, score: d - SIZE_PRIORITY * rho - (was ? STICKY_PX : 0) - (isManual ? 1e6 : 0) });
 	}
 	out.sort((a, b) => a.score - b.score || (a.id < b.id ? -1 : 1));
 	return out;
@@ -316,7 +321,7 @@ export function fullDetailIds(
  * the user clicks a bubble or jumps to a concept hidden inside one).
  */
 export function expandScaleFor(R: number, current: number, maxK = 8): number {
-	return Math.min(maxK, Math.max(current, (EXPAND_PX * 1.6) / Math.max(1, R)));
+	return Math.min(maxK, Math.max(current, OPEN_PX / Math.max(1, R)));
 }
 
 /** Phyllotaxis seed positions for discs of radius `radii` (largest first, centred on 0,0). */
