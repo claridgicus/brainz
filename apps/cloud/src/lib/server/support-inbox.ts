@@ -349,10 +349,11 @@ const UNSAFE_ENVELOPE = /[;()"\\\s]/;
  * anything else reads as "none" (`trusted: false`): never authenticated, never
  * a pass. Also untrusted: an envelope sender (`envelopeFrom`, from the Email
  * Routing API, when given) containing `; ( ) " \` or whitespace, and a header
- * without exactly one spf, one dkim and one dmarc clause (a second one could
- * only have been smuggled in through sender-controlled text). The DKIM domain
- * is `header.d` of the dkim clause, the DMARC domain `header.from` of the
- * dmarc clause.
+ * without exactly one spf and one dmarc clause (a second one could only have
+ * been smuggled in through sender-controlled text) or without any dkim clause.
+ * Several dkim clauses are normal (an ESP adds its own signature); passing
+ * DKIM domains are the `header.d` of passing dkim clauses only. The DMARC
+ * domain is `header.from` of the dmarc clause.
  */
 export function parseAuthResults(authResults: string[], envelopeFrom?: string): SenderAuth {
   if (envelopeFrom !== undefined && UNSAFE_ENVELOPE.test(envelopeFrom)) return { ...NO_AUTH, dkimDomains: [] };
@@ -363,14 +364,16 @@ export function parseAuthResults(authResults: string[], envelopeFrom?: string): 
     return found.length === 1 ? found[0] : null;
   };
   const spf = only("spf");
-  const dkim = only("dkim");
   const dmarc = only("dmarc");
-  if (!spf || !dkim || !dmarc) return { ...NO_AUTH, dkimDomains: [] };
-  const dkimDomain = (dkim.props.get("header.d") ?? "").toLowerCase();
+  const dkim = header.results.filter((r) => r.method === "dkim");
+  if (!spf || !dmarc || dkim.length === 0) return { ...NO_AUTH, dkimDomains: [] };
+  const passing = dkim.filter((r) => r.result === "pass");
   return {
     spf: verdict(spf.result),
-    dkim: verdict(dkim.result),
-    dkimDomains: dkim.result === "pass" && /^[a-z0-9.-]+$/.test(dkimDomain) ? [dkimDomain] : [],
+    dkim: passing.length > 0 ? "pass" : verdict(dkim[0].result),
+    dkimDomains: passing
+      .map((r) => (r.props.get("header.d") ?? "").toLowerCase())
+      .filter((d) => /^[a-z0-9.-]+$/.test(d)),
     dmarc: verdict(dmarc.result),
     dmarcFrom: dmarc.props.get("header.from")?.toLowerCase() || null,
     trusted: true,

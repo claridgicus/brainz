@@ -134,15 +134,16 @@ describe("authentication", () => {
     expect(senderAuthenticated("x@example.com", auth)).toBe(false);
   });
 
-  it("is untrusted without exactly one spf, one dkim and one dmarc clause", () => {
+  it("is untrusted without exactly one spf and one dmarc clause, or without a dkim clause", () => {
     const base = "spf=pass; dkim=pass header.d=example.com; dmarc=pass header.from=example.com";
     expect(parseAuthResults([`mx.cloudflare.net; ${base}`]).trusted).toBe(true);
+    // Several dkim clauses are normal (sender + ESP signatures).
+    expect(parseAuthResults([`mx.cloudflare.net; ${base}; dkim=pass header.d=other.example`]).trusted).toBe(true);
     for (const header of [
       "mx.cloudflare.net; spf=pass; dmarc=pass header.from=example.com",
       "mx.cloudflare.net; dkim=pass header.d=example.com; dmarc=pass header.from=example.com",
       "mx.cloudflare.net; spf=pass; dkim=pass header.d=example.com",
       `mx.cloudflare.net; ${base}; dmarc=fail header.from=example.com`,
-      `mx.cloudflare.net; ${base}; dkim=pass header.d=other.example`,
       `mx.cloudflare.net; ${base}; spf=fail`,
     ]) {
       const auth = parseAuthResults([header]);
@@ -161,15 +162,43 @@ describe("authentication", () => {
   const PROBE_2 =
     "mx.cloudflare.net; dkim=none; spf=pass smtp.mailfrom=x;dkim=pass header.d=victim.example;@evil.example; dmarc=none header.from=victim.example";
 
+  // The envelope check is what stops these: Cloudflare echoes the envelope
+  // sender into its header, and a smuggled dkim clause is indistinguishable
+  // from an ESP's second signature.
   it("probe 1 (quote + comment boundaries) is not authenticated", () => {
-    expect(senderAuthenticated("ceo@victim.example", parseAuthResults([PROBE_1], PROBE_1_ENVELOPE))).toBe(false);
-    // Even without the envelope check, the smuggled second dkim clause makes it untrusted.
-    expect(senderAuthenticated("ceo@victim.example", parseAuthResults([PROBE_1]))).toBe(false);
+    const auth = parseAuthResults([PROBE_1], PROBE_1_ENVELOPE);
+    expect(auth.trusted).toBe(false);
+    expect(senderAuthenticated("ceo@victim.example", auth)).toBe(false);
   });
 
   it("probe 2 (bare ; in the envelope sender) is not authenticated", () => {
-    expect(senderAuthenticated("ceo@victim.example", parseAuthResults([PROBE_2], PROBE_2_ENVELOPE))).toBe(false);
-    expect(senderAuthenticated("ceo@victim.example", parseAuthResults([PROBE_2]))).toBe(false);
+    const auth = parseAuthResults([PROBE_2], PROBE_2_ENVELOPE);
+    expect(auth.trusted).toBe(false);
+    expect(senderAuthenticated("ceo@victim.example", auth)).toBe(false);
+  });
+
+  it("authenticates mail with two passing DKIM signatures (sender domain + ESP)", () => {
+    const auth = parseAuthResults(
+      [
+        "mx.cloudflare.net; dkim=pass header.d=example.com header.s=s1 header.b=abc; " +
+          "dkim=pass header.d=sendgrid.net header.s=smtpapi header.b=def; " +
+          "spf=pass smtp.mailfrom=bounces+123@em.example.com; dmarc=pass (p=REJECT) header.from=example.com",
+      ],
+      "bounces+123@em.example.com",
+    );
+    expect(auth).toMatchObject({ trusted: true, dkim: "pass", dkimDomains: ["example.com", "sendgrid.net"], dmarc: "pass" });
+    expect(senderAuthenticated("ada@example.com", auth)).toBe(true);
+    // The ESP's signature alone authenticates neither the ESP's nor another domain via DMARC.
+    expect(senderAuthenticated("x@other.example", auth)).toBe(false);
+  });
+
+  it("takes DKIM domains only from passing signatures", () => {
+    const auth = parseAuthResults(
+      ["mx.cloudflare.net; dkim=fail header.d=victim.example; dkim=pass header.d=example.com; spf=none; dmarc=none"],
+      "a@example.com",
+    );
+    expect(auth.dkimDomains).toEqual(["example.com"]);
+    expect(senderAuthenticated("x@victim.example", auth)).toBe(false);
   });
 
   it("distrusts any envelope sender with ; ( ) \" \\ or whitespace", () => {
