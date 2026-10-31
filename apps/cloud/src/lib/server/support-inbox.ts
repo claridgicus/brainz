@@ -26,8 +26,21 @@ export const MAX_TASK_TEXT_CHARS = 20_000;
 export const SENDER_HOURLY_LIMIT = 10;
 /** Inbound messages per hour across all senders before SMTP rejection. */
 export const GLOBAL_HOURLY_LIMIT = 200;
+/**
+ * Forwards per hour to the escalation address for escalations that anyone can
+ * trigger (`unsure`, failed reviewer claims, unauthenticated legal mail, no
+ * vault configured, unparseable mail). Over it, mail is kept as a task but not
+ * forwarded.
+ */
+export const ESCALATION_HOURLY_LIMIT = 20;
+/** The separate, higher forward ceiling for authenticated reviewer and legal mail. */
+export const PRIORITY_ESCALATION_HOURLY_LIMIT = 50;
 /** Outbound replies per hour across the inbox. */
 export const OUTBOUND_HOURLY_LIMIT = 20;
+/** "Draft reply waiting" notices to the escalation address per hour. */
+export const DRAFT_NOTICE_HOURLY_LIMIT = 10;
+/** Raw MIME kept in D1 (raw_b64) is cleared after this many days by the daily cron. */
+export const RAW_RETENTION_DAYS = 90;
 
 /** Directory-reviewer domains: always escalated when the sender is authenticated. */
 export const REVIEWER_DOMAINS = ["anthropic.com", "openai.com", "x.ai"] as const;
@@ -164,6 +177,10 @@ export interface SenderAuth {
   /** Signing domains of the passing DKIM signatures. */
   dkimDomains: string[];
   dmarc: AuthVerdict;
+  /** The header.from domain DMARC was evaluated for, when stated. */
+  dmarcFrom: string | null;
+  /** The verdicts came from Cloudflare's own header (see parseAuthResults). */
+  trusted: boolean;
 }
 
 function verdict(value: string | undefined): AuthVerdict {
@@ -174,23 +191,48 @@ function verdict(value: string | undefined): AuthVerdict {
 }
 
 /**
- * Read SPF/DKIM/DMARC from the TOPMOST Authentication-Results header, the one
- * Cloudflare Email Routing adds on receipt. Lower ones were written by the
- * sender's side and are not trusted.
+ * The authserv-id Cloudflare Email Routing writes into the Authentication-Results
+ * header it prepends ("Email Routing validates DMARC before invoking your Worker
+ * … prepends a standard `Authentication-Results` header"; read the first one and
+ * check "its authentication service identifier is `mx.cloudflare.net`":
+ * developers.cloudflare.com/email-service/api/route-emails/email-handler/).
+ * Email Routing does not strip sender-supplied Authentication-Results headers.
+ */
+export const CLOUDFLARE_AUTHSERV_ID = "mx.cloudflare.net";
+
+/** The authserv-id of an Authentication-Results value (lowercased, "" if none). */
+export function authservId(value: string): string {
+  const head = value.split(";", 1)[0] ?? "";
+  return head.replace(/\([^)]*\)/g, " ").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+}
+
+const NO_AUTH: SenderAuth = { spf: "none", dkim: "none", dkimDomains: [], dmarc: "none", dmarcFrom: null, trusted: false };
+
+/**
+ * Read SPF/DKIM/DMARC from the TOPMOST Authentication-Results header, and only
+ * when its authserv-id is Cloudflare's: that is the one Email Routing prepends
+ * on receipt. Every other header (lower ones, or a topmost one with another
+ * authserv-id, which means Cloudflare's is missing) may be sender-forged, so
+ * anything else reads as "none" (`trusted: false`): never authenticated, never
+ * a pass.
  */
 export function parseAuthResults(authResults: string[]): SenderAuth {
   const top = authResults[0] ?? "";
+  if (authservId(top) !== CLOUDFLARE_AUTHSERV_ID) return { ...NO_AUTH, dkimDomains: [] };
   const first = (method: string) =>
     new RegExp(`\\b${method}=([a-z]+)`, "i").exec(top)?.[1];
   const dkimDomains = [...top.matchAll(/\bdkim=pass\b[^;]*?\bheader\.(?:d|i)=@?([a-z0-9.-]+)/gi)].map(
     (m) => m[1].toLowerCase(),
   );
   const dkimAll = [...top.matchAll(/\bdkim=([a-z]+)/gi)].map((m) => m[1].toLowerCase());
+  const dmarcFrom = /\bdmarc=[a-z]+\b[^;]*?\bheader\.from=([a-z0-9.-]+)/i.exec(top)?.[1]?.toLowerCase() ?? null;
   return {
     spf: verdict(first("spf")),
     dkim: dkimAll.includes("pass") ? "pass" : verdict(dkimAll[0]),
     dkimDomains,
     dmarc: verdict(first("dmarc")),
+    dmarcFrom,
+    trusted: true,
   };
 }
 
@@ -208,8 +250,10 @@ function domainMatches(domain: string, root: string): boolean {
  * for the From domain (or its organizational parent).
  */
 export function senderAuthenticated(from: string, auth: SenderAuth): boolean {
-  if (auth.dmarc === "pass") return true;
+  if (!auth.trusted) return false;
   const domain = domainOf(from);
+  if (!domain) return false;
+  if (auth.dmarc === "pass" && (auth.dmarcFrom === null || auth.dmarcFrom === domain)) return true;
   return auth.dkimDomains.some((d) => domainMatches(domain, d));
 }
 
@@ -284,6 +328,16 @@ export function classifyInbound(msg: ParsedInbound, auth: SenderAuth): Classific
   return make("unsure", "no category matched");
 }
 
+/**
+ * Escalations exempt from the per-sender and inbox limits (still under
+ * PRIORITY_ESCALATION_HOURLY_LIMIT): an authenticated reviewer, or legal mail
+ * from an authenticated sender. Everything else that escalates is mail anyone
+ * can produce, so it is rate-limited like ordinary mail.
+ */
+export function isPriorityEscalation(category: SupportCategory, authenticated: boolean): boolean {
+  return category === "reviewer" || (category === "legal" && authenticated);
+}
+
 // --------------------------------------------------------- auto-send policy
 
 /** Parse `SUPPORT_AUTOSEND_CATEGORIES` (comma list), keeping only safe categories. */
@@ -302,20 +356,37 @@ export function categoryTag(category: SupportCategory): string {
   return `cat-${category}`;
 }
 
-export function categoryFromTags(tags: readonly string[]): SupportCategory | null {
-  const tag = tags.find((t) => t.startsWith("cat-"));
-  return tag ? (tag.slice(4) as SupportCategory) : null;
+/** What the server recorded about one inbound message on a thread (a support_message row). */
+export interface InboundRecord {
+  fromAddr: string;
+  replyTo: string | null;
+  category: string | null;
+  disposition: string;
+  /** senderAuthenticated() at receipt (from the row's auth_json). */
+  authenticated: boolean;
 }
 
 /**
- * May an agent (bz_ key) send on this task without a human? Only when the
- * task's category is switched on in the policy AND the thread was never
- * escalated.
+ * Why an agent (bz_ key) may NOT send on this thread without a human, or null
+ * when it may. Decided only from server-written support_message rows, never
+ * from task tags (the agent's key can rewrite those): every inbound message
+ * must have an auto-send-enabled category, must not have been escalated, must
+ * come from an authenticated sender, and must not ask for replies elsewhere
+ * (Reply-To).
  */
-export function agentMaySend(tags: readonly string[], config: string | undefined): boolean {
-  if (tags.includes("escalated")) return false;
-  const category = categoryFromTags(tags);
-  return category !== null && autoSendCategories(config).has(category);
+export function autoSendBlocker(inbound: readonly InboundRecord[], config: string | undefined): string | null {
+  const enabled = autoSendCategories(config);
+  if (enabled.size === 0) return "auto-send is off";
+  if (inbound.length === 0) return "the thread has no inbound message";
+  for (const r of inbound) {
+    if (r.disposition === "escalated") return "the thread was escalated";
+    if (!r.category || !enabled.has(r.category as SupportCategory)) {
+      return `auto-send is not enabled for category ${r.category ?? "unknown"}`;
+    }
+    if (!r.authenticated) return "the sender is not DMARC/DKIM-authenticated";
+    if (r.replyTo) return "the sender set a different Reply-To";
+  }
+  return null;
 }
 
 // ------------------------------------------------------------- task content
@@ -344,15 +415,23 @@ export function shortHash(input: string): string {
   return (h >>> 0).toString(36).padStart(6, "0").slice(-6);
 }
 
+const ZWSP = "\u200b";
+
 /**
  * Sender-controlled text as a markdown blockquote: every line is quoted (so
  * the sender can't forge `## Reply sent` headings), wiki-links are defused (no
- * pending concepts from email text) and length is capped.
+ * pending concepts from email text), images are defused (no tracking pixels
+ * loaded by the markdown renderer), inline links and link definitions render
+ * as text (no link text disguising its target), and length is capped.
  */
 export function quoteUntrusted(text: string, maxChars = MAX_TASK_TEXT_CHARS): string {
   let t = text.replace(/\r\n?/g, "\n");
   if (t.length > maxChars) t = `${t.slice(0, maxChars)}\n[… truncated, ${text.length - maxChars} more characters]`;
-  t = t.replace(/\[\[/g, "[​[").replace(/\]\]/g, "]​]");
+  t = t
+    .replace(/\[\[/g, `[${ZWSP}[`)
+    .replace(/\]\]/g, `]${ZWSP}]`)
+    .replace(/!\[/g, `!${ZWSP}[`)
+    .replace(/\]([(:\[])/g, `]${ZWSP}$1`);
   return t
     .split("\n")
     .map((line) => (line.length > 0 ? `> ${line}` : ">"))
@@ -376,16 +455,30 @@ export function formatAttachments(attachments: readonly AttachmentMeta[], stored
   return `\nAttachments (${stored ? "files kept in R2" : "metadata only"}):\n${lines.join("\n")}\n`;
 }
 
+export interface SectionOpts {
+  escalated: boolean;
+  attachmentsStored: boolean;
+  /** senderAuthenticated() for this message. */
+  authenticated: boolean;
+  /** Why an escalation was not forwarded (e.g. the hourly forward cap). */
+  notForwarded?: string;
+}
+
 /** The `## Message …` section appended for every inbound message. */
 export function inboundSection(
   msg: ParsedInbound,
   classification: Classification,
   receivedAt: Date,
-  opts: { escalated: boolean; attachmentsStored: boolean },
+  opts: SectionOpts,
 ): string {
   const flags = [
     `category ${classification.category} (${classification.reason})`,
-    opts.escalated ? "forwarded to the escalation address" : "not forwarded",
+    opts.escalated
+      ? "forwarded to the escalation address"
+      : opts.notForwarded
+        ? `not forwarded: ${opts.notForwarded}`
+        : "not forwarded",
+    ...(opts.authenticated ? [] : ["sender NOT authenticated"]),
   ];
   return [
     `## Message ${receivedAt.toISOString()} from ${formatSender(msg)}`,
@@ -402,7 +495,7 @@ export function newTaskBody(
   msg: ParsedInbound,
   classification: Classification,
   receivedAt: Date,
-  opts: { escalated: boolean; attachmentsStored: boolean },
+  opts: SectionOpts,
 ): string {
   return [
     `Support thread with ${formatSender(msg)}${msg.replyTo ? ` (reply-to ${msg.replyTo})` : ""}.`,

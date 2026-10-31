@@ -13,7 +13,8 @@
 	<h1>Support drafts</h1>
 	<p class="muted intro">
 		Replies the triage agent drafted for support@brownmatter.ai. Edit if needed, then send: the reply
-		goes to the thread's sender, threaded, and is logged on the task.
+		goes to the thread's original sender (their From address, never a Reply-To), threaded, and is
+		logged on the task.
 	</p>
 
 	{#if form?.sent}
@@ -31,6 +32,17 @@
 				<p class="meta muted">
 					To <code>{d.to}</code> · drafted by {d.actor} · {fmt(d.at)} · task <code>{d.taskId}</code>
 				</p>
+				{#if !d.authenticated}
+					<p class="warn" role="note">
+						The sender is not DMARC/DKIM-authenticated: <code>{d.to}</code> may not be who wrote this.
+					</p>
+				{/if}
+				{#if d.replyTo}
+					<p class="warn" role="note">
+						The sender asked for replies to <code>{d.replyTo}</code>. This reply goes to
+						<code>{d.to}</code>; reply from your own mail to use the other address.
+					</p>
+				{/if}
 				<input type="hidden" name="taskId" value={d.taskId} />
 				<label class="sr-only" for="text-{d.taskId}">Reply text</label>
 				<textarea id="text-{d.taskId}" name="text" rows="10">{d.text}</textarea>
@@ -81,6 +93,12 @@
 	.row {
 		display: flex;
 		justify-content: flex-end;
+	}
+	.warn {
+		font-size: 13px;
+		margin: 0;
+		color: var(--warning, #fbbf24);
+		overflow-wrap: anywhere;
 	}
 	.notice {
 		margin: 0 0 16px;

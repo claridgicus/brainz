@@ -735,6 +735,7 @@ describe("token endpoint", () => {
               const bound = stmt.bind(...values);
               return {
                 first: <T>() => bound.first<T>(),
+                all: <T>() => bound.all<T>(),
                 run: async () => {
                   if (query.trimStart().startsWith("INSERT INTO oauth_token")) {
                     reached();

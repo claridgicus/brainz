@@ -1,13 +1,12 @@
 /**
  * Test-only: the D1 control plane on better-sqlite3 — every drizzle migration
  * applied (or those up to `through`), exposed through the
- * `prepare().bind().first()/run()` + `batch()` surface the server helpers use.
+ * `prepare().bind().first()/run()/all()` + `batch()` surface the server helpers use.
  * Not imported by app code.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import type { D1Like } from "./dream-budget";
 
 const MIGRATIONS = join(import.meta.dirname, "../../../drizzle");
 
@@ -39,7 +38,14 @@ export function applyMigration(d1: { db: Database.Database }, number: number): v
  * The migrated control plane. `through` stops after that migration number, so
  * a test can populate an older schema and then applyMigration() the next one.
  */
-export function fakeD1(opts: { through?: number } = {}): D1Like & {
+export function fakeD1(opts: { through?: number } = {}): {
+  prepare(query: string): {
+    bind(...values: unknown[]): {
+      first<T = Record<string, unknown>>(): Promise<T | null>;
+      run(): Promise<unknown>;
+      all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
+    };
+  };
   db: Database.Database;
   batch(statements: readonly { run(): Promise<unknown> }[]): Promise<unknown[]>;
 } {
@@ -58,6 +64,9 @@ export function fakeD1(opts: { through?: number } = {}): D1Like & {
             },
             async run() {
               return stmt.run(...values);
+            },
+            async all<T>() {
+              return { results: stmt.all(...values) as T[] };
             },
             /** Synchronous run, for batch(). */
             runSync() {

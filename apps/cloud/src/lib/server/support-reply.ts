@@ -1,13 +1,15 @@
 /**
  * Support inbox — outbound replies and drafts (SPEC-CLOUD "Support inbox").
  *
- * Backs POST /api/support/replies. A reply always goes to the thread's last
- * inbound sender (its Reply-To when set); the caller never picks the
- * recipient. It is sent from support@brownmatter.ai through the same
- * `send_email` binding as the magic links, threaded with In-Reply-To +
- * References, and logged on the task. Agents (bz_ keys) may only send when
- * the auto-send policy allows the task's category; otherwise they save a
- * draft, the escalation address gets a notice, and a human approves it.
+ * Backs POST /api/support/replies. A reply always goes to the thread's
+ * original sender's From address (never Reply-To, never an address from the
+ * mail body); the caller never picks the recipient. It is sent from
+ * support@brownmatter.ai through the same `send_email` binding as the magic
+ * links, threaded with In-Reply-To + References, and logged on the task.
+ * Agents (bz_ keys) may only send when the auto-send policy allows the thread
+ * (autoSendBlocker, decided from the server's support_message rows, never
+ * from task tags); otherwise they save a draft, the escalation address gets
+ * a notice, and a human approves it.
  */
 import { createMimeMessage } from "mimetext";
 import type { SendEmail } from "@cloudflare/workers-types";
@@ -15,12 +17,14 @@ import type { SupportReplyRequest, SupportReplyResponse } from "@brainz/contract
 import type { D1Like } from "./dream-budget";
 import { HttpError } from "./api-util";
 import {
+  DRAFT_NOTICE_HOURLY_LIMIT,
   OUTBOUND_HOURLY_LIMIT,
   SUPPORT_ADDRESS,
   SUPPORT_FROM_NAME,
-  agentMaySend,
+  autoSendBlocker,
   quoteUntrusted,
   replySubject,
+  type InboundRecord,
 } from "./support-inbox";
 import { escalationAddress } from "./support-email";
 
@@ -41,8 +45,17 @@ export interface SupportTaskVault {
   upsertConcept(input: { id: string; title: string; body: string; type: "task"; tags: string[] }): Promise<unknown>;
 }
 
+/** D1Like plus `all()`, which the thread lookup needs. */
+export interface ReplyD1 {
+  prepare(query: string): {
+    bind(...values: unknown[]): ReturnType<ReturnType<D1Like["prepare"]>["bind"]> & {
+      all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
+    };
+  };
+}
+
 export interface ReplyEnv {
-  DB: D1Like;
+  DB: ReplyD1;
   SEND_EMAIL?: SendEmail;
   SUPPORT_AUTOSEND_CATEGORIES?: string;
   SUPPORT_ESCALATE_TO?: string;
@@ -69,22 +82,51 @@ export function bindingSender(binding: SendEmail | undefined): RawSender {
   };
 }
 
-interface ThreadInfo {
+export interface ThreadInfo {
+  /** The thread's original sender (From): the only address a reply goes to. */
   to: string;
+  /** A Reply-To the sender asked for, when it differs (shown to humans, never used). */
+  replyTo: string | null;
+  /** The original sender was DMARC/DKIM-authenticated. */
+  authenticated: boolean;
   subject: string;
   inReplyTo: string | undefined;
   references: string[];
+  /** Every inbound message on the thread, as the server recorded it. */
+  inbound: InboundRecord[];
 }
 
-async function threadInfo(db: D1Like, taskId: string, fallbackSubject: string): Promise<ThreadInfo> {
-  const last = await db
+interface InboundRow {
+  from_addr: string;
+  reply_to: string | null;
+  subject: string;
+  message_id: string | null;
+  category: string | null;
+  disposition: string;
+  auth_json: string | null;
+}
+
+function rowAuthenticated(authJson: string | null): boolean {
+  try {
+    return (JSON.parse(authJson ?? "{}") as { authenticated?: unknown }).authenticated === true;
+  } catch {
+    return false;
+  }
+}
+
+/** The reply target and policy inputs of a support thread, from its support_message rows. */
+export async function threadInfo(db: ReplyD1, taskId: string, fallbackSubject: string): Promise<ThreadInfo> {
+  const { results } = await db
     .prepare(
-      `SELECT from_addr, reply_to, subject, message_id FROM support_message
-       WHERE task_id = ? AND direction = 'in' ORDER BY created_at DESC LIMIT 1`,
+      `SELECT from_addr, reply_to, subject, message_id, category, disposition, auth_json FROM support_message
+       WHERE task_id = ? AND direction = 'in' ORDER BY created_at ASC, rowid ASC LIMIT 500`,
     )
     .bind(taskId)
-    .first<{ from_addr: string; reply_to: string | null; subject: string; message_id: string | null }>();
-  if (!last) throw new HttpError(409, "this task has no inbound message to reply to");
+    .all<InboundRow>();
+  const original = results[0];
+  if (!original) throw new HttpError(409, "this task has no inbound message to reply to");
+  const fromSender = results.filter((r) => r.from_addr === original.from_addr);
+  const last = fromSender[fromSender.length - 1];
   const refs = await db
     .prepare(
       `SELECT group_concat(message_id, ' ') AS ids FROM (
@@ -95,10 +137,19 @@ async function threadInfo(db: D1Like, taskId: string, fallbackSubject: string): 
     .bind(taskId)
     .first<{ ids: string | null }>();
   return {
-    to: last.reply_to || last.from_addr,
+    to: original.from_addr,
+    replyTo: results.find((r) => r.reply_to && r.reply_to !== original.from_addr)?.reply_to ?? null,
+    authenticated: rowAuthenticated(original.auth_json),
     subject: replySubject(last.subject || fallbackSubject),
     inReplyTo: last.message_id ?? undefined,
     references: (refs?.ids ?? "").split(" ").filter(Boolean),
+    inbound: results.map((r) => ({
+      fromAddr: r.from_addr,
+      replyTo: r.reply_to,
+      category: r.category,
+      disposition: r.disposition,
+      authenticated: rowAuthenticated(r.auth_json),
+    })),
   };
 }
 
@@ -166,16 +217,24 @@ export async function supportReply(
         `## Draft reply ${at} by ${actor.label} (to ${thread.to}, awaiting approval)\n\n${quoteUntrusted(text)}`,
       ),
     });
-    await notifyDraft(env, send, { taskId: concept.id, subject: thread.subject, to: thread.to, text, actor });
+    const draftsLastHour = await db
+      .prepare(`SELECT count(*) AS n FROM support_message WHERE direction = 'draft' AND created_at >= ?`)
+      .bind(now.getTime() - 60 * 60 * 1000)
+      .first<{ n: number }>();
+    if (Number(draftsLastHour?.n ?? 0) <= DRAFT_NOTICE_HOURLY_LIMIT) {
+      await notifyDraft(env, send, { taskId: concept.id, subject: thread.subject, to: thread.to, text, actor });
+    } else {
+      console.log(`[support] draft notice for ${concept.id} skipped: hourly notice cap reached`);
+    }
     return { taskId: concept.id, mode: "draft", to: thread.to, subject: thread.subject, inReplyTo: thread.inReplyTo, delivered: false, at };
   }
 
   // mode: send
-  if (actor.via === "key" && !agentMaySend(concept.tags, env.SUPPORT_AUTOSEND_CATEGORIES)) {
-    throw new HttpError(
-      403,
-      "auto-send is not enabled for this task's category (or it was escalated); save a draft with mode: \"draft\" for approval",
-    );
+  if (actor.via === "key") {
+    const blocked = autoSendBlocker(thread.inbound, env.SUPPORT_AUTOSEND_CATEGORIES);
+    if (blocked) {
+      throw new HttpError(403, `an agent may not send on this thread (${blocked}); save a draft with mode: "draft" for approval`);
+    }
   }
   let text = req.text;
   if (req.fromDraft) {

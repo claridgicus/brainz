@@ -10,7 +10,7 @@ import { createDb } from "$lib/server/db";
 import { HttpError } from "$lib/server/api-util";
 import { memberRole, roleSatisfies } from "$lib/server/vault-access";
 import { vaultClient } from "$lib/server/vault-client";
-import { supportReply } from "$lib/server/support-reply";
+import { supportReply, threadInfo } from "$lib/server/support-reply";
 
 async function requireSupportEditor(event: RequestEvent) {
   const env = event.platform?.env;
@@ -41,16 +41,24 @@ export const load: PageServerLoad = async (event) => {
                            WHERE x.task_id = d.task_id AND x.direction = 'draft' AND x.disposition = 'draft')
      ORDER BY d.created_at DESC LIMIT 100`,
   ).all<DraftRow>();
-  return {
-    drafts: results.map((r) => ({
-      taskId: r.task_id,
-      to: r.to_addr,
-      subject: r.subject,
-      text: r.body_text,
-      actor: r.actor ?? "",
-      at: new Date(r.created_at).toISOString(),
-    })),
-  };
+  // The reply always goes to the thread's original From; show a differing
+  // Reply-To and an unauthenticated sender so the human can judge it.
+  const drafts = await Promise.all(
+    results.map(async (r) => {
+      const thread = await threadInfo(env.DB, r.task_id, r.subject).catch(() => null);
+      return {
+        taskId: r.task_id,
+        to: thread?.to ?? r.to_addr,
+        replyTo: thread?.replyTo ?? null,
+        authenticated: thread?.authenticated ?? false,
+        subject: r.subject,
+        text: r.body_text,
+        actor: r.actor ?? "",
+        at: new Date(r.created_at).toISOString(),
+      };
+    }),
+  );
+  return { drafts };
 };
 
 export const actions: Actions = {

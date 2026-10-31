@@ -4,7 +4,7 @@ import { fakeD1 } from "./fake-d1.testutil";
 import { fakeVault, rawEmail } from "./support-fixtures.testutil";
 import { handleInbound, type InboundEmail } from "./support-email";
 import { buildReplyMime, supportReply, type RawSender } from "./support-reply";
-import { OUTBOUND_HOURLY_LIMIT, parseInbound } from "./support-inbox";
+import { DRAFT_NOTICE_HOURLY_LIMIT, OUTBOUND_HOURLY_LIMIT, parseInbound } from "./support-inbox";
 import { HttpError } from "./api-util";
 
 const PASS = "spf=pass; dkim=pass header.d=example.com; dmarc=pass header.from=example.com";
@@ -66,6 +66,16 @@ describe("supportReply — drafts", () => {
   });
 });
 
+describe("supportReply — draft notices", () => {
+  it("caps the draft notices sent to the escalation address", async () => {
+    const { vault, env, taskId, sent, send } = await setup();
+    for (let i = 0; i < DRAFT_NOTICE_HOURLY_LIMIT + 5; i++) {
+      await supportReply(env, vault, agent, req({ taskId, text: `d${i}` }), send, at(1));
+    }
+    expect(sent).toHaveLength(DRAFT_NOTICE_HOURLY_LIMIT);
+  });
+});
+
 describe("supportReply — sending", () => {
   it("refuses an agent send while auto-send is off (the default)", async () => {
     const { vault, env, taskId, send } = await setup();
@@ -114,12 +124,50 @@ describe("supportReply — sending", () => {
     expect(out.taskId).toBe(taskId);
   });
 
-  it("replies to Reply-To when the sender set one", async () => {
+  it("replies to the authenticated From, never to a Reply-To, and never lets an agent send there", async () => {
     const { vault, env, taskId, send } = await setup({
-      raw: rawEmail({ auth: PASS, extraHeaders: ["Reply-To: team@example.com"] }),
+      autosend: "howto",
+      raw: rawEmail({ auth: PASS, extraHeaders: ["Reply-To: team@evil.example"] }),
     });
+    await expectHttp(supportReply(env, vault, agent, req({ taskId, text: "x", mode: "send" }), send), 403);
     const res = await supportReply(env, vault, james, req({ taskId, text: "Hi", mode: "send" }), send);
-    expect(res.to).toBe("team@example.com");
+    expect(res.to).toBe("ada@example.com");
+  });
+
+  it("never lets an agent send to an unauthenticated sender", async () => {
+    const { vault, env, taskId, send } = await setup({
+      autosend: "howto",
+      raw: rawEmail({ auth: "spf=pass; dkim=none; dmarc=none" }),
+    });
+    await expectHttp(supportReply(env, vault, agent, req({ taskId, text: "x", mode: "send" }), send), 403);
+    // A human still can, after seeing the warning on /support.
+    expect((await supportReply(env, vault, james, req({ taskId, text: "Hi", mode: "send" }), send)).to).toBe("ada@example.com");
+  });
+
+  it("ignores task tags the agent rewrote: policy comes from the server's rows", async () => {
+    const { vault, env, taskId, send } = await setup({
+      autosend: "howto",
+      raw: rawEmail({ auth: PASS, subject: "Hello", body: "Quick question about pricing." }),
+    });
+    const task = vault.concepts.get(taskId)!;
+    expect(task.tags).toContain("escalated");
+    // The agent's bz_ key can upsert the task with any tags.
+    await vault.upsertConcept({ id: task.id, title: task.title, body: task.body, type: "task", tags: ["support", "inbox", "cat-howto"] });
+    await expectHttp(supportReply(env, vault, agent, req({ taskId, text: "x", mode: "send" }), send), 403);
+  });
+
+  it("pins the recipient to the thread's original sender", async () => {
+    const { d1, vault, env, taskId, send } = await setup();
+    // Even if another sender's row ended up on the thread, replies go to the original.
+    d1.db
+      .prepare(
+        `INSERT INTO support_message (id, direction, message_id, task_id, from_addr, to_addr, subject, disposition, auth_json, created_at)
+         VALUES ('x', 'in', 'x@evil.example', ?, 'mallory@evil.example', 'support@brownmatter.ai', 'Re: x', 'task', '{"authenticated":true}', ?)`,
+      )
+      .run(taskId, at(5).getTime());
+    const res = await supportReply(env, vault, james, req({ taskId, text: "Hi", mode: "send" }), send, at(6));
+    expect(res.to).toBe("ada@example.com");
+    expect(res.inReplyTo).toBe("m1@example.com");
   });
 
   it("approves the latest draft with fromDraft and clears the draft tag", async () => {

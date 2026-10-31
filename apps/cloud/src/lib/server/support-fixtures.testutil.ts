@@ -84,3 +84,12 @@ export function fakeVault(): SupportVault & {
   };
   return v;
 }
+
+/** Raw MIME nested past postal-mime's depth limit, so parsing throws. */
+export function unparseableEmail(): string {
+  let body = "x";
+  for (let i = 0; i < 300; i++) {
+    body = `Content-Type: multipart/mixed; boundary="b${i}"\r\n\r\n--b${i}\r\n${body}\r\n--b${i}--\r\n`;
+  }
+  return `From: ada@example.com\r\nSubject: broken\r\nMIME-Version: 1.0\r\n${body}`;
+}

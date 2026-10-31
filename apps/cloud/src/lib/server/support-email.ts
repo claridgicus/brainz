@@ -10,9 +10,13 @@
  * a second deploy for no isolation gain.
  *
  * Order of operations, so mail that matters is never lost:
- *   size cap → parse → authentication + drop → rate limits → classify →
- *   forward (escalations) → store (D1 row, R2 raw/attachments, task) →
- *   if storing failed and nothing was forwarded, forward as a fallback.
+ *   size cap → parse → authentication + drop → classify → rate limits →
+ *   forward (escalations, under an hourly cap) → store (D1 row, R2
+ *   raw/attachments, task) → if storing failed and nothing was forwarded,
+ *   forward as a fallback.
+ *
+ * Rejected and dropped mail leaves no D1 row (only a log line), so it can't
+ * fill the inbox's hourly budget or keep data about spoofed senders.
  */
 import type { R2Bucket } from "@cloudflare/workers-types";
 import type { CloudEnv } from "../../app.d";
@@ -20,20 +24,26 @@ import type { D1Like } from "./dream-budget";
 import { vaultClient, VaultDoError } from "./vault-client";
 import {
   DEFAULT_ESCALATE_TO,
+  ESCALATION_HOURLY_LIMIT,
   GLOBAL_HOURLY_LIMIT,
   MAX_D1_RAW_BYTES,
   MAX_INBOUND_BYTES,
+  PRIORITY_ESCALATION_HOURLY_LIMIT,
+  RAW_RETENTION_DAYS,
   SENDER_HOURLY_LIMIT,
   type AttachmentMeta,
   type Classification,
   type ParsedInbound,
+  type SectionOpts,
   classifyInbound,
   dropReason,
   inboundSection,
+  isPriorityEscalation,
   newTaskBody,
   oneLine,
   parseAuthResults,
   parseInbound,
+  senderAuthenticated,
   supportTaskId,
   taskTags,
 } from "./support-inbox";
@@ -104,11 +114,34 @@ async function countSince(db: D1Like, where: string, binds: unknown[]): Promise<
   return Number(row?.n ?? 0);
 }
 
+/** Inbound rows of mail that was kept (rejected/dropped mail leaves no row). */
+const KEPT_INBOUND = `direction = 'in' AND disposition IN ('task', 'escalated', 'stored')`;
+/** SQL twin of isPriorityEscalation() over a row's category + auth_json. */
+const PRIORITY_ROW = `(coalesce(category, '') = 'reviewer' OR (coalesce(category, '') = 'legal' AND coalesce(json_extract(auth_json, '$.authenticated'), 0) = 1))`;
+
+/** Escalation forwards in the last hour, in the priority class or the ordinary one. */
+async function forwardsSince(db: D1Like, since: number, priority: boolean): Promise<number> {
+  return countSince(
+    db,
+    `direction = 'in' AND disposition = 'escalated' AND created_at >= ? AND ${priority ? "" : "NOT "}${PRIORITY_ROW}`,
+    [since],
+  );
+}
+
 /**
- * The support task an inbound message belongs to: the task of any known
- * message its In-Reply-To/References name (ours or theirs), else null.
+ * The support task an inbound message belongs to: the task of a known message
+ * its In-Reply-To/References name (ours or theirs), but only when the sender
+ * is authenticated and is a participant of that thread (its original sender,
+ * or someone we sent a reply to). Anyone else, including a sender who learnt
+ * a Message-ID, opens a new task instead of joining someone else's thread.
  */
-export async function findThreadTask(db: D1Like, threadIds: readonly string[]): Promise<string | null> {
+export async function findThreadTask(
+  db: D1Like,
+  threadIds: readonly string[],
+  sender: string,
+  authenticated: boolean,
+): Promise<string | null> {
+  if (!authenticated) return null;
   for (const id of threadIds.slice(0, 50)) {
     const row = await db
       .prepare(
@@ -116,9 +149,34 @@ export async function findThreadTask(db: D1Like, threadIds: readonly string[]): 
       )
       .bind(id)
       .first<{ task_id: string }>();
-    if (row?.task_id) return row.task_id;
+    if (row?.task_id && (await isThreadParticipant(db, row.task_id, sender))) return row.task_id;
   }
   return null;
+}
+
+async function isThreadParticipant(db: D1Like, taskId: string, sender: string): Promise<boolean> {
+  const original = await db
+    .prepare(
+      `SELECT from_addr FROM support_message WHERE task_id = ? AND direction = 'in' ORDER BY created_at ASC, rowid ASC LIMIT 1`,
+    )
+    .bind(taskId)
+    .first<{ from_addr: string }>();
+  if (original?.from_addr === sender) return true;
+  const repliedTo = await db
+    .prepare(
+      `SELECT 1 AS ok FROM support_message WHERE task_id = ? AND direction = 'out' AND disposition = 'sent' AND to_addr = ? LIMIT 1`,
+    )
+    .bind(taskId, sender)
+    .first<{ ok: number }>();
+  return Boolean(repliedTo);
+}
+
+/** Daily retention (scheduled.ts): clear raw MIME kept in D1 after RAW_RETENTION_DAYS. */
+export async function purgeSupportMail(db: D1Like, now: Date): Promise<void> {
+  await db
+    .prepare(`UPDATE support_message SET raw_b64 = NULL WHERE raw_b64 IS NOT NULL AND created_at < ?`)
+    .bind(now.getTime() - RAW_RETENTION_DAYS * 24 * HOUR_MS)
+    .run();
 }
 
 interface RowInput {
@@ -172,7 +230,7 @@ async function writeTask(
   msg: ParsedInbound,
   classification: Classification,
   now: Date,
-  opts: { escalated: boolean; attachmentsStored: boolean },
+  opts: SectionOpts,
 ): Promise<string> {
   if (existingTaskId) {
     const { concept } = await vault.getConcept(existingTaskId);
@@ -237,51 +295,82 @@ export async function handleInbound(
     }
   };
   const emptyRow = { taskId: null, authJson: null, attachments: [], rawKey: null, rawB64: null };
+  const bucket: R2Bucket | undefined = env.SUPPORT_MAIL;
+  const since = now.getTime() - HOUR_MS;
+  /** Raw MIME to R2 when bound, else into D1 up to MAX_D1_RAW_BYTES. */
+  const keepRaw = async (raw: Uint8Array): Promise<{ rawKey: string | null; rawB64: string | null }> => {
+    if (bucket) {
+      const rawKey = `support/${now.toISOString().slice(0, 10)}/${rowId}/raw.eml`;
+      await bucket.put(rawKey, raw, { httpMetadata: { contentType: "message/rfc822" } });
+      return { rawKey, rawB64: null };
+    }
+    return { rawKey: null, rawB64: raw.byteLength <= MAX_D1_RAW_BYTES ? base64(raw) : null };
+  };
+  /** Room left under the hourly forward cap? A D1 outage allows the forward. */
+  const mayForward = async (priority: boolean): Promise<boolean> => {
+    try {
+      const limit = priority ? PRIORITY_ESCALATION_HOURLY_LIMIT : ESCALATION_HOURLY_LIMIT;
+      return (await forwardsSince(db, since, priority)) < limit;
+    } catch (err) {
+      console.error("[support] forward-cap check failed; forwarding", err);
+      return true;
+    }
+  };
 
   // 1. Size cap, before reading the stream.
   if (message.rawSize > MAX_INBOUND_BYTES) {
     const note = `message too large (${message.rawSize} bytes; limit ${MAX_INBOUND_BYTES})`;
     message.setReject(`Message too large: the limit is ${MAX_INBOUND_BYTES / 1024 / 1024} MB.`);
-    await record({ ...emptyRow, msg: null, category: null, disposition: "rejected", note, size: message.rawSize });
+    console.log(`[support] rejected: ${note}`);
     return { disposition: "rejected", taskId: null, category: null, forwarded, note };
   }
 
-  // 2. Parse. A message we can't parse goes to a human.
+  // 2. Parse. A message we can't parse goes to a human (under the ordinary
+  // forward cap); its raw is kept so it survives a failed or capped forward.
   const raw = await readRaw(message.raw);
   let msg: ParsedInbound;
   try {
     msg = await parseInbound(raw, message.from);
   } catch (err) {
     console.error("[support] parse failed", err);
-    await forward("unparsed", "could not parse");
-    await record({ ...emptyRow, msg: null, category: "unsure", disposition: "escalated", note: "parse failed", size: raw.byteLength });
-    return { disposition: "escalated", taskId: null, category: "unsure", forwarded, note: "parse failed" };
+    if (await mayForward(false)) await forward("unparsed", "could not parse");
+    let kept: { rawKey: string | null; rawB64: string | null } = { rawKey: null, rawB64: null };
+    try {
+      kept = await keepRaw(raw);
+    } catch (rawErr) {
+      console.error("[support] R2 write failed", rawErr);
+    }
+    const note = forwarded ? "parse failed" : "parse failed; not forwarded";
+    await record({ ...emptyRow, ...kept, msg: null, category: "unsure", disposition: forwarded ? "escalated" : "stored", note, size: raw.byteLength });
+    return { disposition: forwarded ? "escalated" : "stored", taskId: null, category: "unsure", forwarded, note };
   }
 
   // 3. Authentication + spam: dropped silently (no bounce → no backscatter).
   const auth = parseAuthResults(msg.authResults);
-  const authJson = JSON.stringify(auth);
+  const authenticated = senderAuthenticated(msg.from, auth);
+  const authJson = JSON.stringify({ ...auth, authenticated });
   const drop = dropReason(msg, auth);
   if (drop) {
-    await record({ ...emptyRow, msg, authJson, category: null, disposition: "dropped", note: drop, size: raw.byteLength });
+    console.log(`[support] dropped: ${drop}`);
     return { disposition: "dropped", taskId: null, category: null, forwarded, note: drop };
   }
 
   const classification = classifyInbound(msg, auth);
+  const priority = classification.escalate && isPriorityEscalation(classification.category, authenticated);
 
-  // 4. Rate limits (reject with a reason a real sender can read). A D1 outage
-  // skips the limit rather than losing mail. Escalations are never limited.
-  if (!classification.escalate) {
+  // 4. Rate limits (reject with a reason a real sender can read), counting only
+  // kept mail. A D1 outage skips the limit rather than losing mail. Only
+  // priority escalations (authenticated reviewer/legal) skip them.
+  if (!priority) {
     try {
-      const since = now.getTime() - HOUR_MS;
-      const fromSender = await countSince(db, `direction = 'in' AND from_addr = ? AND created_at >= ?`, [msg.from, since]);
-      const total = await countSince(db, `direction = 'in' AND created_at >= ?`, [since]);
+      const fromSender = await countSince(db, `${KEPT_INBOUND} AND from_addr = ? AND created_at >= ?`, [msg.from, since]);
+      const total = await countSince(db, `${KEPT_INBOUND} AND created_at >= ?`, [since]);
       const limited =
         fromSender >= SENDER_HOURLY_LIMIT ? "sender" : total >= GLOBAL_HOURLY_LIMIT ? "inbox" : null;
       if (limited) {
         const note = `rate limited (${limited})`;
         message.setReject("Too many messages to this inbox; please try again later.");
-        await record({ ...emptyRow, msg, authJson, category: classification.category, disposition: "rejected", note, size: raw.byteLength });
+        console.log(`[support] rejected: ${note}`);
         return { disposition: "rejected", taskId: null, category: classification.category, forwarded, note };
       }
     } catch (err) {
@@ -289,30 +378,38 @@ export async function handleInbound(
     }
   }
 
-  // 5. Escalate first, so storage trouble can't swallow it.
+  // 5. Escalate first, so storage trouble can't swallow it, unless this
+  // class's hourly forward cap is spent: then it is kept as a task only, or
+  // rejected when there is no vault to keep it in.
+  let notForwarded: string | undefined;
   if (classification.escalate || !vault) {
-    await forward(classification.category, vault ? classification.reason : "support vault not configured");
+    if (await mayForward(priority)) {
+      await forward(classification.category, vault ? classification.reason : "support vault not configured");
+    } else if (!vault) {
+      const note = "forward cap reached and no support vault";
+      message.setReject("Too many messages to this inbox; please try again later.");
+      console.log(`[support] rejected: ${note}`);
+      return { disposition: "rejected", taskId: null, category: classification.category, forwarded, note };
+    } else {
+      notForwarded = "hourly forward cap reached";
+    }
   }
 
   // 6. Store: raw + attachments (R2 when bound), task, D1 row.
-  const bucket: R2Bucket | undefined = env.SUPPORT_MAIL;
   let rawKey: string | null = null;
   let rawB64: string | null = null;
   const attachments: (AttachmentMeta & { key?: string })[] = msg.attachments.map((a) => ({ ...a }));
   let attachmentsStored = false;
   try {
+    ({ rawKey, rawB64 } = await keepRaw(raw));
     if (bucket) {
       const prefix = `support/${now.toISOString().slice(0, 10)}/${rowId}`;
-      rawKey = `${prefix}/raw.eml`;
-      await bucket.put(rawKey, raw, { httpMetadata: { contentType: "message/rfc822" } });
       for (let i = 0; i < attachments.length; i++) {
         const key = `${prefix}/att-${i}-${safeKeyPart(attachments[i].filename)}`;
         await bucket.put(key, msg.attachmentContents[i], { httpMetadata: { contentType: attachments[i].mimeType } });
         attachments[i].key = key;
       }
       attachmentsStored = attachments.length > 0;
-    } else if (raw.byteLength <= MAX_D1_RAW_BYTES) {
-      rawB64 = base64(raw);
     }
   } catch (err) {
     console.error("[support] R2 write failed", err);
@@ -323,11 +420,13 @@ export async function handleInbound(
   let taskError: unknown = null;
   if (vault) {
     try {
-      const existing = await findThreadTask(db, msg.threadIds);
+      const existing = await findThreadTask(db, msg.threadIds, msg.from, authenticated);
       if (existing || classification.category !== "auto") {
         taskId = await writeTask(vault, existing, msg, classification, now, {
           escalated: forwarded,
           attachmentsStored,
+          authenticated,
+          notForwarded,
         });
       }
     } catch (err) {
@@ -340,13 +439,14 @@ export async function handleInbound(
   }
 
   const disposition: InboundOutcome["disposition"] = forwarded ? "escalated" : taskId ? "task" : "stored";
+  const note = notForwarded ? `${classification.reason}; ${notForwarded}` : classification.reason;
   const stored = await record({
     msg,
     authJson,
     taskId,
     category: classification.category,
     disposition,
-    note: classification.reason,
+    note,
     attachments,
     rawKey,
     rawB64,
@@ -363,7 +463,7 @@ export async function handleInbound(
     taskId,
     category: classification.category,
     forwarded,
-    note: classification.reason,
+    note,
   };
 }
 
