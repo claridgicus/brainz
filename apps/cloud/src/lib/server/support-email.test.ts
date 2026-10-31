@@ -230,6 +230,25 @@ describe("handleInbound", () => {
     expect((await handleInbound(reviewer.m, env, vault, at(3))).disposition).toBe("escalated");
   });
 
+  it("keys the per-sender limit on address and authentication", async () => {
+    const { d1, vault, env } = setup();
+    // Spoofed, unauthenticated mail "from" ada has used up its own quota…
+    seedRows(d1, SENDER_HOURLY_LIMIT, { disposition: "task", from: "ada@example.com", authenticated: false });
+    // …which leaves the real, authenticated ada's quota untouched.
+    const real = message(rawEmail({ auth: PASS }));
+    expect((await handleInbound(real.m, env, vault, at(1))).disposition).toBe("task");
+    const spoof = message(rawEmail({ auth: "spf=none; dkim=none; dmarc=none", messageId: "s@x" }));
+    expect((await handleInbound(spoof.m, env, vault, at(2))).disposition).toBe("rejected");
+  });
+
+  it("does not authenticate a sender whose envelope address could fake header clauses", async () => {
+    const { vault, env, rows } = setup();
+    const { m } = message(rawEmail({ auth: PASS }), { from: 'x;dkim=pass header.d=example.com;"@evil.example' });
+    const out = await handleInbound(m, env, vault, at(0));
+    expect(JSON.parse(String(rows()[0].auth_json))).toMatchObject({ trusted: false, authenticated: false });
+    expect(vault.concepts.get(out.taskId!)!.body).toContain("sender NOT authenticated");
+  });
+
   it("counts only kept mail toward the inbox's hourly limit", async () => {
     const { d1, vault, env } = setup();
     seedRows(d1, GLOBAL_HOURLY_LIMIT, { disposition: "dropped" });
@@ -336,8 +355,9 @@ describe("handleInbound", () => {
     const raw = rawEmail({ auth: PASS, body: "How do I fix this?", attachment: { filename: "a b.png", type: "image/png", content: "png" } });
     await handleInbound(message(raw).m, { ...env, SUPPORT_MAIL: bucket as never }, vault, at(0));
     expect(puts).toHaveLength(2);
-    expect(puts[0]).toMatch(/^support\/2026-10-29\/.+\/raw\.eml$/);
-    expect(puts[1]).toMatch(/att-0-a_b\.png$/);
+    // Raw MIME under its own prefix, for the 90-day R2 lifecycle rule.
+    expect(puts[0]).toMatch(/^support\/raw\/2026-10-29\/[^/]+\.eml$/);
+    expect(puts[1]).toMatch(/^support\/att\/2026-10-29\/[^/]+\/att-0-a_b\.png$/);
     expect(rows()[0]).toMatchObject({ raw_b64: null, raw_key: puts[0] });
   });
 });

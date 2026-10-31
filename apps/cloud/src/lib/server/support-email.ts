@@ -309,7 +309,9 @@ export async function handleInbound(
   /** Raw MIME to R2 when bound, else into D1 up to MAX_D1_RAW_BYTES. */
   const keepRaw = async (raw: Uint8Array): Promise<{ rawKey: string | null; rawB64: string | null }> => {
     if (bucket) {
-      const rawKey = `support/${now.toISOString().slice(0, 10)}/${rowId}/raw.eml`;
+      // Raw MIME lives under its own prefix so an R2 lifecycle rule can expire
+      // it after RAW_RETENTION_DAYS (SPEC-CLOUD "Support inbox", Retention).
+      const rawKey = `support/raw/${now.toISOString().slice(0, 10)}/${rowId}.eml`;
       await bucket.put(rawKey, raw, { httpMetadata: { contentType: "message/rfc822" } });
       return { rawKey, rawB64: null };
     }
@@ -354,7 +356,7 @@ export async function handleInbound(
   }
 
   // 3. Authentication + spam: dropped silently (no bounce → no backscatter).
-  const auth = parseAuthResults(msg.authResults);
+  const auth = parseAuthResults(msg.authResults, message.from);
   const authenticated = senderAuthenticated(msg.from, auth);
   const authJson = JSON.stringify({ ...auth, authenticated });
   const drop = dropReason(msg, auth);
@@ -370,10 +372,16 @@ export async function handleInbound(
 
   // 4. Rate limits (reject with a reason a real sender can read), counting only
   // kept mail. A D1 outage skips the limit rather than losing mail. Every
-  // message is under the per-sender limit; authenticated reviewer and legal
+  // message is under the per-sender limit (per address and authentication); authenticated reviewer and legal
   // escalations skip only the inbox-wide one.
   try {
-    const fromSender = await countSince(db, `${KEPT_INBOUND} AND from_addr = ? AND created_at >= ?`, [msg.from, since]);
+    // Keyed on address AND authentication, so spoofed unauthenticated mail
+    // can't spend a real sender's quota.
+    const fromSender = await countSince(
+      db,
+      `${KEPT_INBOUND} AND from_addr = ? AND coalesce(json_extract(auth_json, '$.authenticated'), 0) = ? AND created_at >= ?`,
+      [msg.from, authenticated ? 1 : 0, since],
+    );
     const total = cls === "ordinary" ? await countSince(db, `${KEPT_INBOUND} AND created_at >= ?`, [since]) : 0;
     const limited =
       fromSender >= SENDER_HOURLY_LIMIT ? "sender" : total >= GLOBAL_HOURLY_LIMIT ? "inbox" : null;
@@ -412,7 +420,7 @@ export async function handleInbound(
   try {
     ({ rawKey, rawB64 } = await keepRaw(raw));
     if (bucket) {
-      const prefix = `support/${now.toISOString().slice(0, 10)}/${rowId}`;
+      const prefix = `support/att/${now.toISOString().slice(0, 10)}/${rowId}`;
       for (let i = 0; i < attachments.length; i++) {
         const key = `${prefix}/att-${i}-${safeKeyPart(attachments[i].filename)}`;
         await bucket.put(key, msg.attachmentContents[i], { httpMetadata: { contentType: attachments[i].mimeType } });

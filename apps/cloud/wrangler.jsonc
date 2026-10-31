@@ -69,7 +69,11 @@
   // id (without it every message is forwarded to SUPPORT_ESCALATE_TO, default
   // james@plutocracy.io). SUPPORT_AUTOSEND_CATEGORIES stays unset
   // (agents only draft) until James enables "howto". Optional R2 for raw mail
-  // + attachments: wrangler r2 bucket create brainz-support-mail, then add
+  // + attachments: wrangler r2 bucket create brainz-support-mail, then the
+  // REQUIRED 90-day lifecycle rule on raw MIME (/privacy promises the raw copy
+  // is deleted after 90 days; the daily cron only clears D1's raw_b64):
+  //   wrangler r2 bucket lifecycle add brainz-support-mail support-raw-90d support/raw/ --expire-days 90
+  // and only then add
   //   "r2_buckets": [{ "binding": "SUPPORT_MAIL", "bucket_name": "brainz-support-mail" }]
   "observability": { "enabled": true }
 }

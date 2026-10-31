@@ -182,7 +182,7 @@ export interface SenderAuth {
   /** Signing domains of the passing DKIM signatures. */
   dkimDomains: string[];
   dmarc: AuthVerdict;
-  /** The header.from domain of the dmarc clause (null when absent or ambiguous). */
+  /** The header.from domain of the dmarc clause (null when absent). */
   dmarcFrom: string | null;
   /** The verdicts came from Cloudflare's own header (see parseAuthResults). */
   trusted: boolean;
@@ -334,16 +334,12 @@ export function authservId(value: string): string {
 const NO_AUTH: SenderAuth = { spf: "none", dkim: "none", dkimDomains: [], dmarc: "none", dmarcFrom: null, trusted: false };
 
 /**
- * Several clauses for one method, combined fail-closed: any fail is a fail, a
- * pass needs every clause to pass. (Cloudflare writes one spf and one dmarc
- * clause; a second one could only be smuggled in, and must not win.)
+ * Characters an envelope sender (SMTP MAIL FROM) must not contain for its
+ * Authentication-Results to be trusted: Cloudflare echoes it into the header
+ * as `smtp.mailfrom=`, and a quoted local part holding these could fake clause
+ * or comment boundaries there.
  */
-function combine(results: readonly string[]): AuthVerdict {
-  if (results.length === 0) return "none";
-  if (results.includes("fail")) return "fail";
-  if (results.every((r) => r === "pass")) return "pass";
-  return verdict(results.find((r) => r !== "pass"));
-}
+const UNSAFE_ENVELOPE = /[;()"\\\s]/;
 
 /**
  * Read SPF/DKIM/DMARC from the TOPMOST Authentication-Results header, and only
@@ -351,26 +347,32 @@ function combine(results: readonly string[]): AuthVerdict {
  * on receipt. Every other header (lower ones, or a topmost one with another
  * authserv-id, which means Cloudflare's is missing) may be sender-forged, so
  * anything else reads as "none" (`trusted: false`): never authenticated, never
- * a pass. Passing DKIM domains come from `header.d` of passing dkim clauses,
- * and the DMARC domain from `header.from` of the dmarc clause(s).
+ * a pass. Also untrusted: an envelope sender (`envelopeFrom`, from the Email
+ * Routing API, when given) containing `; ( ) " \` or whitespace, and a header
+ * without exactly one spf, one dkim and one dmarc clause (a second one could
+ * only have been smuggled in through sender-controlled text). The DKIM domain
+ * is `header.d` of the dkim clause, the DMARC domain `header.from` of the
+ * dmarc clause.
  */
-export function parseAuthResults(authResults: string[]): SenderAuth {
+export function parseAuthResults(authResults: string[], envelopeFrom?: string): SenderAuth {
+  if (envelopeFrom !== undefined && UNSAFE_ENVELOPE.test(envelopeFrom)) return { ...NO_AUTH, dkimDomains: [] };
   const header = parseAuthResultsHeader(authResults[0] ?? "");
   if (header.authservId !== CLOUDFLARE_AUTHSERV_ID) return { ...NO_AUTH, dkimDomains: [] };
-  const of = (method: string) => header.results.filter((r) => r.method === method);
-  const dkim = of("dkim");
-  const dmarc = of("dmarc");
-  const dmarcFroms = new Set(dmarc.map((r) => r.props.get("header.from")?.toLowerCase() ?? ""));
-  const dmarcFrom = dmarcFroms.size === 1 ? [...dmarcFroms][0] || null : null;
+  const only = (method: string) => {
+    const found = header.results.filter((r) => r.method === method);
+    return found.length === 1 ? found[0] : null;
+  };
+  const spf = only("spf");
+  const dkim = only("dkim");
+  const dmarc = only("dmarc");
+  if (!spf || !dkim || !dmarc) return { ...NO_AUTH, dkimDomains: [] };
+  const dkimDomain = (dkim.props.get("header.d") ?? "").toLowerCase();
   return {
-    spf: combine(of("spf").map((r) => r.result)),
-    dkim: dkim.some((r) => r.result === "pass") ? "pass" : combine(dkim.map((r) => r.result)),
-    dkimDomains: dkim
-      .filter((r) => r.result === "pass")
-      .map((r) => (r.props.get("header.d") ?? "").toLowerCase())
-      .filter((d) => /^[a-z0-9.-]+$/.test(d)),
-    dmarc: combine(dmarc.map((r) => r.result)),
-    dmarcFrom,
+    spf: verdict(spf.result),
+    dkim: verdict(dkim.result),
+    dkimDomains: dkim.result === "pass" && /^[a-z0-9.-]+$/.test(dkimDomain) ? [dkimDomain] : [],
+    dmarc: verdict(dmarc.result),
+    dmarcFrom: dmarc.props.get("header.from")?.toLowerCase() || null,
     trusted: true,
   };
 }

@@ -308,6 +308,14 @@ lives in `src/lib/server/oauth.ts`, `src/routes/oauth/**` and
   expired, and idle grantless DCR clients (SPEC-CLOUD.md "Housekeeping
   cron"). Fire it locally with `npx wrangler dev --test-scheduled`, then
   `curl "http://127.0.0.1:8787/__scheduled?cron=23+4+*+*+*"`.
+- **Support inbox R2 (optional).** Binding `SUPPORT_MAIL` moves support
+  mail's raw MIME and attachments from D1 to R2 (SPEC-CLOUD.md "Support
+  inbox"). Raw MIME goes under `support/raw/`, attachments under
+  `support/att/`. /privacy promises the raw copy is deleted after 90 days, and
+  the daily cron only clears D1's `raw_b64`, so **before binding the bucket**
+  add the lifecycle rule:
+  `npx wrangler r2 bucket lifecycle add brainz-support-mail support-raw-90d support/raw/ --expire-days 90`
+  (check with `npx wrangler r2 bucket lifecycle list brainz-support-mail`).
 - **Before submitting**, refresh the OpenAI egress snapshot (exempts ChatGPT's
   client registrations from the DCR limit): `node scripts/refresh-openai-egress.mjs`
   (source: https://openai.com/chatgpt-connectors.json).
