@@ -59,6 +59,7 @@
 		FLAT_MAX_NODES,
 		MIN_AUTO_MEMBERS,
 		MIN_AUTO_SHARE,
+		MOUNT_PER_PASS,
 		TREE_LOD_BOOST,
 		FLAT_LOD_BOOST,
 		allocateBudget,
@@ -882,7 +883,24 @@
 				const size = clusterCount.get(cid) ?? 0;
 				return size <= 1 || (counts.get(cid) ?? 0) >= Math.max(MIN_AUTO_MEMBERS, Math.ceil(size * MIN_AUTO_SHARE));
 			};
-			const open = expandPolicy === "auto" ? cands.filter((c) => manualIds.has(c.id) || showsEnough(c.id)) : cands;
+			const eligibleOpen = expandPolicy === "auto" ? cands.filter((c) => manualIds.has(c.id) || showsEnough(c.id)) : cands;
+			// Spread a big reveal over passes: newly opening clusters may add at most
+			// MOUNT_PER_PASS nodes per pass (the first always opens); the rest open on
+			// the next throttled pass, so zooming past the threshold never mounts
+			// ~400 nodes in one frame.
+			let fresh = 0;
+			let held = false;
+			const open = eligibleOpen.filter((c) => {
+				if (expanded.has(c.id) || manualIds.has(c.id)) return true;
+				const n = counts.get(c.id) ?? 0;
+				if (fresh > 0 && fresh + n > MOUNT_PER_PASS) {
+					held = true;
+					return false;
+				}
+				fresh += n;
+				return true;
+			});
+			if (held) scheduleLod();
 			const alloc = allocateBudget(open, counts, nodeBudget - forced.size);
 			for (const [cid, n] of clusterCount) {
 				const u = units.get(cid)!;

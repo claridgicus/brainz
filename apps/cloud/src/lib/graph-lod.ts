@@ -50,6 +50,8 @@ export const SIZE_PRIORITY = 0.5;
  */
 export const MIN_AUTO_MEMBERS = 2;
 export const MIN_AUTO_SHARE = 0.2;
+/** Newly opening clusters add at most this many nodes per LOD pass (the rest open on the next passes). */
+export const MOUNT_PER_PASS = 120;
 /** Clicking a bubble (or jumping into one) zooms until its footprint is this big on screen (px radius). */
 export const OPEN_PX = 176;
 /**
