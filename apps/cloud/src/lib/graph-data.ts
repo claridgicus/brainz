@@ -42,6 +42,35 @@ export function colorForType(type: string, colors: Record<string, string>): stri
   return colors[type] ?? colors["pending"] ?? PENDING_TYPE_COLOR;
 }
 
+/**
+ * Edge strand colours by relation — muted so bundles read as subtly striped
+ * cables, not a rainbow. Inverse pairs share a colour (realizes/realized_by,
+ * governs/governed_by); relations outside the canonical set hash onto
+ * RELATION_EXTRA. The graph's edge legend lists the relations on screen.
+ */
+export const RELATION_COLORS: Record<string, string> = {
+  part_of: "#6f7f9e",
+  realizes: "#4fae96",
+  realized_by: "#4fae96",
+  governs: "#c3a052",
+  governed_by: "#c3a052",
+  depends_on: "#c2708c",
+  constrains: "#cc805c",
+  supersedes: "#9a82cf",
+  references: "#5b8fc4",
+  related_to: "#8b919c",
+};
+const RELATION_EXTRA = ["#7fa36a", "#b0789f", "#6aa3a8", "#a8946a"];
+
+/** Strand colour for an edge relation. */
+export function colorForRelation(relation: string): string {
+  const c = RELATION_COLORS[relation];
+  if (c) return c;
+  let h = 0;
+  for (let i = 0; i < relation.length; i++) h = (h * 31 + relation.charCodeAt(i)) >>> 0;
+  return RELATION_EXTRA[h % RELATION_EXTRA.length]!;
+}
+
 /** Node radius grows with degree (same curve as packages/web). */
 export const radiusFor = (degree: number): number => 6 + Math.sqrt(degree) * 2.4;
 

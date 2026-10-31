@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bundleEdges, chevron, straightPath, type BundleEnd } from "./graph-bundle.js";
+import { buildBackbone, bundleEdges, chevron, straightPath, type BundleEnd } from "./graph-bundle.js";
 
 // Two groups far apart: A at (0,0), B at (1000,0), footprints 100.
 const inA = (y: number): BundleEnd => ({ x: 0, y, r: 5, group: "A", gx: 0, gy: 0, gR: 100 });
@@ -79,6 +79,102 @@ describe("bundleEdges", () => {
 	it("is deterministic", () => {
 		const edges = [-30, 0, 30].map((y, i) => ({ key: `e${i}`, a: inA(y), b: inB(y), strands: 1 + (i % 2) }));
 		expect(bundleEdges(edges).paths).toEqual(bundleEdges(edges).paths);
+	});
+});
+
+// Two regions of five discs each, far apart: west around (0,0), east around (2000,0).
+const regions = [
+	...[0, 1, 2, 3, 4].map((k) => ({ id: `w${k}`, x: Math.cos(k * 1.26) * 300, y: Math.sin(k * 1.26) * 300, R: 60 })),
+	...[0, 1, 2, 3, 4].map((k) => ({ id: `e${k}`, x: 2000 + Math.cos(k * 1.26) * 300, y: Math.sin(k * 1.26) * 300, R: 60 })),
+];
+const disc = (id: string, hub: number): BundleEnd => {
+	const g = regions.find((r) => r.id === id)!;
+	return { x: g.x, y: g.y, r: 20, group: id, gx: g.x, gy: g.y, gR: 30, hub };
+};
+
+describe("buildBackbone", () => {
+	it("groups discs into super-groups with a hub each, joined by trunks", () => {
+		const bb = buildBackbone(regions, { hubs: 2 });
+		expect(bb.hubs.length).toBe(2);
+		expect(bb.links).toEqual([[0, 1]]);
+		const west = bb.hubOf.get("w0");
+		for (let k = 0; k < 5; k++) {
+			expect(bb.hubOf.get(`w${k}`)).toBe(west);
+			expect(bb.hubOf.get(`e${k}`)).not.toBe(west);
+		}
+		expect(bb.next[0]![1]).toBe(1);
+	});
+
+	it("keeps hubs off the discs", () => {
+		const bb = buildBackbone(regions, { hubs: 2, margin: 30 });
+		for (const h of bb.hubs) for (const g of regions) expect(Math.hypot(h.x - g.x, h.y - g.y)).toBeGreaterThanOrEqual(g.R + 29);
+	});
+
+	it("is empty for a handful of groups", () => {
+		expect(buildBackbone(regions.slice(0, 4)).hubs).toEqual([]);
+	});
+
+	it("routes over a spanning tree, with paths for every hub pair", () => {
+		const grid = Array.from({ length: 36 }, (_, i) => ({ id: `g${i}`, x: (i % 6) * 400, y: Math.floor(i / 6) * 400, R: 50 }));
+		const bb = buildBackbone(grid);
+		const K = bb.hubs.length;
+		expect(K).toBeGreaterThanOrEqual(3);
+		expect(bb.links.length).toBeGreaterThanOrEqual(K - 1);
+		for (let i = 0; i < K; i++) for (let j = 0; j < K; j++) expect(bb.next[i]![j]).toBeGreaterThanOrEqual(0);
+	});
+});
+
+describe("bundleEdges with a backbone", () => {
+	const bb = buildBackbone(regions, { hubs: 2 });
+	const W = bb.hubOf.get("w0")!;
+	const E = bb.hubOf.get("e0")!;
+	const cross = [0, 1, 2, 3, 4].map((k) => ({ key: `x${k}`, a: disc(`w${k}`, W), b: disc(`e${(k + 2) % 5}`, E), strands: 1, weight: 2 }));
+
+	it("routes edges between super-groups along one shared trunk, labelled with the link count", () => {
+		const res = bundleEdges(cross, { gap: 3, backbone: bb });
+		expect(res.trunks.length).toBe(1);
+		expect(res.trunks[0]!.count).toBe(10);
+		// Every strand passes the trunk's midpoint within the trunk width.
+		const mid = { x: (bb.hubs[0]!.x + bb.hubs[1]!.x) / 2, y: (bb.hubs[0]!.y + bb.hubs[1]!.y) / 2 };
+		for (const d of res.paths.values()) {
+			const near = Math.min(...coords(d).map(([x, y]) => Math.hypot(x - mid.x, y - mid.y)));
+			expect(near).toBeLessThan(40);
+		}
+		// Cable-ties pinch the trunk by each hub; edges on the trunk carry no per-edge label.
+		expect(res.ties.length).toBeGreaterThanOrEqual(2);
+		expect(res.mids.size).toBe(0);
+	});
+
+	it("keeps the strands apart along the trunk (parallel lanes, not one line)", () => {
+		const res = bundleEdges(cross, { gap: 3, backbone: bb });
+		const mid = { x: (bb.hubs[0]!.x + bb.hubs[1]!.x) / 2, y: (bb.hubs[0]!.y + bb.hubs[1]!.y) / 2 };
+		const ys = [...res.paths.values()].map((d) => {
+			const pts = coords(d);
+			let best = pts[0]!;
+			for (const p of pts) if (Math.hypot(p[0] - mid.x, p[1] - mid.y) < Math.hypot(best[0] - mid.x, best[1] - mid.y)) best = p;
+			return best[1];
+		});
+		expect(new Set(ys.map((y) => y.toFixed(1))).size).toBe(5);
+	});
+
+	it("leaves edges within one super-group on direct gate routes", () => {
+		const res = bundleEdges([{ key: "w", a: disc("w0", W), b: disc("w2", W), strands: 1 }], { backbone: bb });
+		expect(res.trunks).toEqual([]);
+		expect(res.mids.has("w")).toBe(true);
+	});
+
+	it("never doubles back: a group past the tie joins the trunk further in", () => {
+		// e0 sits on the west side of the east region — between the hubs' ties.
+		const res = bundleEdges(cross, { gap: 3, backbone: bb });
+		for (const d of res.paths.values()) {
+			const xs = coords(d).map(([x]) => x);
+			// Monotone-ish west → east: no point runs back more than a lane or two.
+			let maxX = -Infinity;
+			for (const x of xs) {
+				expect(x).toBeGreaterThan(maxX - 200);
+				maxX = Math.max(maxX, x);
+			}
+		}
 	});
 });
 

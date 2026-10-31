@@ -30,6 +30,8 @@
 	import {
 		ALL_TYPES,
 		adjacency,
+		RELATION_COLORS,
+		colorForRelation,
 		colorForType,
 		filterGraph,
 		neighborhood,
@@ -70,7 +72,7 @@
 		type ClusterGeom,
 		type ClusterIndex,
 	} from "$lib/graph-lod";
-	import { bundleEdges, straightPath, type BundleEnd, type BundleInput } from "$lib/graph-bundle";
+	import { buildBackbone, bundleEdges, straightPath, type Backbone, type BundleEnd, type BundleInput } from "$lib/graph-bundle";
 
 	interface SimNode extends SimulationNodeDatum {
 		id: string;
@@ -138,6 +140,8 @@
 	const LABEL_BUDGET = 160;
 	/** Edge elements cap (nearest the centre / touching the selection win). */
 	const EDGE_BUDGET = 1500;
+	/** Render sets with at most this many individual nodes are bundled whole. */
+	const WHOLE_BUNDLE_NODES = 120;
 	/** An aggregated edge draws at most this many parallel strands. */
 	const MAX_STRANDS = 5;
 	// Keep off-screen nodes just outside the frame mounted so panning doesn't
@@ -150,6 +154,8 @@
 
 	let svg: SVGSVGElement;
 	let tooltip = $state({ text: "", x: 0, y: 0, visible: false });
+	/** relations on screen → strand colour (the edge legend) */
+	let legend = $state<Array<{ rel: string; color: string }>>([]);
 	let empty = $state(false);
 
 	// ------------------------------------------------------------ graph state
@@ -188,6 +194,8 @@
 	let hullsG: SVGGElement;
 	let edgesG: SVGGElement;
 	let tiesG: SVGGElement;
+	/** link-count labels on the backbone trunks (rebuilt with the bundles) */
+	let trunkLabels: SVGTextElement[] = [];
 	let nodesG: SVGGElement;
 	let labelsG: SVGGElement;
 	const view = { x: 0, y: 0, k: 1 };
@@ -211,6 +219,8 @@
 		weight: number;
 		/** relation for a single concept→concept edge; null when aggregated */
 		relation: string | null;
+		/** strand colour key: the relation, or an aggregate's most common one */
+		rel: string;
 		from: string;
 		to: string;
 	}
@@ -243,6 +253,11 @@
 	let posVersion = 0;
 	/** zoom scale the current bundles were routed at (lane gaps are screen px) */
 	let bundleK = 1;
+	/** overview backbone (super-group hubs + trunks) for the posVersion it was built at */
+	let backbone: Backbone | null = null;
+	let backboneVersion = -1;
+	/** routes for the whole render set (overview-sized sets; see draw) */
+	let bundleCache: { key: string; paths: Map<string, string>; mids: Map<string, P> } | null = null;
 	let dragging = false;
 
 	// -------------------------------------------------------- semantic zoom LOD
@@ -448,6 +463,7 @@
 	function clearDom(): void {
 		posVersion++;
 		for (const g of [hullsG, edgesG, tiesG, nodesG, labelsG]) g.innerHTML = "";
+		trunkLabels = [];
 		nodeEls.clear();
 		bubbleEls.clear();
 		hullEls.clear();
@@ -577,14 +593,15 @@
 		applyAnchors(unitList, anchors);
 		const links: UnitLink[] = clusterLinks(index, graph.edges).map((l) => ({ source: l.a, target: l.b, weight: l.weight }));
 		topSim?.stop();
-		// Discs never overlap (collide = footprint + gap), linked clusters attract
+		// Discs never overlap (collide = footprint + a gap wide enough for cable
+		// runs to pass between them), linked clusters attract
 		// in proportion to how many edges join them, mild repulsion spreads the map.
 		topSim = forceSimulation<Unit, UnitLink>(unitList)
 			.force(
 				"link",
 				forceLink<Unit, UnitLink>(links)
 					.id((d) => d.id)
-					.distance((l) => (l.source as Unit).R + (l.target as Unit).R + 120)
+					.distance((l) => (l.source as Unit).R + (l.target as Unit).R + 180)
 					.strength((l) => Math.min(0.5, 0.03 + 0.025 * Math.sqrt(l.weight))),
 			)
 			.force("charge", forceManyBody<Unit>().strength((d) => -40 * Math.sqrt(d.size)).distanceMax(3000))
@@ -593,7 +610,7 @@
 			.force(
 				"collide",
 				forceCollide<Unit>()
-					.radius((d) => d.R + 50)
+					.radius((d) => d.R + 80)
 					.strength(1)
 					.iterations(3),
 			)
@@ -606,6 +623,7 @@
 		// reheats it live, via the tick/end handlers.
 		for (let i = 0; i < 400 && topSim.alpha() > topSim.alphaMin(); i++) topSim.tick();
 		topSim.alpha(0);
+		backboneVersion = -1;
 		topSim.on("tick", onTick).on("end", () => {
 			saveLayout();
 			onSettled();
@@ -844,6 +862,7 @@
 		const sig = `${[...nodes].join(",")}#${[...bubbles.keys()].join(",")}#${[...residual].join(",")}#${eligibleEdges.length}#${clusterableEdges.length}`;
 		if (sig !== edgeCache.sig) {
 			const all = new Map<string, RenderEdge>();
+			const relCounts = new Map<string, Map<string, number>>();
 			for (const e of mode === "tree" ? clusterableEdges : eligibleEdges) {
 				const a = repOf(e.from);
 				const b = repOf(e.to);
@@ -853,15 +872,24 @@
 				const single = a.kind !== "bubble" && b.kind !== "bubble";
 				if (single) {
 					const key = `${e.from}|${e.relation}|${e.to}`;
-					all.set(key, { key, a, b, weight: 1, relation: e.relation, from: e.from, to: e.to });
+					all.set(key, { key, a, b, weight: 1, relation: e.relation, rel: e.relation, from: e.from, to: e.to });
 				} else {
 					const ka = `${a.kind}:${a.id}`;
 					const kb = `${b.kind}:${b.id}`;
 					const key = ka < kb ? `~${ka}|${kb}` : `~${kb}|${ka}`;
 					const agg = all.get(key);
 					if (agg) agg.weight++;
-					else all.set(key, { key, a, b, weight: 1, relation: null, from: e.from, to: e.to });
+					else all.set(key, { key, a, b, weight: 1, relation: null, rel: e.relation, from: e.from, to: e.to });
+					let rc = relCounts.get(key);
+					if (!rc) relCounts.set(key, (rc = new Map()));
+					rc.set(e.relation, (rc.get(e.relation) ?? 0) + 1);
 				}
+			}
+			for (const [key, rc] of relCounts) {
+				let best = "";
+				let bn = 0;
+				for (const [r, n] of rc) if (n > bn || (n === bn && r < best)) [best, bn] = [r, n];
+				all.get(key)!.rel = best;
 			}
 			edgeCache = { sig, list: [...all.values()] };
 		}
@@ -1018,7 +1046,8 @@
 				entry.label?.remove();
 				edgeEls.delete(key);
 				changed = true;
-			} else if (next.weight !== entry.edge.weight || next.a.kind !== entry.edge.a.kind || next.b.kind !== entry.edge.b.kind) {
+			} else if (next.weight !== entry.edge.weight || next.rel !== entry.edge.rel || next.a.kind !== entry.edge.a.kind || next.b.kind !== entry.edge.b.kind) {
+				if (next.rel !== entry.edge.rel) entry.el.style.setProperty("--ec", colorForRelation(next.rel));
 				entry.edge = next;
 				if (entry.label) {
 					entry.label.textContent = String(next.weight);
@@ -1047,7 +1076,10 @@
 		rBubbles = bubbles;
 		rHulls = hulls;
 		rEdges = edges;
-		if (changed) bundleDirty = true;
+		if (changed) {
+			bundleDirty = true;
+			updateLegend();
+		}
 		reapplyHover();
 		reapplyFocus();
 		reapplySelected();
@@ -1144,6 +1176,7 @@
 		if (e.relation === null) path.classList.add("agg");
 		else if (e.relation !== "references") path.classList.add("typed");
 		path.dataset["key"] = e.key;
+		path.style.setProperty("--ec", colorForRelation(e.rel));
 		const text = (): string => {
 			const cur = edgeEls.get(e.key)?.edge ?? e;
 			return cur.relation ?? `${cur.weight} link${cur.weight === 1 ? "" : "s"}`;
@@ -1164,6 +1197,12 @@
 	// ------------------------------------------------------------ positions + edges
 	/** Endpoint geometry for bundling: position, radius and gate group. */
 	function bundleEnd(r: EndRef, groupCentres: Map<string, { x: number; y: number; R: number }> | null): BundleEnd | null {
+		const end = bundleEndGeom(r, groupCentres);
+		if (end && backbone) end.hub = backbone.hubOf.get(r.kind === "bubble" ? r.id : index.clusterOf.get(r.id)!);
+		return end;
+	}
+
+	function bundleEndGeom(r: EndRef, groupCentres: Map<string, { x: number; y: number; R: number }> | null): BundleEnd | null {
 		if (r.kind === "bubble") {
 			const b = rBubbles.get(r.id);
 			if (!b) return null;
@@ -1231,21 +1270,45 @@
 		svg.dataset["settled"] = hot ? "0" : "1";
 		if (!hot && !bundleDirty) return;
 		const groupCentres = mode === "flat" ? flatGroupCentres() : null;
+		// Overview backbone over the cluster discs — rebuilt only when they moved.
+		if (mode !== "tree" || !bundling || hot) backbone = null;
+		else if (!backbone || backboneVersion !== posVersion) {
+			backbone = buildBackbone([...units.values()].map((u) => ({ id: u.id, x: u.x ?? 0, y: u.y ?? 0, R: u.R })));
+			backboneVersion = posVersion;
+		}
+		// Overview-sized render sets are bundled whole (mounted or not) and cached
+		// per render set + layout + zoom bucket, so panning — which only mounts and
+		// unmounts edges — reuses the routes instead of re-bundling.
+		const whole = !hot && bundling && edgeCache.list.length <= EDGE_BUDGET && rNodes.size <= WHOLE_BUNDLE_NODES;
+		const cacheKey = `${edgeCache.sig}#${posVersion}#${mode}`;
+		if (whole && bundleCache?.key === cacheKey && Math.abs(Math.log(view.k / bundleK)) <= Math.log(1.4)) {
+			for (const [key, entry] of edgeEls) applyRoute(entry, bundleCache.paths.get(key), bundleCache.mids.get(key));
+			bundleDirty = false;
+			return;
+		}
+		bundleCache = null;
 		const inputs: BundleInput[] = [];
-		for (const [key, { edge }] of edgeEls) {
+		const basis = whole ? edgeCache.list.map((e) => [e.key, e] as const) : [...edgeEls].map(([key, { edge }]) => [key, edge] as const);
+		for (const [key, edge] of basis) {
 			const a = bundleEnd(edge.a, groupCentres);
 			const b = bundleEnd(edge.b, groupCentres);
 			const arrow = edge.relation !== null && edge.relation !== "references";
-			if (a && b) inputs.push({ key, a, b, strands: Math.min(edge.weight, MAX_STRANDS), arrow });
+			// Overview bubble ↔ bubble edges converge on their super-group's hub.
+			const viaHub = edge.a.kind === "bubble" && edge.b.kind === "bubble";
+			if (a && b) inputs.push({ key, a, b, strands: Math.min(edge.weight, MAX_STRANDS), arrow, weight: edge.weight, viaHub });
 		}
 		tiesG.innerHTML = "";
+		for (const t of trunkLabels) t.remove();
+		trunkLabels = [];
 		if (hot || !bundling) {
 			for (const inp of inputs) {
 				const entry = edgeEls.get(inp.key)!;
+				if (!entry) continue;
 				entry.el.setAttribute("d", straightPath(inp.a, inp.b, !hot && inp.arrow ? 6 / view.k : 0));
 				if (inp.strands > 1) entry.el.style.strokeWidth = `calc(var(--sw, 1px) * ${1 + Math.log2(inp.strands)})`;
 				else entry.el.style.removeProperty("stroke-width");
 				if (entry.label) {
+					entry.label.style.display = entry.edge.weight >= 2 ? "" : "none";
 					entry.label.setAttribute("x", String((inp.a.x + inp.b.x) / 2));
 					entry.label.setAttribute("y", String((inp.a.y + inp.b.y) / 2));
 				}
@@ -1257,30 +1320,51 @@
 		}
 		const t0 = performance.now();
 		setScreenUnits();
-		const res = bundleEdges(inputs, { gap: 3 / view.k, arrowSize: 6 / view.k });
-		for (const inp of inputs) {
-			const entry = edgeEls.get(inp.key)!;
-			const d = res.paths.get(inp.key);
-			if (d) entry.el.setAttribute("d", d);
-			entry.el.style.removeProperty("stroke-width");
-			const m = res.mids.get(inp.key);
-			if (entry.label && m) {
-				entry.label.setAttribute("x", String(m.x));
-				entry.label.setAttribute("y", String(m.y));
+		const res = bundleEdges(inputs, {
+			gap: 3.2 / view.k,
+			arrowSize: 6 / view.k,
+			trunkWidth: 18 / view.k,
+			tiePad: 3.5 / view.k,
+			backbone,
+		});
+		for (const [key, entry] of edgeEls) applyRoute(entry, res.paths.get(key), res.mids.get(key));
+		if (whole) bundleCache = { key: cacheKey, paths: res.paths, mids: res.mids };
+		// Cable-ties: every tie in two paths (dark band + light core), not one
+		// element per tie.
+		if (res.ties.length > 0) {
+			const seg = res.ties.map((t) => `M${t.x1.toFixed(1)},${t.y1.toFixed(1)}L${t.x2.toFixed(1)},${t.y2.toFixed(1)}`).join("");
+			for (const cls of ["tie", "tie-core"]) {
+				const path = document.createElementNS(SVG_NS, "path");
+				path.classList.add(cls);
+				path.setAttribute("d", seg);
+				tiesG.append(path);
 			}
 		}
-		for (const t of res.ties) {
-			const line = document.createElementNS(SVG_NS, "line");
-			line.classList.add("tie");
-			line.setAttribute("x1", String(t.x1));
-			line.setAttribute("y1", String(t.y1));
-			line.setAttribute("x2", String(t.x2));
-			line.setAttribute("y2", String(t.y2));
-			tiesG.append(line);
+		for (const t of res.trunks) {
+			const label = document.createElementNS(SVG_NS, "text");
+			label.classList.add("weight", "trunk");
+			label.textContent = String(t.count);
+			label.setAttribute("x", String(t.x));
+			label.setAttribute("y", String(t.y));
+			labelsG.append(label);
+			trunkLabels.push(label);
 		}
 		svg.dataset["bundles"] = String(res.bundles);
 		svg.dataset["bundleMs"] = (performance.now() - t0).toFixed(1);
 		bundleDirty = false;
+	}
+
+	function applyRoute(entry: { el: SVGPathElement; label: SVGTextElement | null; edge: RenderEdge }, d: string | undefined, m: P | undefined): void {
+		if (d) entry.el.setAttribute("d", d);
+		entry.el.style.removeProperty("stroke-width");
+		if (entry.label) {
+			// Edges riding a backbone trunk are counted on the trunk instead.
+			entry.label.style.display = m && entry.edge.weight >= 2 ? "" : "none";
+			if (m) {
+				entry.label.setAttribute("x", String(m.x));
+				entry.label.setAttribute("y", String(m.y));
+			}
+		}
 	}
 
 	/** Screen-px sizing for strokes + weight labels at the current zoom. */
@@ -1288,6 +1372,19 @@
 		bundleK = view.k;
 		viewport.style.setProperty("--sw", `${1 / view.k}px`);
 		labelsG.setAttribute("font-size", String(10 / view.k));
+	}
+
+	/** Edge legend: the relations of the rendered strands, canonical order first. */
+	function updateLegend(): void {
+		const rels = new Set<string>();
+		for (const e of rEdges.values()) rels.add(e.rel);
+		const order = Object.keys(RELATION_COLORS);
+		const list = [...rels].sort((a, b) => {
+			const ia = order.indexOf(a);
+			const ib = order.indexOf(b);
+			return (ia < 0 ? 1e3 : ia) - (ib < 0 ? 1e3 : ib) || a.localeCompare(b);
+		});
+		if (list.join("|") !== legend.map((l) => l.rel).join("|")) legend = list.map((rel) => ({ rel, color: colorForRelation(rel) }));
 	}
 
 	function onTick(): void {
@@ -1760,6 +1857,13 @@
 	{#if empty}
 		<div class="empty-hint">No nodes match the current filters.</div>
 	{/if}
+	{#if legend.length > 0}
+		<ul class="edge-legend" aria-label="Edge colours by relation">
+			{#each legend as l (l.rel)}
+				<li><span class="swatch" style="background:{l.color}"></span>{l.rel.replaceAll("_", " ")}</li>
+			{/each}
+		</ul>
+	{/if}
 	{#if tooltip.visible}
 		<div class="tooltip" style="left:{tooltip.x}px;top:{tooltip.y}px">{tooltip.text}</div>
 	{/if}
@@ -1798,6 +1902,34 @@
 		font-size: 14px;
 	}
 
+	.edge-legend {
+		position: absolute;
+		right: 12px;
+		bottom: 12px;
+		margin: 0;
+		padding: 6px 10px;
+		list-style: none;
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+		font-size: 11px;
+		color: var(--text-dim);
+		background: rgb(10 10 13 / 0.72);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		pointer-events: none;
+	}
+	.edge-legend li {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+	}
+	.edge-legend .swatch {
+		width: 14px;
+		height: 3px;
+		border-radius: 2px;
+	}
+
 	.tooltip {
 		position: fixed;
 		z-index: 50;
@@ -1814,15 +1946,17 @@
 	/* Imperative SVG children need :global selectors. */
 	/* Strokes in screen px: --sw = 1/zoom, refreshed when the zoom drifts (not
 	   per frame — vector-effect: non-scaling-stroke made every pan re-raster). */
+	/* Strands: tinted by relation (--ec, see the legend), wide and opaque
+	   enough to read as parallel cables inside a bundle. */
 	svg :global(path.edge) {
 		fill: none;
-		stroke: var(--edge);
-		stroke-width: var(--sw, 1px);
+		stroke: var(--ec, var(--edge));
+		stroke-width: calc(var(--sw, 1px) * 1.35);
 		stroke-linecap: round;
-		opacity: 0.8;
+		opacity: 0.72;
 	}
 	svg :global(path.edge.agg) {
-		opacity: 0.6;
+		opacity: 0.62;
 	}
 	svg :global(path.edge.hl),
 	svg :global(path.edge.sel) {
@@ -1830,12 +1964,25 @@
 		stroke-width: calc(var(--sw, 1px) * 1.6);
 		opacity: 1;
 	}
-	/* Cable-tie marks where a bundle pinches together. */
-	svg :global(line.tie) {
-		stroke: rgb(255 255 255 / 0.28);
-		stroke-width: calc(var(--sw, 1px) * 3.5);
+	/* Cable-ties where a bundle pinches together: a dark band with a light
+	   core, drawn across the strands. */
+	svg :global(path.tie),
+	svg :global(path.tie-core) {
+		fill: none;
 		stroke-linecap: round;
 		pointer-events: none;
+	}
+	svg :global(path.tie) {
+		stroke: rgb(10 10 13 / 0.9);
+		stroke-width: calc(var(--sw, 1px) * 7);
+	}
+	svg :global(path.tie-core) {
+		stroke: #c9d2e3;
+		stroke-width: calc(var(--sw, 1px) * 3.5);
+	}
+	svg :global(text.weight.trunk) {
+		fill: var(--text);
+		font-weight: 600;
 	}
 	svg :global(text.weight) {
 		fill: var(--text-dim);

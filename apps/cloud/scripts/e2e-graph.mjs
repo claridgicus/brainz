@@ -80,7 +80,7 @@ try {
 	const sizes = await page.evaluate(`[...document.querySelectorAll('g.cluster text.count')].map((t) => Number(t.textContent))`);
 	step("bubbles show their cluster size (sizes sum to the vault)", sizes.reduce((a, b) => a + b, 0) === 2000, `sum=${sizes.reduce((a, b) => a + b, 0)}`);
 	step("edges between clusters are aggregated with weights", (await page.evaluate(`[...document.querySelectorAll('text.weight')].some((t) => t.style.display !== 'none' && Number(t.textContent) >= 2)`)) === true);
-	step("edges are bundled through gates, with cable-ties", Number(s.bundles) > 0 && (await page.evaluate(`document.querySelectorAll('line.tie').length`)) > 0, `bundles=${s.bundles}`);
+	step("edges are bundled through gates, with cable-ties", Number(s.bundles) > 0 && (await page.evaluate(`document.querySelectorAll('path.tie').length`)) > 0, `bundles=${s.bundles}`);
 	step("bundled edges are curves", (await page.evaluate(`[...document.querySelectorAll('path.edge')].every((p) => (p.getAttribute('d') || '').includes('C'))`)) === true);
 
 	console.log("expand on click, collapse on zoom out");
