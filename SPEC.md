@@ -136,6 +136,7 @@ Env/arg: vault dir via `--vault <dir>` or `BRAINZ_VAULT` (default cwd). Binary: 
 | `upsert_concept` | `{id?, title, body, type?, product?, tags?, relations?}` | saved concept meta |
 | `link_concepts` | `{from, to, relation?}` | ok |
 | `list_concepts` | `{product?, type?, tag?}` | metas |
+| `burndown` | `{scope?, from?, to?, bucket?, unit?, staleAfterHours?, metrics?}` | BurndownResult (see Burndown) |
 | `vault_stats` | `{}` | VaultStats |
 
 Tool descriptions must tell an orchestrator **when** to call them (e.g. get_context: "Call before delegating a coding task; inject result into the subagent prompt."). All responses are JSON text content; get_context returns the markdown directly.
@@ -146,7 +147,7 @@ Every tool in every registry (`MCP_TOOLS`, `PUBLIC_MCP_TOOLS`, `CLOUD_MCP_TOOLS`
 
 | tool | readOnly | destructive | openWorld | why |
 |---|---|---|---|---|
-| `search_concepts`, `get_concept`, `get_related`, `get_context`, `list_concepts`, `vault_stats`, `list_tasks` | ✓ | — | — | pure reads of this vault's index |
+| `search_concepts`, `get_concept`, `get_related`, `get_context`, `list_concepts`, `vault_stats`, `list_tasks`, `burndown` | ✓ | — | — | pure reads of this vault's index (and, for `burndown`, its task history) |
 | `session_hook` | ✓ | — | — | returns a playbook text; the caller applies any edits itself |
 | `upsert_concept` | — | ✓ | — | overwrites an existing note's title/body/fields when the id exists |
 | `delete_concept` | — | ✓ | — | permanently removes a concept and its outgoing edges |
@@ -170,6 +171,7 @@ brainz related <id> [--depth]
 brainz link <from> <to> [--relation]
 brainz context (--query <q> | --ids a,b) [--budget N]
 brainz reindex | validate              # validate: broken links, dup ids, bad frontmatter → exit 1 on errors
+brainz burndown [scope] [--from --to --bucket --unit --stale-hours --metrics]  # task burndown/velocity/projection (see Burndown)
 brainz mcp [--vault dir]               # run MCP stdio server
 brainz web [--vault dir --port 4680]   # run graph-view web app
 ```
@@ -283,3 +285,44 @@ At start-up the orchestrator reads the concept with `get_concept` and caches it 
 4. On a `watch` event, `peek` the worker. `idle`/`stuck`: relay the question to the user, answer only from what the user said, `send` the answer. `ready`: tag `job-review`, then review (`git log`/`diff origin/<main>...HEAD`, uncommitted leftovers, the gates the worker ran), `land`, and on failure `send` the worker what to fix. `gone`: relaunch or release.
 5. After landing: push mode runs `complete_task` and then `done`. PR mode tags `job-pr`, runs `done`, and runs `complete_task` once the PR is merged.
 6. Never land unreviewed work, never `--no-verify`, never force-push the main branch; never stash, reset or check out in the main checkout.
+
+## Burndown — iterations, milestones, task history and metrics
+
+James (2026-11-01) asked for "a proper burndown mechanism … all of the above — ideally as flexible concepts that relate to the graph". Everything here is graph-native: containers are concepts, membership is an edge, history is a log of what happened to tasks, and the metrics are pure engine functions (Workers-safe) that both backends call.
+
+### Model
+
+- **Two new built-in concept types** (13 in all): `iteration` (a time-box: sprint, cycle, week) and `milestone` (a scoped deliverable with a target date). Two types rather than one `milestone` with optional dates because they answer different questions: an iteration is a fixed-length cadence box whose velocity is compared with its siblings, a milestone is a goal that iterations roll up into and that realizes features/epics. Keeping them apart lets velocity "per iteration" pick the right children without guessing, and lets the graph style them differently. Both are ordinary concepts: any relation, body, tags.
+- **Dates and estimates** — new optional `ConceptMeta`/`UpsertInput` fields, meaningful on any concept, threaded through engine parse/serialize, core SQLite columns, contracts, the VaultDO, REST and MCP `upsert_concept`:
+  - `startDate?: string` / `endDate?: string` (frontmatter `start_date` / `end_date`) — calendar days, normalized to `YYYY-MM-DD` (a YAML date or an ISO timestamp is cut to its UTC day; anything else is dropped). An iteration has both; a milestone usually only `endDate` (its target date).
+  - `estimate?: number` (frontmatter `estimate`) — story points on a task; a finite number ≥ 0, else dropped.
+- **Membership is edges.** A task is in a container when it has a `part_of` or `realizes` edge to it (typed relation or the container's id in `relations`). Containers nest the same way: an iteration is `part_of` a milestone, a milestone `realizes` a feature, a feature is `part_of` a domain.
+- **Any concept can be a burndown scope** — a domain, feature/epic, milestone, iteration — plus `tag:<tag>` for a tag. A scope's **closure** is the scope plus every concept with a `part_of`/`realizes` edge into the closure, followed transitively (cycle-safe, at most 6 hops). Its tasks are the `task`-type members of the closure. No scope = every task in the vault.
+
+### Task history (events)
+
+A transition is a `TaskEvent`: `{at: ISO, task: id, kind, by?, scope?, points?}` with `kind` one of `created`, `taken` (`by` = takenBy label), `released` (taken → open), `done` (`by` = the holder, if any), `reopened` (done → open/taken), `scope_added` / `scope_removed` (`scope` = a concept id or `tag:<tag>`), `estimated` (`points`, null when cleared), `deleted`.
+
+- **One diff, two stores.** `taskSnapshot(meta, edges)` captures a task's status, holder, estimate and memberships (direct `part_of`/`realizes` targets + `tag:` entries); `diffTaskEvents(prev, next, at)` turns two snapshots (either may be null) into events. A reclaim by someone else is a fresh `taken`; `open → done` is just `done`; `done → taken` is `reopened` then `taken`; a concept that stops being a task, or is deleted, gets `deleted`. Every write path snapshots before and after and appends the diff: core's `Vault.upsertConcept` / `link` / `deleteConcept`, and the VaultDO's upsert, link, delete, take, complete and reopen. Events carry no body text.
+- **Local store:** an append-only JSON-lines log at `<vault>/history/task-events.jsonl` (one event per line). It is vault content, NOT derived state (unlike `.brainz/`): commit it with the vault. Edits made outside Brainz (hand edits, `git pull`) are not diffed; backfill covers what their frontmatter shows. Core API: `Vault.taskEvents(): TaskEvent[]` and `Vault.burndown(opts)`.
+- **Backfill (read time, idempotent):** `backfillTaskEvents(tasks, edges, events)` adds, for each current task, whatever its frontmatter proves but the log lacks: `created` at `createdAt` (else the earliest of its events/takenAt/doneAt, else the epoch of the window), a `scope_added` at creation for each current membership the log has never mentioned, an `estimated` at creation for an estimate the log never recorded, `taken` at `takenAt` for a taken/done task with no `taken` event, `done` at `doneAt` for a done task with no `done` event. So a vault that predates this has a history at once, and nothing is ever written twice.
+
+### Metrics (`computeBurndown`, `@brainz/engine`)
+
+`computeBurndown({concepts, edges, events, now, scope?, from?, to?, bucket?, unit?, staleAfterHours?, metrics?})` replays the backfilled events — status and membership at any instant come from the events alone — and returns `BurndownResult` (the contracts `burndownResultSchema`). `now` is passed in; the engine never reads the clock.
+
+- **Window.** `from` defaults to the scope's `startDate`, else 8 weeks before `now`; `to` defaults to the later of the scope's `endDate` and `now`. `bucket` `day` (default when the window is ≤ 120 days) or `week`. `unit` `tasks` (default) or `points` (an unestimated task counts 0 and is counted in `unestimated`).
+- **series** — one point per bucket end (end of UTC day / week, capped at `now`): `scope` (tasks in scope then), `done`, `open` (= scope − done), `taken`; buckets after `now` carry nulls for the actuals. **ideal** — when the scope has both dates: the remaining amount at `startDate` falling linearly to 0 at `endDate`; null outside that span or when the scope has no dates.
+- **scopeChanges** — every membership start/end of a task inside the window: `{at, task, title, change: "added" | "removed", points}` (creation into the scope is an addition, deletion a removal).
+- **velocity** — done amount per period. Per iteration when the closure holds dated iterations (each iteration's `startDate..endDate`, ordered by start), else per ISO week (Monday 00:00 UTC) across the window. Plus `average` over the completed periods.
+- **projection** — remaining now ÷ weekly throughput, from the last 6 seven-day windows ending at `now` (fewer when the scope is younger; at least one). `likely` uses the mean, `optimistic` mean + stdev, `pessimistic` mean − stdev; a rate ≤ 0 gives null (with `reason`). Nothing remaining ⇒ all three are the last done time. With an `endDate`, `onTrack` = likely ≤ end of `endDate`.
+- **cycle** — for tasks finished inside the window: lead time (created → done) and cycle time (last `taken` before done → done), in hours, as `{count, median, p85, mean}` overall and per agent label (the `by` of the `done` event, else "unassigned").
+- **agents** — per label: tasks held now, done in window, median lead/cycle, stale count.
+- **stale** — tasks in scope held now whose claim is older than `staleAfterHours` (default 24): `{id, title, takenBy, takenAt, ageHours}`, oldest first.
+- `metrics` picks which of `series`, `scopeChanges`, `velocity`, `projection`, `cycle`, `agents`, `stale` to include (default all). Unknown scope id ⇒ error, not an empty result.
+
+### Surfaces
+
+- **MCP `burndown`** (`MCP_TOOLS`, so both stdio and cloud vault connections; also on read-only viewer connections): input `{scope?, from?, to?, bucket?, unit?, staleAfterHours?, metrics?}`, output `burndownResultSchema`. Annotations readOnly ✓, destructive —, openWorld — (pure read of this vault's tasks and history). Its description states what it returns, with no advice on when to call it (directory policy).
+- **CLI** `brainz burndown [scope] [--from --to --bucket day|week --unit tasks|points --stale-hours N --metrics a,b] [--json]`: human output is a summary (scope, remaining, done, velocity average, projection, stale list, per-agent table); `--json` prints the `burndownResultSchema` object.
+- An orchestrator reads `burndown` with a milestone/iteration scope to report progress, and `stale`/`agents` to spot stuck workers.

@@ -90,6 +90,7 @@ Concept writes parse the submitted markdown body with engine's `parseNote` (wiki
 - `GET .../related/:id?depth=&limit=`
 - `POST .../context` `{query?, ids?, depth?, tokenBudget?}` → ContextBundle
 - `GET .../graph` → nodes+edges (pending nodes flagged, same shape as packages/web /api/graph)
+- `GET .../burndown?scope=&from=&to=&bucket=&unit=&staleAfterHours=&metrics=` → BurndownResult (see "Burndown")
 - `GET/POST /api/vaults/:vaultId/keys`, `DELETE /api/keys/:keyId` (session only — keys can't mint keys)
 - `POST .../import` (multipart of .md files) and `GET .../export` (zip or concatenated markdown) — nice-to-have, skip if time
 - JSON errors `{error}`, proper status codes, zod-validated bodies. Never leak other users' vaults (every query filters by owner/vault binding).
@@ -159,6 +160,22 @@ Brownmatter is not just a map of the product — it's the pile of work on it, an
 - `sync` MCP tool (+ `brainz sync` CLI): `{action: "start"}` → returns a SYNC PLAYBOOK: the vault's `last_synced_at` (+ onboarded state), all concepts' code_areas as a coverage map, and instructions: diff the codebase since last sync (git log/status since timestamp), fan out subagents over changed areas, update stale concepts, index un-mapped new work (features/stories/specs/tasks for incomplete work found), report coverage gaps (code areas no concept references). `{action: "complete", summary}` → sets `last_synced_at`, stores summary in the `product-onboarding-summary` concept (append log).
 - Staleness nudge: `get_context` prefixes a one-liner when last_synced_at is older than 14 days ("knowledge may be stale — run sync"), same style as the onboarding nudge, and likewise neutral on directory surfaces (`SYNC_STALENESS_NOTICE`, which states the age without naming `sync`).
 - Stats expose `openTasks`, `lastSyncedAt` (UI: task count chip on dashboard cards; tasks filterable in the workspace, `task` gets its own palette color + open/taken/done badge).
+
+### Burndown — iterations, milestones, task history (cloud)
+
+The model, events, backfill and metrics are SPEC.md "Burndown"; this is the cloud side.
+
+- **Types.** `iteration` and `milestone` join `BUILTIN_CONCEPT_TYPES` (13 built-ins): `milestone` "#e879f9" weight 80 (it groups features, so it shows with them), `iteration` "#818cf8" weight 60. In the graph they are ordinary concepts drawn with their registry colour; the graph code is not otherwise changed. Schema v9 (additive) inserts the two rows into an existing vault's `concept_type` registry with `INSERT OR IGNORE` (a vault that already has a custom type with either key keeps its own), after the existing rows in sort order.
+- **Storage (VaultDO, schema v9, additive).** Concept columns `start_date`, `end_date` (TEXT) and `estimate` (REAL), nullable. Table `task_event (seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, task TEXT, kind TEXT, by TEXT, scope TEXT, points REAL)`, indexed on `at`, appended by every write path (SPEC.md "One diff, two stores"). No D1 change.
+- **REST.** `GET /api/vaults/:vaultId/burndown?scope=&from=&to=&bucket=&unit=&staleAfterHours=&metrics=a,b` → `burndownResultSchema` (session or bearer; viewers allowed — it is a read). Unknown scope ⇒ 404, bad query ⇒ 400. Concept create/update (`POST …/concepts`, `PUT …/concepts/:id`) accept `startDate`, `endDate`, `estimate`; concept responses carry them.
+- **UI: `/v/[slug]/burndown`** (linked from the workspace header and the board):
+  - **Scope picker**: whole vault, iterations, milestones, domains, features, then other concepts with tasks; plus `tag:` entries for task tags. The choice is kept in the URL (`?scope=`), along with the unit (tasks/points).
+  - **Chart** (SVG, no chart library): remaining (open) as the primary line, scope as a step line, done as an area, the ideal as a dashed line when the scope has dates, a "now" rule, and scope-change ticks on the x-axis (hover lists the tasks). Colours are CSS tokens defined for both light and dark themes; series are told apart by dash/weight as well as colour, the legend is text, and the chart has a `<title>`/`aria` summary plus a visually hidden data table.
+  - **Velocity** bars (per iteration or week) with the average, a **projection** line ("likely 14 Nov, range 10–21 Nov", or why there is none, and on/off track against the end date), the **stale claims** table and the **agents** table (held, done, median lead/cycle, stale).
+  - **Iterations & milestones**: a list with create and edit (title, type, start date, end/target date, parent milestone for an iteration, body), saved through the concept REST endpoints; the parent is a `part_of` relation.
+  - Polls every 15s like the board, so an agent finishing a task moves the chart.
+- **Board.** Each task card gets an "Iteration" select (none + the vault's iterations, newest start first). Choosing one rewrites the task's `part_of` list through `PUT …/concepts/:id`: iteration targets are replaced by the chosen one, other targets (domains) are kept. The history records the scope change.
+- **Demos.** If shared components change, re-record the affected clips (`mheavy npm run demos:record`).
 
 ### Session defaults — agents use Brainz every session (`session_hook` tool + server instructions)
 
