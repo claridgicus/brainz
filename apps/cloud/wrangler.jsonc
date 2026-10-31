@@ -54,7 +54,10 @@
   "vars": {
     "DREAM_DAILY_USD_PER_ACCOUNT": "1",
     "MAX_VAULTS_PER_USER": "20",
-    "VAULT_CREATE_RATE_LIMIT": "10"
+    "VAULT_CREATE_RATE_LIMIT": "10",
+    // The "Support" vault (slug support, owned by James); see the support
+    // inbox note below.
+    "SUPPORT_VAULT_ID": "969ff944-48cb-4721-813b-48f65ab6e7d8"
   },
   // Daily housekeeping (src/lib/server/scheduled.ts): purges expired/revoked
   // OAuth codes, tokens and grants and idle DCR clients. The `scheduled`
@@ -62,9 +65,9 @@
   "triggers": { "crons": ["23 4 * * *"] },
   // Support inbox (SPEC-CLOUD "Support inbox"): Email Routing delivers
   // support@brownmatter.ai to this Worker's `email` handler (attached by
-  // scripts/patch-worker.mjs). Set SUPPORT_VAULT_ID in "vars" to the support
-  // vault's id (until then every message is forwarded to SUPPORT_ESCALATE_TO,
-  // default james@plutocracy.io). SUPPORT_AUTOSEND_CATEGORIES stays unset
+  // scripts/patch-worker.mjs). SUPPORT_VAULT_ID in "vars" is the support vault's
+  // id (without it every message is forwarded to SUPPORT_ESCALATE_TO, default
+  // james@plutocracy.io). SUPPORT_AUTOSEND_CATEGORIES stays unset
   // (agents only draft) until James enables "howto". Optional R2 for raw mail
   // + attachments: wrangler r2 bucket create brainz-support-mail, then add
   //   "r2_buckets": [{ "binding": "SUPPORT_MAIL", "bucket_name": "brainz-support-mail" }]
