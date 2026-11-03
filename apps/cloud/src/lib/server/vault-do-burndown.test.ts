@@ -160,3 +160,136 @@ describe("VaultDO schema v9 migration", () => {
     expect(vault.taskEvents().map((e) => e.kind)).toEqual(["created", "estimated"]);
   });
 });
+
+describe("VaultDO schema v9 migration on a v8 vault that already has tasks", () => {
+  /** Rewind a fresh DO to the exact v8 shape: no task_event, no burndown columns, 11 types. */
+  function rewindToV8(fake: ReturnType<typeof fakeState>) {
+    fake.db.exec(`DROP TABLE task_event`);
+    for (const col of ["start_date", "end_date", "estimate"]) fake.db.exec(`ALTER TABLE concept DROP COLUMN ${col}`);
+    fake.db.exec(`DELETE FROM concept_type WHERE key IN ('iteration', 'milestone')`);
+    fake.db.prepare(`UPDATE meta SET value = '8' WHERE key = 'schema_version'`).run();
+  }
+
+  /** Insert a concept row the way a v8 DO stored it (v8 columns only) plus its typed edges. */
+  function putV8Row(
+    fake: ReturnType<typeof fakeState>,
+    row: {
+      id: string;
+      type: string;
+      task_status?: string | null;
+      taken_by?: string | null;
+      taken_at?: string | null;
+      done_at?: string | null;
+      relations?: Record<string, string[]>;
+      created_at: string;
+    },
+  ) {
+    fake.db
+      .prepare(
+        `INSERT INTO concept (id, title, type, status, product, tags_json, code_areas_json, task_status, taken_by, taken_at, done_at, relations_json, body, hash, created_at, updated_at)
+         VALUES (?, ?, ?, 'active', NULL, '[]', '[]', ?, ?, ?, ?, ?, 'body\n', 'h', ?, ?)`,
+      )
+      .run(
+        row.id,
+        row.id.toUpperCase(),
+        row.type,
+        row.task_status ?? null,
+        row.taken_by ?? null,
+        row.taken_at ?? null,
+        row.done_at ?? null,
+        JSON.stringify(row.relations ?? {}),
+        row.created_at,
+        row.done_at ?? row.taken_at ?? row.created_at,
+      );
+    for (const [relation, targets] of Object.entries(row.relations ?? {})) {
+      for (const to of targets) {
+        fake.db
+          .prepare(`INSERT INTO edge (from_id, to_id, relation, src) VALUES (?, ?, ?, 'frontmatter')`)
+          .run(row.id, to, relation);
+      }
+    }
+  }
+
+  it("is additive: v8 rows, edges and registry survive; history backfills; new writes append", async () => {
+    const fake = fakeState();
+    new VaultDO(fake.state as never, {});
+    await fake.ready();
+    rewindToV8(fake);
+    putV8Row(fake, { id: "auth", type: "domain", created_at: "2026-10-01T00:00:00.000Z" });
+    putV8Row(fake, {
+      id: "t-done",
+      type: "task",
+      task_status: "done",
+      taken_by: "agent-a",
+      taken_at: "2026-10-02T00:00:00.000Z",
+      done_at: "2026-10-03T00:00:00.000Z",
+      relations: { part_of: ["auth"] },
+      created_at: "2026-10-01T00:00:00.000Z",
+    });
+    putV8Row(fake, {
+      id: "t-taken",
+      type: "task",
+      task_status: "taken",
+      taken_by: "agent-b",
+      taken_at: "2026-10-04T00:00:00.000Z",
+      relations: { part_of: ["auth"] },
+      created_at: "2026-10-01T12:00:00.000Z",
+    });
+    putV8Row(fake, {
+      id: "t-open",
+      type: "task",
+      relations: { part_of: ["auth"] },
+      created_at: "2026-10-05T00:00:00.000Z",
+    });
+    const before = fake.db.prepare(`SELECT * FROM concept ORDER BY id`).all() as Record<string, unknown>[];
+    const edgesBefore = fake.db.prepare(`SELECT * FROM edge ORDER BY from_id, to_id`).all();
+    const typesBefore = fake.db.prepare(`SELECT * FROM concept_type ORDER BY key`).all();
+
+    // Reopen: the constructor runs the v8 → v9 migration.
+    const vault = new VaultDO(fake.state as never, {});
+    await fake.ready();
+    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "9" });
+
+    // Additive: every v8 column value is unchanged, the new columns are null,
+    // edges are untouched, and the old registry rows are kept as they were.
+    const after = fake.db.prepare(`SELECT * FROM concept ORDER BY id`).all() as Record<string, unknown>[];
+    expect(after).toHaveLength(before.length);
+    after.forEach((row, i) => {
+      const { start_date, end_date, estimate, ...rest } = row;
+      expect(rest).toEqual(before[i]);
+      expect([start_date, end_date, estimate]).toEqual([null, null, null]);
+    });
+    expect(fake.db.prepare(`SELECT * FROM edge ORDER BY from_id, to_id`).all()).toEqual(edgesBefore);
+    const typesAfter = fake.db.prepare(`SELECT * FROM concept_type ORDER BY key`).all() as { key: string }[];
+    expect(typesAfter.filter((t) => t.key !== "iteration" && t.key !== "milestone")).toEqual(typesBefore);
+    expect(typesAfter.map((t) => t.key)).toEqual(expect.arrayContaining(["iteration", "milestone"]));
+    // The history table starts empty: nothing is written for old tasks…
+    expect(vault.taskEvents()).toEqual([]);
+
+    // …but reads backfill it from created_at / taken_at / done_at.
+    const now = new Date("2026-10-10T00:00:00.000Z");
+    const r = vault.burndown({ scope: "auth", from: "2026-10-01" }, now);
+    expect(burndownResultSchema.safeParse(r).success).toBe(true);
+    expect(r.totals).toEqual({ scope: 3, done: 1, open: 2, taken: 1, unestimated: 3 });
+    expect(r.cycle?.leadHours.median).toBe(48); // t-done: 10-01 → 10-03
+    expect(r.cycle?.cycleHours.median).toBe(24); // taken 10-02 → done 10-03
+    expect(r.stale?.map((s) => [s.id, s.takenBy, s.ageHours])).toEqual([["t-taken", "agent-b", 144]]);
+    expect(r.agents?.map((a) => [a.agent, a.held, a.done])).toEqual([
+      ["agent-a", 0, 1],
+      ["agent-b", 1, 0],
+    ]);
+    const oct4 = r.series?.find((p) => p.at === "2026-10-04T00:00:00.000Z");
+    expect(oct4).toMatchObject({ scope: 2, done: 1, open: 1 }); // t-open arrives 10-05
+
+    // A write after the upgrade appends live events on top of the backfill
+    // without duplicating it: one done, no second created/taken.
+    await vault.completeTask({ id: "t-taken", outcome: "finished after the upgrade" });
+    expect(vault.taskEvents().map((e) => `${e.task}:${e.kind}`)).toEqual(["t-taken:done"]);
+    const r2 = vault.burndown({ scope: "auth", from: "2026-10-01" });
+    expect(r2.totals).toMatchObject({ scope: 3, done: 2, open: 1, taken: 0 });
+    expect(r2.agents?.find((a) => a.agent === "agent-b")).toMatchObject({ held: 0, done: 1 });
+    // The pre-upgrade claim still starts its cycle time (backfilled `taken` at taken_at).
+    const b = r2.cycle?.byAgent.find((a) => a.agent === "agent-b");
+    expect(b?.cycleHours.count).toBe(1);
+  });
+});

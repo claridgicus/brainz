@@ -133,6 +133,26 @@ describe("backfillTaskEvents", () => {
     expect(ev[0].kind).toBe("created");
   });
 
+  it("keeps a claim made before the log started when the task finishes after", () => {
+    const c = [
+      task("a", {
+        createdAt: D("2026-10-01"),
+        taskStatus: "done",
+        takenBy: "w1",
+        takenAt: D("2026-10-02"),
+        doneAt: D("2026-10-03"),
+      }),
+    ];
+    // Only the live `done` was recorded (the claim predates history).
+    const ev = backfillTaskEvents(c, [], [{ at: D("2026-10-03"), task: "a", kind: "done", by: "w1" }]);
+    expect(ev.map((e) => [e.kind, e.at])).toEqual([
+      ["created", D("2026-10-01")],
+      ["taken", D("2026-10-02")],
+      ["done", D("2026-10-03")],
+    ]);
+    expect(backfillTaskEvents(c, [], ev)).toEqual(ev);
+  });
+
   it("reconciles hand edits and hand deletions", () => {
     const log: TaskEvent[] = [
       { at: D("2026-10-01"), task: "a", kind: "created" },

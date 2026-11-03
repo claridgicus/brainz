@@ -295,6 +295,22 @@ export function backfillTaskEvents(
     if (snap.estimate !== undefined && !log.some((e) => e.kind === "estimated")) {
       add.push({ at: createdIso, task, kind: "estimated", points: snap.estimate });
     }
+    // A claim the log never saw (taken before history was recorded, e.g. a
+    // task claimed before an upgrade and finished after it): record it at
+    // takenAt so the holder and cycle time survive.
+    if (
+      (snap.taskStatus === "taken" || snap.taskStatus === "done") &&
+      c.takenAt &&
+      ms(c.takenAt) !== undefined &&
+      !log.some((e) => e.kind === "taken")
+    ) {
+      add.push({
+        at: iso(Math.max(ms(c.takenAt) as number, createdAt)),
+        task,
+        kind: "taken",
+        ...(c.takenBy !== undefined ? { by: c.takenBy } : {}),
+      });
+    }
 
     // Replay what we have so far and reconcile with the frontmatter.
     const merged = sortTaskEvents([...log, ...add]);
@@ -334,18 +350,6 @@ export function backfillTaskEvents(
           ...(snap.takenBy !== undefined ? { by: snap.takenBy } : {}),
         });
       } else if (want === "done") {
-        // A done task with a claim we never saw: record the claim first so
-        // cycle time has a start.
-        if (st.status === "open" && c.takenAt && !log.some((e) => e.kind === "taken")) {
-          const takenT = after(ms(c.takenAt));
-          reconcile.push({
-            at: iso(takenT),
-            task,
-            kind: "taken",
-            ...(c.takenBy !== undefined ? { by: c.takenBy } : {}),
-          });
-          st.lastAt = Math.max(st.lastAt, takenT);
-        }
         reconcile.push({
           at: iso(after(ms(c.doneAt))),
           task,
