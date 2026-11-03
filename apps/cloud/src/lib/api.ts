@@ -8,6 +8,8 @@ import type { z } from "zod";
 import {
   accountDreamingSchema,
   apiConceptSchema,
+  burndownResponseSchema,
+  type BurndownResultWire,
   apiErrorSchema,
   apiKeyCreateResponseSchema,
   apiKeyListResponseSchema,
@@ -72,8 +74,26 @@ export interface UpsertConceptBody {
   tags?: string[];
   codeAreas?: string[];
   taskStatus?: "open" | "taken" | "done";
+  /** Iterations/milestones: start / end (target) day YYYY-MM-DD; null clears. */
+  startDate?: string | null;
+  endDate?: string | null;
+  /** Tasks: story points; null clears. */
+  estimate?: number | null;
   relations?: Record<string, string[]>;
 }
+
+/** GET .../burndown query (see SPEC.md "Burndown"). */
+export interface BurndownQuery {
+  scope?: string;
+  from?: string;
+  to?: string;
+  bucket?: "day" | "week";
+  unit?: "tasks" | "points";
+  staleAfterHours?: number;
+  metrics?: string[];
+}
+
+export type Burndown = BurndownResultWire;
 
 export interface CreateTaskBody {
   title: string;
@@ -204,6 +224,19 @@ export function createApi(fetchFn: Fetch) {
       const path = `/api/vaults/${enc(vaultId)}/search?q=${enc(q)}&limit=${limit}`;
       return (await request(searchResponseSchema, path)).hits;
     },
+    burndown(vaultId: string, q: BurndownQuery = {}): Promise<Burndown> {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(q)) {
+        if (v === undefined || v === "") continue;
+        params.set(k, Array.isArray(v) ? v.join(",") : String(v));
+      }
+      const qs = params.toString();
+      return request(
+        burndownResponseSchema,
+        `/api/vaults/${enc(vaultId)}/burndown${qs ? `?${qs}` : ""}`,
+      );
+    },
+
     async stats(vaultId: string): Promise<VaultStats> {
       const path = `/api/vaults/${enc(vaultId)}/stats`;
       const res = await fetchFn(path);

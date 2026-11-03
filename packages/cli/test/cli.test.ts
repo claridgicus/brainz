@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  burndownResultSchema,
   dreamDiaryOutputSchema,
   dreamRunOutputSchema,
   dreamStatusOutputSchema,
@@ -661,5 +662,39 @@ describe("brainz dream", () => {
     expect(apply.err).toContain("dream id");
     const notPending = await run(["dream", "apply", "dream-nope", "--vault", dir]);
     expect(notPending.code).toBe(1);
+  });
+});
+
+describe("brainz burndown", () => {
+  it("adds an iteration and a pointed task, then reports the burndown", async () => {
+    const dir = await copyDemoVault();
+    const it1 = await run(["add", "Sprint 9", "--type", "iteration", "--start", "2026-11-02", "--end", "2026-11-13", "--vault", dir, "--json"]);
+    expect(it1.code).toBe(0);
+    expect(JSON.parse(it1.out)).toMatchObject({ type: "iteration", startDate: "2026-11-02", endDate: "2026-11-13" });
+    const t = await run(["add", "Wire the chart", "--type", "task", "--estimate", "5", "--part-of", "sprint-9", "--vault", dir, "--json"]);
+    expect(t.code).toBe(0);
+    expect(JSON.parse(t.out)).toMatchObject({ estimate: 5 });
+
+    const json = await run(["burndown", "sprint-9", "--unit", "points", "--vault", dir, "--json"]);
+    expect(json.code).toBe(0);
+    const r = JSON.parse(json.out);
+    expectContract(burndownResultSchema, r);
+    expect(r.scope).toMatchObject({ id: "sprint-9", type: "iteration" });
+    expect(r.totals).toMatchObject({ scope: 5, open: 5, done: 0 });
+
+    const human = await run(["burndown", "sprint-9", "--vault", dir]);
+    expect(human.code).toBe(0);
+    expect(human.out).toContain("Sprint 9");
+    expect(human.out).toContain("1 tasks remaining");
+    expect(human.out).toContain("projected:");
+  });
+
+  it("errors on an unknown scope and a bad option", async () => {
+    const dir = await copyDemoVault();
+    const res = await run(["burndown", "no-such-scope", "--vault", dir]);
+    expect(res.code).not.toBe(0);
+    expect(res.err).toContain("unknown burndown scope");
+    const bad = await run(["add", "X", "--start", "soon", "--vault", dir]);
+    expect(bad.code).not.toBe(0);
   });
 });

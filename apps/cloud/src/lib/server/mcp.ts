@@ -262,6 +262,9 @@ function vaultToolHandlers(vault: VaultClient, hooks: McpServerHooks): ToolHandl
       takenBy,
       takenAt,
       doneAt,
+      startDate,
+      endDate,
+      estimate,
       relations,
     }) =>
       guarded(async () => {
@@ -278,6 +281,9 @@ function vaultToolHandlers(vault: VaultClient, hooks: McpServerHooks): ToolHandl
           takenBy,
           takenAt,
           doneAt,
+          startDate,
+          endDate,
+          estimate,
           relations,
         });
         return ok({
@@ -292,6 +298,9 @@ function vaultToolHandlers(vault: VaultClient, hooks: McpServerHooks): ToolHandl
           ...(concept.takenBy !== undefined ? { takenBy: concept.takenBy } : {}),
           ...(concept.takenAt !== undefined ? { takenAt: concept.takenAt } : {}),
           ...(concept.doneAt !== undefined ? { doneAt: concept.doneAt } : {}),
+          ...(concept.startDate !== undefined ? { startDate: concept.startDate } : {}),
+          ...(concept.endDate !== undefined ? { endDate: concept.endDate } : {}),
+          ...(concept.estimate !== undefined ? { estimate: concept.estimate } : {}),
           filePath: syntheticFilePath(concept.id),
         });
       }),
@@ -603,6 +612,16 @@ function vaultToolHandlers(vault: VaultClient, hooks: McpServerHooks): ToolHandl
       guarded(async () => {
         const result = await vault.listTasks({ taskStatus, domain });
         return ok(result);
+      }),
+
+    burndown: async ({ scope, from, to, bucket, unit, staleAfterHours, metrics }) =>
+      guarded(async () => {
+        try {
+          return ok(await vault.burndown({ scope, from, to, bucket, unit, staleAfterHours, metrics }));
+        } catch (err) {
+          if (err instanceof VaultDoError) return fail(err.message);
+          throw err;
+        }
       }),
 
     take_task: async ({ id, takenBy }) =>

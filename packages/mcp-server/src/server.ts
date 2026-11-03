@@ -19,6 +19,8 @@ import {
   sessionInstructions,
   syncPlaybook,
   TASK_COMPLETE_REMINDER,
+  BurndownInputError,
+  UnknownScopeError,
   type ConceptMeta,
   type DreamLlm,
   type Vault,
@@ -95,6 +97,9 @@ function compactMeta(c: ConceptMeta) {
     ...(c.takenBy !== undefined ? { takenBy: c.takenBy } : {}),
     ...(c.takenAt !== undefined ? { takenAt: c.takenAt } : {}),
     ...(c.doneAt !== undefined ? { doneAt: c.doneAt } : {}),
+    ...(c.startDate !== undefined ? { startDate: c.startDate } : {}),
+    ...(c.endDate !== undefined ? { endDate: c.endDate } : {}),
+    ...(c.estimate !== undefined ? { estimate: c.estimate } : {}),
   };
 }
 
@@ -245,6 +250,9 @@ export function createServer(vault: Vault, options: CreateServerOptions = {}): M
       takenBy,
       takenAt,
       doneAt,
+      startDate,
+      endDate,
+      estimate,
       relations,
     }) =>
       guarded(async () => {
@@ -261,6 +269,9 @@ export function createServer(vault: Vault, options: CreateServerOptions = {}): M
           takenBy,
           takenAt,
           doneAt,
+          startDate,
+          endDate,
+          estimate,
           relations,
         });
         return ok({ ...compactMeta(saved), filePath: saved.filePath });
@@ -549,6 +560,18 @@ export function createServer(vault: Vault, options: CreateServerOptions = {}): M
               (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.id.localeCompare(b.id),
           );
         return ok({ count: tasks.length, tasks: tasks.map(compactMeta) });
+      }),
+
+    burndown: async ({ scope, from, to, bucket, unit, staleAfterHours, metrics }) =>
+      guarded(() => {
+        try {
+          return ok(vault.burndown({ scope, from, to, bucket, unit, staleAfterHours, metrics }));
+        } catch (err) {
+          if (err instanceof UnknownScopeError || err instanceof BurndownInputError) {
+            return fail(err.message);
+          }
+          throw err;
+        }
       }),
 
     take_task: async ({ id, takenBy }) =>

@@ -5,6 +5,8 @@
  */
 import type { DurableObjectNamespace } from "@cloudflare/workers-types";
 import type {
+  BurndownOptions,
+  BurndownResult,
   ConceptType,
   DreamDiaryEntry,
   DreamSettingsPatch,
@@ -102,6 +104,7 @@ export interface VaultClient {
     approxTokens: number;
   }>;
   stats(): Promise<VaultStatsResult>;
+  burndown(opts?: BurndownOptions): Promise<BurndownResult>;
   onboarding(): Promise<{ onboardedAt: string | null }>;
   setOnboardedAt(onboardedAt: string): Promise<{ ok: true; onboardedAt: string }>;
   syncState(): Promise<{ lastSyncedAt: string | null }>;
@@ -155,6 +158,7 @@ export function vaultClient(ns: DurableObjectNamespace, vaultId: string): VaultC
     deleteType: (key) => call("deleteType", { key }),
     context: (args) => call("context", args),
     stats: () => call("stats"),
+    burndown: (opts = {}) => call("burndown", opts),
     onboarding: () => call("onboarding"),
     setOnboardedAt: (onboardedAt) => call("setOnboardedAt", { onboardedAt }),
     syncState: () => call("syncState"),

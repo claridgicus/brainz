@@ -301,6 +301,21 @@ function fakeVault(): FakeVault {
     dreamApply: async (id) => {
       throw new VaultDoError(`dream "${id}" has no pending proposals (status applied)`, 400);
     },
+    burndown: async (opts = {}) => {
+      if (opts.scope === "nope") throw new VaultDoError('unknown burndown scope: "nope"', 404);
+      return {
+        scope: { id: opts.scope ?? null, kind: opts.scope ? "concept" : "vault", title: opts.scope ?? "All tasks" },
+        window: {
+          from: "2026-10-01T00:00:00.000Z",
+          to: "2026-11-01T00:00:00.000Z",
+          now: "2026-11-01T00:00:00.000Z",
+          bucket: "day",
+          unit: opts.unit ?? "tasks",
+        },
+        totals: { scope: 2, done: 1, open: 1, taken: 0, unestimated: 2 },
+        stale: [],
+      };
+    },
   };
 }
 
@@ -452,6 +467,16 @@ describe("task tools", () => {
   let client: Client;
   beforeEach(async () => {
     client = await connect();
+  });
+
+  it("burndown passes the scope through and maps an unknown scope to isError", async () => {
+    const result = await client.callTool({ name: "burndown", arguments: { scope: "s1", unit: "points" } });
+    const payload = JSON.parse(textBlocks(result)[0]);
+    expect(getMcpTool("burndown").outputSchema.safeParse(payload).success).toBe(true);
+    expect(payload.scope.id).toBe("s1");
+    expect(payload.window.unit).toBe("points");
+    const bad = await client.callTool({ name: "burndown", arguments: { scope: "nope" } });
+    expect(bad.isError).toBe(true);
   });
 
   it("list_tasks returns tasks oldest-first, parsing with the contract schema", async () => {
@@ -1108,6 +1133,7 @@ describe("public-vault viewer surface (only: PUBLIC_VAULT_READ_TOOL_NAMES)", () 
     "take_task",
     "complete_task",
     "list_tasks",
+    "burndown",
   ];
 
   it("exposes EXACTLY the read tools — no write/onboard/task/claim tools", async () => {

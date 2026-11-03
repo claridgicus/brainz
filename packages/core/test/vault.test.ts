@@ -727,3 +727,45 @@ describe("demo vault", () => {
     expect(bundle.markdown).toContain("## Email Campaigns (email-campaigns)");
   });
 });
+
+describe("task history + burndown", () => {
+  it("appends lifecycle and scope events to history/task-events.jsonl", async () => {
+    const vault = await makeVault();
+    await vault.upsertConcept({ id: "s1", title: "S1", body: "", type: "iteration", startDate: "2026-11-02", endDate: "2026-11-13" });
+    await vault.upsertConcept({ id: "t1", title: "T1", body: "", type: "task", taskStatus: "open", estimate: 2 });
+    await vault.link("t1", "s1", "part_of");
+    await vault.upsertConcept({ id: "t1", title: "T1", body: "", taskStatus: "taken", takenBy: "a" });
+    await vault.upsertConcept({ id: "t1", title: "T1", body: "", taskStatus: "done", estimate: null });
+    await vault.deleteConcept("t1");
+    expect(vault.taskEvents().map((e) => [e.kind, e.scope ?? e.by ?? e.points ?? null])).toEqual([
+      ["created", null],
+      ["estimated", 2],
+      ["scope_added", "s1"],
+      ["taken", "a"],
+      ["estimated", null],
+      ["done", "a"],
+      ["deleted", null],
+    ]);
+    const raw = await readFile(path.join(vault.dir, "history", "task-events.jsonl"), "utf8");
+    expect(raw.trim().split("\n")).toHaveLength(7);
+    // Non-task writes record nothing; the iteration keeps its dates.
+    expect(vault.getConcept("s1")).toMatchObject({ startDate: "2026-11-02", endDate: "2026-11-13", type: "iteration" });
+  });
+
+  it("backfills a vault with no log and skips malformed lines", async () => {
+    const vault = await makeVault({
+      "t.md": note(
+        { id: "t", title: "T", type: "task", task_status: "done", taken_by: "w", createdAt: "2026-10-01T00:00:00Z", taken_at: "2026-10-02T00:00:00Z", done_at: "2026-10-03T00:00:00Z", relations: { part_of: ["m"] } },
+        "",
+      ),
+      "m.md": note({ id: "m", title: "M", type: "milestone", end_date: "2026-10-31" }, ""),
+    });
+    await mkdir(path.join(vault.dir, "history"), { recursive: true });
+    await writeFile(path.join(vault.dir, "history", "task-events.jsonl"), "{torn\n");
+    expect(vault.taskEvents()).toEqual([]);
+    const r = vault.burndown({ scope: "m" }, new Date("2026-10-10T00:00:00Z"));
+    expect(r.totals).toMatchObject({ scope: 1, done: 1 });
+    expect(r.cycle?.cycleHours.median).toBe(24);
+    expect(r.cycle?.leadHours.median).toBe(48);
+  });
+});

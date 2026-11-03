@@ -42,6 +42,117 @@ function step(name, ok, detail = "") {
   }
 }
 
+async function burndownJourney(vaultId, task) {
+  const today = new Date().toISOString().slice(0, 10);
+  const end = new Date(Date.now() + 9 * 86_400_000).toISOString().slice(0, 10);
+  const it = await api("POST", `/api/vaults/${vaultId}/concepts`, {
+    body: { id: "sprint-1", title: "Sprint 1", type: "iteration", startDate: today, endDate: end, body: "First sprint." },
+  });
+  step(
+    "create an iteration with dates → 201",
+    it.status === 201 && it.json?.type === "iteration" && it.json?.startDate === today,
+    `status ${it.status} ${it.json?.type} ${it.json?.startDate}`,
+  );
+  const current = await api("GET", `/api/vaults/${vaultId}/concepts/${task.id}`);
+  const put = await api("PUT", `/api/vaults/${vaultId}/concepts/${task.id}`, {
+    body: { title: current.json.title, body: current.json.body, estimate: 3, relations: { part_of: ["auth-system", "sprint-1"] } },
+  });
+  step("assign the task to the iteration (PUT part_of) → 200", put.status === 200 && put.json?.estimate === 3, `status ${put.status}`);
+  const take = await api("PATCH", `/api/vaults/${vaultId}/tasks/${task.id}`, { body: { action: "take", takenBy: "e2e-agent" } });
+  const done = await api("PATCH", `/api/vaults/${vaultId}/tasks/${task.id}`, { body: { action: "complete", outcome: "Done in e2e." } });
+  step("take + complete the task → 200", take.status === 200 && done.status === 200, `${take.status}/${done.status}`);
+
+  const bd = await api("GET", `/api/vaults/${vaultId}/burndown?scope=sprint-1&unit=points`);
+  step(
+    "GET burndown for the iteration → 200 with the task done",
+    bd.status === 200 && bd.json?.totals?.scope === 3 && bd.json?.totals?.done === 3 && bd.json?.scope?.type === "iteration",
+    `status ${bd.status} ${JSON.stringify(bd.json?.totals)}`,
+  );
+  step(
+    "burndown carries the ideal line and the agent",
+    (bd.json?.series ?? []).some((p) => p.ideal !== null) && (bd.json?.agents ?? []).some((a) => a.agent === "e2e-agent"),
+  );
+  const unknown = await api("GET", `/api/vaults/${vaultId}/burndown?scope=no-such-thing`);
+  step("burndown on an unknown scope → 404", unknown.status === 404, `status ${unknown.status}`);
+
+  const panel = await page("/v/ui-vault/burndown?scope=sprint-1");
+  step("/v/ui-vault/burndown → 200", panel.status === 200, `status ${panel.status}`);
+  step(
+    "panel SSR: scope picker, summary tiles and chart",
+    panel.html.includes("Burndown") &&
+      panel.html.includes("Sprint 1") &&
+      panel.html.includes("Remaining") &&
+      panel.html.includes("Projected") &&
+      panel.html.includes('role="img"'),
+  );
+  step("panel SSR: agents table lists the agent", panel.html.includes("e2e-agent"));
+  step("panel SSR: iterations & milestones list + editor", panel.html.includes("Iterations &amp; milestones") && panel.html.includes("New iteration"));
+  const boardIt = await page("/v/ui-vault/board");
+  step("board SSR: the iteration picker", boardIt.html.includes("No iteration") && boardIt.html.includes("Sprint 1"));
+  const ws = await page("/v/ui-vault");
+  step("workspace links to the burndown", ws.html.includes("/v/ui-vault/burndown"));
+
+  if (!hasAgentBrowser()) {
+    console.log("  [SKIP] browser burndown panel (agent-browser not on PATH, or E2E_UI_BROWSER=0)");
+    return;
+  }
+  try {
+    const base = new URL(BASE);
+    for (const [name, value] of jar) agentBrowser(["cookies", "set", name, value, "--url", `${base.origin}/`]);
+    agentBrowser(["open", `${BASE}/v/ui-vault/burndown?scope=sprint-1`]);
+    if (process.env.E2E_UI_SCREENSHOT) {
+      agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-burndown-load.png")]);
+    }
+    agentBrowser(["wait", ".bd-root svg path.remaining"]);
+    // Move the pointer across the plot (a real pointermove, not a synthetic event).
+    agentBrowser(["eval", `document.querySelector('.bd-root svg').scrollIntoView({ block: 'center' })`]);
+    const [bx, by] = agentBrowser([
+      "eval",
+      `(() => { const r = document.querySelector('.bd-root svg').getBoundingClientRect(); return Math.round(r.left + r.width * 0.3) + ',' + Math.round(r.top + r.height * 0.5); })()`,
+    ])
+      .replace(/"/g, "")
+      .split(",")
+      .map(Number);
+    const box = { x: bx, y: by };
+    agentBrowser(["mouse", "move", String(Math.round(box.x)), String(Math.round(box.y))]);
+    agentBrowser(["mouse", "move", String(Math.round(box.x) + 20), String(Math.round(box.y))]);
+    agentBrowser(["wait", ".bd-root .tip"]);
+    const tip = agentBrowser(["eval", `document.querySelector('.bd-root .tip')?.textContent ?? ''`]);
+    step("browser: hovering the chart shows the crosshair tooltip", tip.includes("Remaining") && tip.includes("Scope"), tip.slice(0, 80));
+    if (process.env.E2E_UI_SCREENSHOT) {
+      agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-burndown.png")]);
+    }
+    agentBrowser(["click", "button.chip:nth-of-type(2)"]);
+    agentBrowser(["wait", "1500"]);
+    const url = agentBrowser(["eval", "location.search"]);
+    step("browser: the Points chip switches the unit in the URL", url.includes("unit=points"), url);
+    agentBrowser(["click", '[data-testid="new-iteration"]']);
+    agentBrowser(["fill", "#bd-title", "Sprint 2"]);
+    // Native date inputs don't take typed text from agent-browser: set the
+    // value and fire the input event Svelte's bind:value listens to.
+    const setDate = (sel, day) =>
+      agentBrowser([
+        "eval",
+        `(() => { const el = document.querySelector('${sel}'); el.value = '${day}'; el.dispatchEvent(new Event('input', { bubbles: true })); return el.value; })()`,
+      ]);
+    setDate("#bd-start", new Date().toISOString().slice(0, 10));
+    setDate("#bd-end", new Date(Date.now() + 13 * 86_400_000).toISOString().slice(0, 10));
+    agentBrowser(["click", ".draft button[type=submit]"]);
+    agentBrowser(["wait", "2500"]);
+    if (process.env.E2E_UI_SCREENSHOT) {
+      agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-burndown-saved.png")]);
+    }
+    const created = await api("GET", `/api/vaults/${vaultId}/concepts/sprint-2`);
+    step(
+      "browser: creating an iteration from the panel saves it with dates",
+      created.status === 200 && created.json?.type === "iteration" && Boolean(created.json?.endDate),
+      `status ${created.status} ${created.json?.startDate} → ${created.json?.endDate}`,
+    );
+  } finally {
+    spawnSync("agent-browser", ["--session", "brainz-e2e-ui", "close"]);
+  }
+}
+
 // --------------------------------------------------------------- http utils
 
 const jar = new Map();
@@ -550,6 +661,11 @@ async function main() {
     const board2 = await page("/v/ui-vault/board");
     step("board SSR renders after loading the concept graph", board2.status === 200, `status ${board2.status}`);
     step("board SSR renders both task cards", board2.html.includes("Ship the board") && board2.html.includes("Rework auth flow"));
+
+    // 6c. Burndown panel: an iteration with dates, a task assigned to it via
+    // the concept PUT (what the board's iteration picker sends), a take +
+    // complete, then the REST burndown and the SSR panel.
+    await burndownJourney(vault.id, linkedTask.json);
 
     // Dashboard shows the open-task chip now that a task exists.
     const dash2 = await page("/dashboard");

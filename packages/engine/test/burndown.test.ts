@@ -215,12 +215,15 @@ describe("computeBurndown", () => {
     expect(r.window.bucket).toBe("day");
     expect(r.totals).toEqual({ scope: 3, done: 2, open: 1, taken: 1, unestimated: 0 });
     const s = r.series ?? [];
-    expect(s[0]).toMatchObject({ at: "2026-11-02T00:00:00.000Z", scope: 0, ideal: 0 });
+    // The sprint was empty at 00:00; its tasks arrived at 09:00, so the ideal
+    // anchors there (3 remaining) and runs to 0 at the end of Nov 13.
+    expect(s[0]).toMatchObject({ at: "2026-11-02T00:00:00.000Z", scope: 0, ideal: null });
+    expect(s.find((p) => p.at === D("2026-11-02", 9))).toMatchObject({ scope: 3, ideal: 3 });
     const nov5 = s.find((p) => p.at === "2026-11-05T00:00:00.000Z");
     expect(nov5).toMatchObject({ scope: 3, done: 1, open: 2 });
     expect(s.find((p) => p.at === now)).toMatchObject({ open: 1, done: 2 });
     expect(s.at(-1)).toMatchObject({ scope: null, ideal: 0 });
-    // Ideal: remaining at start (0 — tasks arrive at 09:00) — use a window after creation instead.
+    // A sprint that already had its work at its start anchors there.
     const r2 = computeBurndown({
       concepts: live.map((c) => (c.id === "s1" ? { ...c, startDate: "2026-11-03" } : c)),
       edges,

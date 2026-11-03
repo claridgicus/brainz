@@ -7,8 +7,8 @@ import type {
   CliShowNeighbor,
   DreamSettingsPatchWire,
 } from "@brainz/contracts";
-import { dreamSettingsPatchSchema } from "@brainz/contracts";
-import type { Concept, ConceptType, SessionHookClient } from "@brainz/core";
+import { BURNDOWN_METRIC_NAMES, burndownInputSchema, dreamSettingsPatchSchema } from "@brainz/contracts";
+import type { BurndownResult, Concept, ConceptType, SessionHookClient } from "@brainz/core";
 import {
   claudeCodeSessionHook,
   isSyncStale,
@@ -19,6 +19,8 @@ import {
   sessionInstructions,
   slugify,
   syncPlaybook,
+  BurndownInputError,
+  UnknownScopeError,
   Vault,
 } from "@brainz/core";
 import { Command, CommanderError, InvalidArgumentError, Option } from "commander";
@@ -43,6 +45,8 @@ const CONCEPT_TYPES = [
   "constraint",
   "pattern",
   "glossary",
+  "iteration",
+  "milestone",
 ];
 const DEFAULT_WEB_PORT = 4680;
 
@@ -291,6 +295,92 @@ function neighborsOf(vault: Vault, id: string): NeighborInfo[] {
   return neighbors;
 }
 
+/** Current typed relations of a concept (so `add --part-of` keeps the others). */
+function relationsOf(vault: Vault, id: string): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const e of vault.edges()) {
+    if (e.from !== id || e.relation === "references") continue;
+    (out[e.relation] ??= []).push(e.to);
+  }
+  return out;
+}
+
+function parseDay(value: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) {
+    throw new InvalidArgumentError("expected a day as YYYY-MM-DD");
+  }
+  return value;
+}
+
+function parseEstimate(value: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) throw new InvalidArgumentError("expected a number >= 0");
+  return n;
+}
+
+function fmtDay(isoTs: string | null): string {
+  return isoTs ? isoTs.slice(0, 10) : "—";
+}
+
+function fmtHours(h: number | null): string {
+  if (h === null) return "—";
+  return h >= 48 ? `${(h / 24).toFixed(1)}d` : `${h.toFixed(1)}h`;
+}
+
+/** Human summary of a burndown result. */
+export function renderBurndown(r: BurndownResult): string {
+  const unit = r.window.unit === "points" ? "pts" : "tasks";
+  const lines: string[] = [];
+  const dates =
+    r.scope.startDate || r.scope.endDate
+      ? ` (${r.scope.startDate ?? "…"} → ${r.scope.endDate ?? "…"})`
+      : "";
+  lines.push(
+    `${pc.bold(r.scope.title)}${r.scope.type ? pc.dim(` [${r.scope.type}]`) : ""}${pc.dim(dates)}`,
+  );
+  lines.push(
+    `  ${r.totals.open} ${unit} remaining · ${r.totals.done} done · ${r.totals.taken} in progress · ${r.totals.scope} in scope` +
+      (r.window.unit === "points" && r.totals.unestimated > 0
+        ? pc.dim(` · ${r.totals.unestimated} unestimated`)
+        : ""),
+  );
+  if (r.velocity) {
+    lines.push(
+      `  velocity: ${r.velocity.average ?? "—"} ${unit}/${r.velocity.by === "iteration" ? "iteration" : "week"}` +
+        pc.dim(` over ${r.velocity.periods.length} period(s)`),
+    );
+  }
+  if (r.projection) {
+    const p = r.projection;
+    const range =
+      p.optimistic || p.pessimistic ? ` (range ${fmtDay(p.optimistic)} – ${fmtDay(p.pessimistic)})` : "";
+    const track = p.onTrack === null ? "" : p.onTrack ? pc.green(" · on track") : pc.red(" · behind");
+    lines.push(
+      `  projected: ${fmtDay(p.likely)}${range}${track}${p.reason ? pc.dim(` — ${p.reason}`) : ""}`,
+    );
+  }
+  if (r.scopeChanges && r.scopeChanges.length > 0) {
+    const added = r.scopeChanges.filter((c) => c.change === "added").length;
+    lines.push(`  scope changes: +${added} / -${r.scopeChanges.length - added}`);
+  }
+  if (r.stale && r.stale.length > 0) {
+    lines.push(pc.yellow(`  stale claims (${r.stale.length}):`));
+    for (const s of r.stale) {
+      lines.push(`    ${pc.cyan(s.id)}  ${s.takenBy ?? "unassigned"}  ${fmtHours(s.ageHours)}`);
+    }
+  }
+  if (r.agents && r.agents.length > 0) {
+    const w = Math.max(5, ...r.agents.map((a) => a.agent.length));
+    lines.push(pc.dim(`  ${pad("AGENT", w)}  HELD  DONE  LEAD    CYCLE   STALE`));
+    for (const a of r.agents) {
+      lines.push(
+        `  ${pad(a.agent, w)}  ${pad(String(a.held), 4)}  ${pad(String(a.done), 4)}  ${pad(fmtHours(a.medianLeadHours), 6)}  ${pad(fmtHours(a.medianCycleHours), 6)}  ${a.stale}`,
+      );
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 const SAMPLE_NOTE = `---
 id: welcome
 title: Welcome to Brainz
@@ -397,6 +487,10 @@ export function buildProgram(ctx: Ctx): Command {
     )
     .option("--body <markdown>", "note body (markdown)")
     .addOption(new Option("--stdin", "read note body from stdin").conflicts("body"))
+    .option("--start <day>", "start day YYYY-MM-DD (iterations/milestones)", parseDay)
+    .option("--end <day>", "end / target day YYYY-MM-DD (iterations/milestones)", parseDay)
+    .option("--estimate <points>", "story points (tasks)", parseEstimate)
+    .option("--part-of <ids>", "comma-separated part_of targets (e.g. an iteration)", parseList)
     .action(
       async (
         title: string,
@@ -407,6 +501,10 @@ export function buildProgram(ctx: Ctx): Command {
           codeAreas?: string[];
           body?: string;
           stdin?: boolean;
+          start?: string;
+          end?: string;
+          estimate?: number;
+          partOf?: string[];
         },
         cmd: Command,
       ) => {
@@ -421,6 +519,17 @@ export function buildProgram(ctx: Ctx): Command {
             product: opts.product,
             tags: opts.tags,
             codeAreas: opts.codeAreas,
+            startDate: opts.start,
+            endDate: opts.end,
+            estimate: opts.estimate,
+            ...(opts.partOf
+              ? {
+                  relations: {
+                    ...relationsOf(vault, slugify(title)),
+                    part_of: opts.partOf,
+                  },
+                }
+              : {}),
           });
           if (g.json) {
             printJson(ctx, saved);
@@ -547,6 +656,65 @@ export function buildProgram(ctx: Ctx): Command {
         }
       });
     });
+
+  // ---- burndown --------------------------------------------------------------
+  withGlobals(
+    program
+      .command("burndown [scope]")
+      .description(
+        "task burndown for a scope (iteration, milestone, any concept, tag:<tag>, or the whole vault)",
+      ),
+  )
+    .option("--from <date>", "window start (YYYY-MM-DD or ISO)")
+    .option("--to <date>", "window end (YYYY-MM-DD or ISO)")
+    .addOption(new Option("--bucket <bucket>", "series granularity").choices(["day", "week"]))
+    .addOption(new Option("--unit <unit>", "count tasks or sum points").choices(["tasks", "points"]))
+    .option("--stale-hours <n>", "claims held longer than this are stale", parsePositiveInt)
+    .option("--metrics <list>", `comma-separated: ${BURNDOWN_METRIC_NAMES.join(",")}`, parseList)
+    .action(
+      async (
+        scope: string | undefined,
+        opts: {
+          from?: string;
+          to?: string;
+          bucket?: "day" | "week";
+          unit?: "tasks" | "points";
+          staleHours?: number;
+          metrics?: string[];
+        },
+        cmd: Command,
+      ) => {
+        const g = getGlobals(cmd);
+        const parsed = burndownInputSchema.safeParse({
+          scope,
+          from: opts.from,
+          to: opts.to,
+          bucket: opts.bucket,
+          unit: opts.unit,
+          staleAfterHours: opts.staleHours,
+          metrics: opts.metrics,
+        });
+        if (!parsed.success) {
+          throw new CliError(parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
+        }
+        await withVault(g.vaultDir, async (vault) => {
+          let r: BurndownResult;
+          try {
+            r = vault.burndown(parsed.data);
+          } catch (err) {
+            if (err instanceof UnknownScopeError || err instanceof BurndownInputError) {
+              throw new CliError(err.message);
+            }
+            throw err;
+          }
+          if (g.json) {
+            printJson(ctx, r);
+            return;
+          }
+          ctx.out(renderBurndown(r));
+        });
+      },
+    );
 
   // ---- link ------------------------------------------------------------------
   withGlobals(

@@ -70,6 +70,7 @@ describe("tool registration", () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([
+      "burndown",
       "complete_task",
       "create_task",
       "delete_concept",
@@ -605,6 +606,37 @@ describe("task tools", () => {
     const done = await callJson("complete_task", { id: created.id, outcome: "Shipped." });
     expect(done.task.taskStatus).toBe("done");
     expect(done.reminder).toContain("upsert_concept");
+  });
+
+  it("burndown reads the recorded history for an iteration scope", async () => {
+    await callJson("upsert_concept", {
+      id: "sprint-x",
+      title: "Sprint X",
+      body: "A sprint.",
+      type: "iteration",
+      startDate: "2026-11-02",
+      endDate: "2026-11-13",
+    });
+    const t = await callJson("create_task", { title: "Burn me down", body: "x", domain: "sprint-x" });
+    await callJson("upsert_concept", { id: t.id, title: t.title, body: "x", estimate: 3 });
+    await callJson("take_task", { id: t.id, takenBy: "fleet-9" });
+    const before = await callJson("burndown", { scope: "sprint-x", unit: "points" });
+    expect(before.scope).toMatchObject({ id: "sprint-x", type: "iteration", startDate: "2026-11-02" });
+    expect(before.totals).toMatchObject({ scope: 3, taken: 3, done: 0 });
+    expect(before.agents).toEqual([expect.objectContaining({ agent: "fleet-9", held: 1 })]);
+    await callJson("complete_task", { id: t.id, outcome: "Done." });
+    const after = await callJson("burndown", { scope: "sprint-x", metrics: ["cycle"] });
+    expect(after.totals).toMatchObject({ scope: 1, done: 1, open: 0 });
+    expect(after.cycle.byAgent[0].agent).toBe("fleet-9");
+    expect(after.series).toBeUndefined();
+    const kinds = vault.taskEvents().filter((e) => e.task === t.id).map((e) => e.kind);
+    expect(kinds).toEqual(["created", "scope_added", "estimated", "taken", "done"]);
+  });
+
+  it("burndown on an unknown scope is an isError result", async () => {
+    const result = await callTool("burndown", { scope: "no-such-scope" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("unknown burndown scope");
   });
 });
 

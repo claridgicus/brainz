@@ -58,6 +58,8 @@
 	 *   story      → --node-story      #a3e635  lime      (new type)
 	 *   spec       → --node-spec       #2dd4bf  teal      (new type)
 	 *   task       → --node-task       #f59e0b  amber-orange (work pile)
+	 *   iteration  → --node-iteration  #818cf8  indigo    (time-box / sprint)
+	 *   milestone  → --node-milestone  #e879f9  fuchsia   (scoped deliverable)
 	 *   pending    → --node-pending    #6b7280  gray, rendered dashed
 	 * Keep in sync with TYPE_COLORS in $lib/graph-data.ts. */
 	--node-concept: #a78bfa;
@@ -71,6 +73,8 @@
 	--node-story: #a3e635;
 	--node-spec: #2dd4bf;
 	--node-task: #f59e0b;
+	--node-iteration: #818cf8;
+	--node-milestone: #e879f9;
 	--node-pending: #6b7280;
 
 	--font-sans:

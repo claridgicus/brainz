@@ -132,6 +132,60 @@
 		}
 	}
 
+	// ---------------------------------------------------- iteration assign
+	// Iterations are ordinary concepts (type "iteration"); a task is in one
+	// through a part_of edge. Assigning rewrites the task's part_of list via
+	// PUT /concepts/:id: iteration targets are replaced, others (domains) kept.
+	const iterations = $derived(
+		graph.nodes
+			.filter((n) => n.type === "iteration" && !n.pending)
+			.sort((a, b) => a.title.localeCompare(b.title)),
+	);
+	const iterationIds = $derived(new Set(iterations.map((n) => n.id)));
+	function iterationOf(taskId: string): string {
+		return (
+			graph.edges.find(
+				(e) => e.from === taskId && e.relation === "part_of" && iterationIds.has(e.to),
+			)?.to ?? ""
+		);
+	}
+	async function assignIteration(task: TaskMeta, iterationId: string) {
+		if (!canEdit) return;
+		busyId = task.id;
+		error = null;
+		try {
+			const current = await api.getConcept(vault.id, task.id);
+			const relations: Record<string, string[]> = {};
+			for (const e of graph.edges) {
+				if (e.from !== task.id || e.relation === "references") continue;
+				(relations[e.relation] ??= []).push(e.to);
+			}
+			const partOf = (relations.part_of ?? []).filter((id) => !iterationIds.has(id));
+			if (iterationId) partOf.push(iterationId);
+			if (partOf.length > 0) relations.part_of = partOf;
+			else delete relations.part_of;
+			await api.upsertConcept(vault.id, {
+				id: task.id,
+				title: current.title,
+				body: current.body,
+				relations,
+			});
+			graph = {
+				...graph,
+				edges: [
+					...graph.edges.filter(
+						(e) => !(e.from === task.id && e.relation === "part_of" && iterationIds.has(e.to)),
+					),
+					...(iterationId ? [{ from: task.id, to: iterationId, relation: "part_of" }] : []),
+				],
+			};
+		} catch (err) {
+			error = err instanceof ApiError ? err.message : "Could not change the iteration.";
+		} finally {
+			busyId = null;
+		}
+	}
+
 	// ------------------------------------------------------- drag and drop
 	let dragId = $state<string | null>(null);
 	function onDrop(target: Status) {
@@ -195,6 +249,7 @@
 		<div class="left">
 			<h1>{vault.name} · Board</h1>
 			<a class="btn btn-ghost btn-sm" href="/v/{vault.slug}">Graph</a>
+			<a class="btn btn-ghost btn-sm" href="/v/{vault.slug}/burndown">Burndown</a>
 		</div>
 		<div class="group-control" role="group" aria-label="Group by">
 			<span class="glabel">Group by</span>
@@ -271,7 +326,30 @@
 											{task.codeAreas.length} code {task.codeAreas.length === 1 ? "area" : "areas"}
 										</span>
 									{/if}
+									{#if task.estimate !== undefined}
+										<span class="areas" title="Estimate">{task.estimate} pts</span>
+									{/if}
 								</div>
+								{#if canEdit && iterations.length > 0}
+									<!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events -->
+									<label
+										class="iter-pick"
+										onclick={(e) => e.stopPropagation()}
+										onkeydown={(e) => e.stopPropagation()}
+									>
+										<span class="sr-only">Iteration for {task.title}</span>
+										<select
+											value={iterationOf(task.id)}
+											disabled={busyId === task.id}
+											onchange={(e) => void assignIteration(task, e.currentTarget.value)}
+										>
+											<option value="">No iteration</option>
+											{#each iterations as it (it.id)}
+												<option value={it.id}>{it.title}</option>
+											{/each}
+										</select>
+									</label>
+								{/if}
 								{#if canEdit}
 								<div class="card-moves">
 									{#if prevStatus[st]}
@@ -592,5 +670,26 @@
 		position: relative;
 		width: min(420px, 92vw);
 		height: 100%;
+	}
+	.iter-pick {
+		display: block;
+		margin-top: 6px;
+	}
+	.iter-pick select {
+		width: 100%;
+		font-size: 12px;
+		padding: 3px 6px;
+		background: var(--bg-overlay);
+		color: var(--text);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+	}
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
 	}
 </style>

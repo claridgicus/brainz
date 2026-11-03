@@ -26,6 +26,18 @@ import {
   advanceSweep,
   assembleContext,
   bfsRelated,
+  BurndownInputError,
+  computeBurndown,
+  diffTaskEvents,
+  normalizeDay,
+  normalizeEstimate,
+  taskSnapshot,
+  TASK_EVENT_KINDS,
+  UnknownScopeError,
+  type BurndownOptions,
+  type BurndownResult,
+  type TaskEvent,
+  type TaskSnapshot,
   cosineSim,
   decideEntry,
   diaryEntry,
@@ -89,7 +101,7 @@ import {
   type KillSwitch,
 } from "./dream-budget";
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
 
 /**
@@ -200,6 +212,9 @@ interface ConceptRow {
   taken_by: string | null;
   taken_at: string | null;
   done_at: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  estimate: number | null;
   relations_json: string;
   body: string;
   hash: string;
@@ -258,6 +273,9 @@ export class VaultDO {
         taken_by TEXT,
         taken_at TEXT,
         done_at TEXT,
+        start_date TEXT,
+        end_date TEXT,
+        estimate REAL,
         relations_json TEXT NOT NULL DEFAULT '{}',
         body TEXT NOT NULL,
         hash TEXT NOT NULL,
@@ -287,6 +305,7 @@ export class VaultDO {
       // the 11 built-ins so a fresh vault behaves identically to today.
       this.#createConceptTypeTable();
       this.#createDreamTable();
+      this.#createTaskEventTable();
       if (this.#metaGet("embeddings") === null) this.#metaSet("embeddings", "ready");
     } else {
       // Gated additive migrations for pre-existing vaults. Never edit past
@@ -341,6 +360,38 @@ export class VaultDO {
           this.#sql.exec(`ALTER TABLE dream ADD COLUMN pending_json TEXT`);
         }
       }
+      if (version < 9) {
+        // v8 → v9: burndown (SPEC-CLOUD.md "Burndown"). Additive date/estimate
+        // columns, the task_event history table (empty: reads backfill from
+        // the task fields), and the two new built-in types appended to the
+        // registry (INSERT OR IGNORE keeps a same-keyed custom type).
+        // Guarded: a vault created at v1+ by this code already has them in CREATE.
+        const have = new Set(
+          this.#sql.exec<{ name: string }>(`PRAGMA table_info(concept)`).toArray().map((c) => c.name),
+        );
+        if (!have.has("start_date")) this.#sql.exec(`ALTER TABLE concept ADD COLUMN start_date TEXT`);
+        if (!have.has("end_date")) this.#sql.exec(`ALTER TABLE concept ADD COLUMN end_date TEXT`);
+        if (!have.has("estimate")) this.#sql.exec(`ALTER TABLE concept ADD COLUMN estimate REAL`);
+        this.#createTaskEventTable();
+        const max = Number(
+          this.#sql
+            .exec<{ n: number | null }>(`SELECT MAX(sort_order) AS n FROM concept_type`)
+            .one().n ?? -1,
+        );
+        let order = max + 1;
+        for (const t of BUILTIN_CONCEPT_TYPES) {
+          if (t.key !== "iteration" && t.key !== "milestone") continue;
+          this.#sql.exec(
+            `INSERT OR IGNORE INTO concept_type (key, label, color, weight, sort_order, hidden, builtin)
+             VALUES (?, ?, ?, ?, ?, 0, 1)`,
+            t.key,
+            t.label,
+            t.color,
+            t.weight,
+            order++,
+          );
+        }
+      }
     }
     // Idempotent seed: if the registry table exists but is empty (fresh vault or
     // just-backfilled), populate the built-ins. Safe to run every init.
@@ -363,6 +414,20 @@ export class VaultDO {
       this.#fts = false;
       this.#metaSet("keyword_index", "like");
     }
+  }
+
+  /** Task history (SPEC.md "Task history"): one row per event, append-only. */
+  #createTaskEventTable(): void {
+    this.#sql.exec(`CREATE TABLE IF NOT EXISTS task_event (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      at TEXT NOT NULL,
+      task TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      by TEXT,
+      scope TEXT,
+      points REAL
+    )`);
+    this.#sql.exec(`CREATE INDEX IF NOT EXISTS task_event_at ON task_event (at)`);
   }
 
   #createDreamTable(): void {
@@ -637,6 +702,10 @@ export class VaultDO {
           return json(await this.context(args as ContextArgs));
         case "stats":
           return json(this.stats());
+        case "burndown":
+          return json(this.burndown(args as BurndownOptions));
+        case "taskEvents":
+          return json({ events: this.taskEvents() });
         case "listTypes":
           return json(this.listTypes());
         case "createType":
@@ -741,19 +810,40 @@ export class VaultDO {
     const takenBy = input.takenBy !== undefined ? input.takenBy : (existing?.taken_by ?? null);
     const takenAt = input.takenAt !== undefined ? input.takenAt : (existing?.taken_at ?? null);
     const doneAt = input.doneAt !== undefined ? input.doneAt : (existing?.done_at ?? null);
+    const startDate =
+      input.startDate === null
+        ? null
+        : input.startDate !== undefined
+          ? (normalizeDay(input.startDate) ?? null)
+          : (existing?.start_date ?? null);
+    const endDate =
+      input.endDate === null
+        ? null
+        : input.endDate !== undefined
+          ? (normalizeDay(input.endDate) ?? null)
+          : (existing?.end_date ?? null);
+    const estimate =
+      input.estimate === null
+        ? null
+        : input.estimate !== undefined
+          ? (normalizeEstimate(input.estimate) ?? null)
+          : (existing?.estimate ?? null);
+    const before = this.#taskSnap(id);
     const body = input.body.endsWith("\n") ? input.body : `${input.body}\n`;
     const createdAt = existing?.created_at ?? now;
     const hash = await sha256Hex(`${title}\n\n${body}`);
 
     this.#sql.exec(
-      `INSERT INTO concept (id, title, type, status, product, tags_json, code_areas_json, task_status, taken_by, taken_at, done_at, relations_json, body, hash, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO concept (id, title, type, status, product, tags_json, code_areas_json, task_status, taken_by, taken_at, done_at, start_date, end_date, estimate, relations_json, body, hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          title = excluded.title, type = excluded.type, status = excluded.status,
          product = excluded.product, tags_json = excluded.tags_json,
          code_areas_json = excluded.code_areas_json,
          task_status = excluded.task_status, taken_by = excluded.taken_by,
          taken_at = excluded.taken_at, done_at = excluded.done_at,
+         start_date = excluded.start_date, end_date = excluded.end_date,
+         estimate = excluded.estimate,
          relations_json = excluded.relations_json, body = excluded.body,
          hash = excluded.hash, created_at = excluded.created_at, updated_at = excluded.updated_at`,
       id,
@@ -767,6 +857,9 @@ export class VaultDO {
       takenBy,
       takenAt,
       doneAt,
+      startDate,
+      endDate,
+      estimate,
       JSON.stringify(relations),
       body,
       hash,
@@ -776,6 +869,7 @@ export class VaultDO {
 
     this.#rebuildEdges(id, relations, body);
     this.#updateFts(id, title, body, tags);
+    this.#recordTaskDiff(before, this.#taskSnap(id), now);
 
     // Re-embed only when content changed; failures never fail the write.
     const prev = this.#sql
@@ -793,11 +887,13 @@ export class VaultDO {
   deleteConcept(id: string): { ok: true; deleted: boolean } {
     const existing = this.#getRow(id);
     if (!existing) return { ok: true, deleted: false };
+    const before = this.#taskSnap(id);
     // FTS first: its rowid is the concept row's, which is gone after the DELETE.
     if (this.#fts) this.#sql.exec(`DELETE FROM concept_fts WHERE rowid = ?`, this.#rowidOf(id));
     this.#sql.exec(`DELETE FROM concept WHERE id = ?`, id);
     this.#sql.exec(`DELETE FROM edge WHERE from_id = ?`, id);
     this.#sql.exec(`DELETE FROM embedding WHERE concept_id = ?`, id);
+    this.#recordTaskDiff(before, null, new Date().toISOString());
     return { ok: true, deleted: true };
   }
 
@@ -814,13 +910,16 @@ export class VaultDO {
     const list = relations[relation] ?? [];
     if (!list.includes(args.to)) list.push(args.to);
     relations[relation] = list;
+    const before = this.#taskSnap(args.from);
+    const at = new Date().toISOString();
     this.#sql.exec(
       `UPDATE concept SET relations_json = ?, updated_at = ? WHERE id = ?`,
       JSON.stringify(relations),
-      new Date().toISOString(),
+      at,
       args.from,
     );
     this.#rebuildEdges(args.from, relations, row.body);
+    this.#recordTaskDiff(before, this.#taskSnap(args.from), at);
     return { ok: true, from: args.from, to: args.to, relation };
   }
 
@@ -1087,6 +1186,7 @@ export class VaultDO {
 
     const takenBy = args.takenBy?.trim() || "an agent";
     const takenAt = new Date().toISOString();
+    const before = this.#taskSnap(row.id);
     this.#sql.exec(
       `UPDATE concept SET task_status = 'taken', taken_by = ?, taken_at = ?, updated_at = ? WHERE id = ?`,
       takenBy,
@@ -1094,6 +1194,7 @@ export class VaultDO {
       takenAt,
       row.id,
     );
+    this.#recordTaskDiff(before, this.#taskSnap(row.id), takenAt);
 
     const claimed = this.#getRow(row.id);
     if (!claimed) throw new Error(`failed to claim task: ${row.id}`);
@@ -1168,11 +1269,13 @@ export class VaultDO {
     if (!row) throw new NotFoundError(`no task with id "${args.id}"`);
     if (row.type !== "task") throw new Error(`concept "${args.id}" is not a task`);
     const now = new Date().toISOString();
+    const before = this.#taskSnap(args.id);
     this.#sql.exec(
       `UPDATE concept SET task_status = 'open', taken_by = NULL, taken_at = NULL, done_at = NULL, updated_at = ? WHERE id = ?`,
       now,
       args.id,
     );
+    this.#recordTaskDiff(before, this.#taskSnap(args.id), now);
     const saved = this.#getRow(args.id);
     if (!saved) throw new Error(`failed to reopen task: ${args.id}`);
     const meta = this.#rowToMeta(saved);
@@ -1755,7 +1858,12 @@ export class VaultDO {
   async #writeDreamConcept(c: DreamConcept): Promise<void> {
     const body = c.body.endsWith("\n") ? c.body : `${c.body}\n`;
     const hash = await sha256Hex(`${c.title}\n\n${body}`);
+    // Dream snapshots don't carry burndown fields: keep the stored ones.
+    const prior = this.#getRow(c.id);
     this.#putRow({
+      start_date: prior?.start_date ?? null,
+      end_date: prior?.end_date ?? null,
+      estimate: prior?.estimate ?? null,
       id: c.id,
       title: c.title,
       type: this.#resolveType(c.type),
@@ -1778,15 +1886,18 @@ export class VaultDO {
 
   /** Upsert a full concept row verbatim and rebuild its derived state (edges, FTS). */
   #putRow(row: ConceptRow): void {
+    const before = this.#taskSnap(row.id);
     this.#sql.exec(
-      `INSERT INTO concept (id, title, type, status, product, tags_json, code_areas_json, task_status, taken_by, taken_at, done_at, relations_json, body, hash, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO concept (id, title, type, status, product, tags_json, code_areas_json, task_status, taken_by, taken_at, done_at, start_date, end_date, estimate, relations_json, body, hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          title = excluded.title, type = excluded.type, status = excluded.status,
          product = excluded.product, tags_json = excluded.tags_json,
          code_areas_json = excluded.code_areas_json,
          task_status = excluded.task_status, taken_by = excluded.taken_by,
          taken_at = excluded.taken_at, done_at = excluded.done_at,
+         start_date = excluded.start_date, end_date = excluded.end_date,
+         estimate = excluded.estimate,
          relations_json = excluded.relations_json, body = excluded.body,
          hash = excluded.hash, created_at = excluded.created_at, updated_at = excluded.updated_at`,
       row.id,
@@ -1800,6 +1911,9 @@ export class VaultDO {
       row.taken_by,
       row.taken_at,
       row.done_at,
+      row.start_date ?? null,
+      row.end_date ?? null,
+      row.estimate ?? null,
       row.relations_json,
       row.body,
       row.hash,
@@ -1812,6 +1926,7 @@ export class VaultDO {
       row.body,
     );
     this.#updateFts(row.id, row.title, row.body, JSON.parse(row.tags_json) as string[]);
+    this.#recordTaskDiff(before, this.#taskSnap(row.id), new Date().toISOString());
   }
 
   async #reembedIfStale(id: string): Promise<void> {
@@ -2004,6 +2119,9 @@ export class VaultDO {
     if (row.taken_by !== null && row.taken_by !== undefined) meta.takenBy = row.taken_by;
     if (row.taken_at !== null && row.taken_at !== undefined) meta.takenAt = row.taken_at;
     if (row.done_at !== null && row.done_at !== undefined) meta.doneAt = row.done_at;
+    if (row.start_date !== null && row.start_date !== undefined) meta.startDate = row.start_date;
+    if (row.end_date !== null && row.end_date !== undefined) meta.endDate = row.end_date;
+    if (row.estimate !== null && row.estimate !== undefined) meta.estimate = Number(row.estimate);
     if (row.product !== null) meta.product = row.product;
     if (row.created_at !== null) meta.createdAt = row.created_at;
     if (row.updated_at !== null) meta.updatedAt = row.updated_at;
@@ -2018,6 +2136,85 @@ export class VaultDO {
       ...(meta.updatedAt !== undefined ? { updatedAt: meta.updatedAt } : {}),
       body: row.body,
     };
+  }
+
+  // ------------------------------------------------------------ burndown
+
+  #taskSnap(id: string): TaskSnapshot | null {
+    const meta = this.#getMeta(id);
+    if (!meta) return null;
+    const edges = this.#sql
+      .exec<{ from_id: string; to_id: string; relation: string }>(
+        `SELECT from_id, to_id, relation FROM edge WHERE from_id = ?`,
+        id,
+      )
+      .toArray()
+      .map((r) => ({ from: r.from_id, to: r.to_id, relation: r.relation }));
+    return taskSnapshot(meta, edges);
+  }
+
+  #recordTaskDiff(before: TaskSnapshot | null, after: TaskSnapshot | null, at: string): void {
+    for (const e of diffTaskEvents(before, after, at)) {
+      this.#sql.exec(
+        `INSERT INTO task_event (at, task, kind, by, scope, points) VALUES (?, ?, ?, ?, ?, ?)`,
+        e.at,
+        e.task,
+        e.kind,
+        e.by ?? null,
+        e.scope ?? null,
+        e.points ?? null,
+      );
+    }
+  }
+
+  /** The recorded task history, in append order. */
+  taskEvents(): TaskEvent[] {
+    const kinds = new Set<string>(TASK_EVENT_KINDS);
+    return this.#sql
+      .exec<{
+        at: string;
+        task: string;
+        kind: string;
+        by: string | null;
+        scope: string | null;
+        points: number | null;
+      }>(`SELECT at, task, kind, by, scope, points FROM task_event ORDER BY seq`)
+      .toArray()
+      .filter((r) => kinds.has(r.kind))
+      .map((r) => {
+        const e: TaskEvent = { at: r.at, task: r.task, kind: r.kind as TaskEvent["kind"] };
+        if (r.by !== null) e.by = r.by;
+        if (r.scope !== null) e.scope = r.scope;
+        if (r.kind === "estimated") e.points = r.points === null ? null : Number(r.points);
+        return e;
+      });
+  }
+
+  /** Burndown metrics (SPEC.md "Metrics"). Unknown scope ⇒ 404, bad window ⇒ 400. */
+  burndown(opts: BurndownOptions = {}, now: Date = new Date()): BurndownResult {
+    const concepts = this.#sql
+      .exec<ConceptRow>(`SELECT * FROM concept`)
+      .toArray()
+      .map((row) => this.#rowToMeta(row));
+    try {
+      return computeBurndown({
+        scope: opts.scope,
+        from: opts.from,
+        to: opts.to,
+        bucket: opts.bucket,
+        unit: opts.unit,
+        staleAfterHours: opts.staleAfterHours,
+        metrics: opts.metrics,
+        concepts,
+        edges: this.#edges(),
+        events: this.taskEvents(),
+        now,
+      });
+    } catch (err) {
+      if (err instanceof UnknownScopeError) throw new NotFoundError(err.message);
+      if (err instanceof BurndownInputError) throw new Error(err.message);
+      throw err;
+    }
   }
 
   #edges(): Edge[] {
@@ -2044,6 +2241,9 @@ export interface WireConcept {
   takenBy?: string;
   takenAt?: string;
   doneAt?: string;
+  startDate?: string;
+  endDate?: string;
+  estimate?: number;
   createdAt?: string;
   updatedAt?: string;
   body: string;

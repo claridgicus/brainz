@@ -268,6 +268,7 @@
 		<div class="left">
 			<h1>{vault.name}</h1>
 			<a class="btn btn-ghost btn-sm" href="/v/{vault.slug}/board">Board</a>
+			<a class="btn btn-ghost btn-sm" href="/v/{vault.slug}/burndown">Burndown</a>
 			<a class="btn btn-ghost btn-sm" href="/v/{vault.slug}/settings">Settings</a>
 		</div>
 

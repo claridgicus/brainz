@@ -47,6 +47,8 @@ const TYPE_COLORS: Record<string, string> = {
   constraint: "#f87171",
   pattern: "#a78bfa",
   glossary: "#22d3ee",
+  iteration: "#818cf8",
+  milestone: "#e879f9",
   pending: "#6b7280",
 };
 const ALL_TYPES = Object.keys(TYPE_COLORS);

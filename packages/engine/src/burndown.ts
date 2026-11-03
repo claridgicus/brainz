@@ -721,15 +721,42 @@ export function computeBurndown(input: BurndownInput): BurndownResult {
     // Insert `now` so the actual line ends exactly at now.
     if (nowMs > fromMs && nowMs < toMs && !points.includes(nowMs)) points.push(nowMs);
     points.sort((a, b) => a - b);
+    // The ideal runs from the remaining amount at the scope's start to 0 at
+    // its end. When the scope was still empty at its start (work planned in
+    // after day one), it anchors at the first moment the scope has work.
     let idealStartRemaining: number | null = null;
+    let idealFrom = scopeStart;
     if (scopeStart !== undefined && scopeEnd !== undefined && scopeEnd > scopeStart) {
       idealStartRemaining = snapshotAt(Math.min(scopeStart, nowMs)).open;
+      if (idealStartRemaining === 0) {
+        const limit = Math.min(scopeEnd, nowMs);
+        let first = Infinity;
+        for (const tl of relevant) {
+          for (const tr of transitions.get(tl.id) ?? []) {
+            if (tr.in && tr.t >= scopeStart && tr.t < limit) first = Math.min(first, tr.t);
+          }
+        }
+        if (Number.isFinite(first)) {
+          idealFrom = first;
+          idealStartRemaining = snapshotAt(first).open;
+        }
+      }
+    }
+    if (
+      idealFrom !== undefined &&
+      idealFrom !== scopeStart &&
+      idealFrom > fromMs &&
+      idealFrom < toMs &&
+      !points.includes(idealFrom)
+    ) {
+      points.push(idealFrom);
+      points.sort((a, b) => a - b);
     }
     result.series = points.map((t) => {
       let ideal: number | null = null;
-      if (idealStartRemaining !== null && scopeStart !== undefined && scopeEnd !== undefined) {
-        if (t >= scopeStart && t <= scopeEnd) {
-          ideal = round(idealStartRemaining * (1 - (t - scopeStart) / (scopeEnd - scopeStart)));
+      if (idealStartRemaining !== null && idealFrom !== undefined && scopeEnd !== undefined) {
+        if (t >= idealFrom && t <= scopeEnd) {
+          ideal = round(idealStartRemaining * (1 - (t - idealFrom) / (scopeEnd - idealFrom)));
         }
       }
       if (t > nowMs) return { at: iso(t), scope: null, done: null, open: null, taken: null, ideal };

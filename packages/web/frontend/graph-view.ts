@@ -8,7 +8,7 @@
 //      DOM; an edge from a visible node to an off-screen node is drawn only as a
 //      stub toward the nearest on-screen point).
 
-/** All 11 concept types plus the synthesized "pending" pseudo-type. */
+/** All 13 concept types plus the synthesized "pending" pseudo-type. */
 export const ALL_NODE_TYPES = [
   "concept",
   "domain",
@@ -21,6 +21,8 @@ export const ALL_NODE_TYPES = [
   "constraint",
   "pattern",
   "glossary",
+  "iteration",
+  "milestone",
   "pending",
 ] as const;
 
@@ -63,10 +65,12 @@ export const TYPE_SIGNAL_RANK: Record<string, number> = {
   feature: 1,
   spec: 1,
   constraint: 1,
+  milestone: 1,
   story: 2,
   workflow: 2,
   pattern: 2,
   decision: 2,
+  iteration: 2,
   glossary: 3,
   concept: 3,
   task: 3,
@@ -195,6 +199,8 @@ export const TYPE_SIZE_SCALE: Record<string, number> = {
   constraint: 0.95,
   pattern: 0.95,
   glossary: 0.9,
+  milestone: 1.2,
+  iteration: 1.0,
   pending: 0.8,
 };
 

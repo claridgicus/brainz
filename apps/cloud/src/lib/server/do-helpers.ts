@@ -27,6 +27,9 @@ export function compactMeta(meta: ConceptMeta): ToolConceptMeta {
     ...(meta.takenBy !== undefined ? { takenBy: meta.takenBy } : {}),
     ...(meta.takenAt !== undefined ? { takenAt: meta.takenAt } : {}),
     ...(meta.doneAt !== undefined ? { doneAt: meta.doneAt } : {}),
+    ...(meta.startDate !== undefined ? { startDate: meta.startDate } : {}),
+    ...(meta.endDate !== undefined ? { endDate: meta.endDate } : {}),
+    ...(meta.estimate !== undefined ? { estimate: meta.estimate } : {}),
   };
 }
 

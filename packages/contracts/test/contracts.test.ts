@@ -52,7 +52,12 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "23"', () => {
+  it('is "24"', () => {
+    // 24: burndown — new `burndown` MCP tool (burndownInputSchema +
+    //     burndownResultSchema; GET .../burndown via burndownQuerySchema),
+    //     taskEventSchema; built-in types gain `iteration` and `milestone`;
+    //     concept meta + upsert_concept gain startDate / endDate / estimate.
+    //     Additive.
     // 23: per-vault dreaming settings — dreamSettingsSchema /
     //     dreamSettingsPatchSchema; `dream configure` takes runHourUtc, mode,
     //     phases, thresholds, caps, lossRail, llm; status gains `settings`; new
@@ -102,7 +107,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("23");
+    expect(CONTRACTS_VERSION).toBe("24");
   });
 });
 

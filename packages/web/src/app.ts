@@ -29,6 +29,8 @@ const TYPES = new Set([
   "constraint",
   "pattern",
   "glossary",
+  "iteration",
+  "milestone",
 ]);
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
