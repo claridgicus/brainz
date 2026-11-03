@@ -42,6 +42,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
+  BUILTIN_CONCEPT_TYPES,
   apiKeyCreateResponseSchema,
   oauthAuthorizationServerMetadataSchema,
   oauthClientRegistrationResponseSchema,
@@ -557,7 +558,12 @@ async function main() {
     const typesList = await api("GET", `/api/vaults/${vaultId}/types`);
     step("GET /types → 200", typesList.status === 200, `status ${typesList.status}`);
     const seeded = typesList.json?.types ?? [];
-    step("fresh vault seeds exactly 11 built-in types", seeded.length === 11, `got ${seeded.length}`);
+    step(
+      `fresh vault seeds exactly the ${BUILTIN_CONCEPT_TYPES.length} built-in types`,
+      seeded.length === BUILTIN_CONCEPT_TYPES.length &&
+        BUILTIN_CONCEPT_TYPES.every((b) => seeded.some((t) => t.key === b.key)),
+      `got ${seeded.length}`,
+    );
     const domainType = seeded.find((t) => t.key === "domain");
     const glossaryType = seeded.find((t) => t.key === "glossary");
     step(
@@ -571,8 +577,8 @@ async function main() {
     );
     // graph payload carries the registry
     step(
-      "graph payload carries the 11-type registry",
-      Array.isArray(graph.json?.types) && graph.json.types.length === 11,
+      `graph payload carries the ${BUILTIN_CONCEPT_TYPES.length}-type registry`,
+      Array.isArray(graph.json?.types) && graph.json.types.length === BUILTIN_CONCEPT_TYPES.length,
       `types ${graph.json?.types?.length}`,
     );
 
