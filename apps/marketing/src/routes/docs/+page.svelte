@@ -4,7 +4,7 @@
 
 	const title = "Docs — Get started with Brainz";
 	const description =
-		"Wire Brainz into your agents in minutes: hosted remote MCP at brainz.brownmatter.ai or the local-first CLI over stdio. All seventeen MCP tools, documented.";
+		"Wire Brainz into your agents in minutes: hosted remote MCP at brainz.brownmatter.ai or the local-first CLI over stdio. All eighteen MCP tools, documented.";
 
 	const remoteMcpSnippet = `{
   "mcpServers": {
@@ -182,6 +182,18 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 				"List the vault's work pile: `task`-type concepts with their lifecycle (open/taken/done), oldest " +
 				"first, including who has taken each one (takenBy). Filter by taskStatus or by the domain the " +
 				"tasks are part_of. Read-only; take_task is what claims a task.",
+		},
+		{
+			name: "burndown",
+			title: "Task burndown",
+			description:
+				"Burndown and flow metrics for the vault's tasks, computed from their recorded history. `scope` is " +
+				"a concept id (an iteration, milestone, feature, domain or any concept tasks are part_of / realize, " +
+				"including nested containers) or `tag:<tag>`; omit it for every task. Returns, for the window: open " +
+				"vs done over time with an ideal line when the scope has start/end dates, scope changes, velocity " +
+				"per iteration or week, a projected completion date with an optimistic/pessimistic range, lead and " +
+				"cycle time per agent label, and claims held longer than `staleAfterHours`. `metrics` limits the " +
+				"sections returned. Read-only.",
 		},
 		{
 			name: "take_task",
@@ -429,13 +441,15 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		<code>upsert_concept</code>.
 	</p>
 	<p>
-		The ontology is eleven concept types, and five of them carry the structure: <code>domain</code>
+		The ontology is thirteen concept types, and five of them carry the structure: <code>domain</code>
 		(high-level product areas — the top of the graph), <code>feature</code> (concrete capabilities,
 		<code>part_of</code> a domain), <code>story</code> (user stories, <code>realized_by</code> the
 		features that deliver them), <code>spec</code> (the rules that <code>govern</code> features and
 		stories), and <code>workflow</code> (multi-step journeys across features) — plus <code>task</code>
 		(a unit of work not yet in the codebase, claimed off a real-time Kanban board via
-		<code>take_task</code>) and the classics: <code>concept</code>, <code>decision</code>,
+		<code>take_task</code>), <code>iteration</code> and <code>milestone</code> (a sprint and a
+		dated deliverable that tasks are <code>part_of</code>, which <code>burndown</code> reports on)
+		and the classics: <code>concept</code>, <code>decision</code>,
 		<code>constraint</code>, <code>pattern</code>, <code>glossary</code>. Every concept can carry
 		<code>code_areas</code> — rough paths or globs
 		pointing at where that knowledge lives in the codebase — so a subagent briefed by
@@ -468,7 +482,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		isn't configured or available, it degrades gracefully to keyword-only.
 	</p>
 
-	<h2 id="tools">The seventeen MCP tools</h2>
+	<h2 id="tools">The eighteen MCP tools</h2>
 	<p>
 		These names and descriptions are the exact text your orchestrator sees — lifted from the tool
 		registry that both the hosted and local servers register from, so they never drift.
