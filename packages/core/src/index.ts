@@ -44,6 +44,8 @@ export {
 } from "@brainz/engine";
 export type { DreamDiaryEntry, DreamLlm, DreamOptions, DreamTrigger } from "@brainz/engine";
 export type { LocalDreamOp, LocalDreamRecord } from "./dream.js";
+export { UnknownScopeError, BurndownInputError } from "@brainz/engine";
+export type { BurndownOptions, BurndownResult, TaskEvent } from "@brainz/engine";
 export type {
   SessionHookClient,
   SessionHookPlaybookOptions,

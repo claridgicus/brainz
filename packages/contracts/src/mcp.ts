@@ -12,6 +12,7 @@
  * the contract schema, which is the anti-drift guarantee.
  */
 import { z } from "zod";
+import { burndownInputSchema, burndownResultSchema } from "./burndown.js";
 import {
   CONCEPT_STATUSES,
   CONCEPT_TYPES,
@@ -39,6 +40,12 @@ export const toolConceptMetaSchema = z
     takenBy: z.string().optional(),
     takenAt: z.string().optional(),
     doneAt: z.string().optional(),
+    /** Start day `YYYY-MM-DD` (iterations/milestones). */
+    startDate: z.string().optional(),
+    /** End / target day `YYYY-MM-DD` (iterations/milestones). */
+    endDate: z.string().optional(),
+    /** Story points (tasks). */
+    estimate: z.number().optional(),
   })
   .strict();
 
@@ -93,7 +100,7 @@ export const upsertConceptInputSchema = z.object({
     .string()
     .optional()
     .describe(
-      "Concept type (default \"concept\"). The 11 built-in types are concept, domain, feature, story, spec, workflow, task, decision, constraint, pattern, glossary; a vault may also define custom types. An unknown type falls back to \"concept\".",
+      "Concept type (default \"concept\"). The 13 built-in types are concept, domain, feature, story, spec, workflow, task, decision, constraint, pattern, glossary, iteration (a time-box such as a sprint) and milestone (a scoped deliverable with a target date); a vault may also define custom types. An unknown type falls back to \"concept\".",
     ),
   status: z.enum(CONCEPT_STATUSES).optional().describe("Lifecycle status (default \"active\")."),
   product: z.string().optional().describe("Product grouping key."),
@@ -112,6 +119,24 @@ export const upsertConceptInputSchema = z.object({
   takenBy: z.string().optional().describe("For tasks: label of the agent/orchestrator that claimed it."),
   takenAt: z.string().optional().describe("For tasks: ISO timestamp when claimed."),
   doneAt: z.string().optional().describe("For tasks: ISO timestamp when completed."),
+  startDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .nullable()
+    .optional()
+    .describe("For iterations/milestones: start day YYYY-MM-DD (null clears it)."),
+  endDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .nullable()
+    .optional()
+    .describe("For iterations/milestones: end or target day YYYY-MM-DD (null clears it)."),
+  estimate: z
+    .number()
+    .min(0)
+    .nullable()
+    .optional()
+    .describe("For tasks: story points (null clears it)."),
   relations: z
     .record(z.string(), z.array(z.string()))
     .optional()
@@ -1074,6 +1099,21 @@ export const MCP_TOOLS = [
       "tasks are part_of. Read-only; take_task is what claims a task.",
     inputSchema: listTasksInputSchema,
     outputSchema: listTasksOutputSchema,
+    annotations: READ_ONLY_TOOL,
+  },
+  {
+    name: "burndown",
+    title: "Task burndown",
+    description:
+      "Burndown and flow metrics for the vault's tasks, computed from their recorded history. `scope` is " +
+      "a concept id (an iteration, milestone, feature, domain or any concept tasks are part_of / realize, " +
+      "including nested containers) or `tag:<tag>`; omit it for every task. Returns, for the window: open " +
+      "vs done over time with an ideal line when the scope has start/end dates, scope changes, velocity " +
+      "per iteration or week, a projected completion date with an optimistic/pessimistic range, lead and " +
+      "cycle time per agent label, and claims held longer than `staleAfterHours`. `metrics` limits the " +
+      "sections returned. Read-only.",
+    inputSchema: burndownInputSchema,
+    outputSchema: burndownResultSchema,
     annotations: READ_ONLY_TOOL,
   },
   {

@@ -16,6 +16,9 @@ export function openDb(path: string): Database.Database {
       taken_by   TEXT,
       taken_at   TEXT,
       done_at    TEXT,
+      start_date TEXT,
+      end_date   TEXT,
+      estimate   REAL,
       file_path  TEXT NOT NULL,
       created_at TEXT,
       updated_at TEXT,
@@ -54,5 +57,21 @@ export function openDb(path: string): Database.Database {
       /* column already exists */
     }
   }
+  // Burndown fields. When a column is newly added, clear the content hashes so
+  // the next reindex re-parses every note and fills it in.
+  let added = false;
+  for (const stmt of [
+    `ALTER TABLE concepts ADD COLUMN start_date TEXT`,
+    `ALTER TABLE concepts ADD COLUMN end_date TEXT`,
+    `ALTER TABLE concepts ADD COLUMN estimate REAL`,
+  ]) {
+    try {
+      db.exec(stmt);
+      added = true;
+    } catch {
+      /* column already exists */
+    }
+  }
+  if (added) db.exec(`UPDATE concepts SET hash = ''`);
   return db;
 }

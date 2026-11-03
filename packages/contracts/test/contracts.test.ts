@@ -123,6 +123,7 @@ describe("MCP_TOOLS registry", () => {
       "session_hook",
       "dream",
       "list_tasks",
+      "burndown",
       "take_task",
       "complete_task",
       "create_task",
@@ -320,12 +321,12 @@ describe("output schemas encode the shipped shapes", () => {
 });
 
 describe("product ontology (v3)", () => {
-  it("has the 11 concept types, additive over the original 6", () => {
-    expect(CONCEPT_TYPES).toHaveLength(11);
+  it("has the 13 concept types, additive over the original 6", () => {
+    expect(CONCEPT_TYPES).toHaveLength(13);
     for (const t of ["concept", "feature", "decision", "constraint", "pattern", "glossary"]) {
       expect(CONCEPT_TYPES).toContain(t);
     }
-    for (const t of ["domain", "story", "spec", "workflow", "task"]) {
+    for (const t of ["domain", "story", "spec", "workflow", "task", "iteration", "milestone"]) {
       expect(CONCEPT_TYPES).toContain(t);
     }
   });
@@ -651,7 +652,7 @@ describe("cli --json schemas", () => {
 });
 
 describe("concept-type registry (Wave TR)", () => {
-  it("seeds exactly the 11 built-ins in canonical order with today's colors", () => {
+  it("seeds exactly the 13 built-ins in canonical order with today's colors", () => {
     expect(BUILTIN_CONCEPT_TYPES.map((t) => t.key)).toEqual([...CONCEPT_TYPES]);
     const byKey = Object.fromEntries(BUILTIN_CONCEPT_TYPES.map((t) => [t.key, t]));
     // Colors mirror graph-data TYPE_COLORS / app.css --node-* tokens.

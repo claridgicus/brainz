@@ -2,6 +2,10 @@ import type DatabaseType from "better-sqlite3";
 import {
   advanceSweep,
   assembleContext,
+  computeBurndown,
+  diffTaskEvents,
+  taskSnapshot,
+  TASK_EVENT_KINDS,
   bfsRelated,
   cosineSim,
   decideEntry,
@@ -25,6 +29,8 @@ import {
   unpackVector,
 } from "@brainz/engine";
 import type {
+  BurndownOptions,
+  BurndownResult,
   Concept,
   ConceptMeta,
   ConceptType,
@@ -44,6 +50,8 @@ import type {
   RelatedOptions,
   SearchHit,
   SearchOptions,
+  TaskEvent,
+  TaskSnapshot,
   UpsertInput,
   VaultStats,
 } from "@brainz/engine";
@@ -82,6 +90,9 @@ interface ConceptRow {
   taken_by: string | null;
   taken_at: string | null;
   done_at: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  estimate: number | null;
   file_path: string;
   created_at: string | null;
   updated_at: string | null;
@@ -223,13 +234,15 @@ export class Vault {
 
     this.#db
       .prepare(
-        `INSERT INTO concepts (id, title, type, status, product, tags, code_areas, task_status, taken_by, taken_at, done_at, file_path, created_at, updated_at, body, hash)
-         VALUES (@id, @title, @type, @status, @product, @tags, @code_areas, @task_status, @taken_by, @taken_at, @done_at, @file_path, @created_at, @updated_at, @body, @hash)
+        `INSERT INTO concepts (id, title, type, status, product, tags, code_areas, task_status, taken_by, taken_at, done_at, start_date, end_date, estimate, file_path, created_at, updated_at, body, hash)
+         VALUES (@id, @title, @type, @status, @product, @tags, @code_areas, @task_status, @taken_by, @taken_at, @done_at, @start_date, @end_date, @estimate, @file_path, @created_at, @updated_at, @body, @hash)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title, type = excluded.type, status = excluded.status,
            product = excluded.product, tags = excluded.tags, code_areas = excluded.code_areas,
            task_status = excluded.task_status, taken_by = excluded.taken_by,
            taken_at = excluded.taken_at, done_at = excluded.done_at,
+           start_date = excluded.start_date, end_date = excluded.end_date,
+           estimate = excluded.estimate,
            file_path = excluded.file_path,
            created_at = excluded.created_at, updated_at = excluded.updated_at,
            body = excluded.body, hash = excluded.hash`,
@@ -246,6 +259,9 @@ export class Vault {
         taken_by: concept.takenBy ?? null,
         taken_at: concept.takenAt ?? null,
         done_at: concept.doneAt ?? null,
+        start_date: concept.startDate ?? null,
+        end_date: concept.endDate ?? null,
+        estimate: concept.estimate ?? null,
         file_path: filePath,
         created_at: concept.createdAt ?? null,
         updated_at: concept.updatedAt ?? null,
@@ -477,6 +493,9 @@ export class Vault {
     if (row.taken_by !== null && row.taken_by !== undefined) meta.takenBy = row.taken_by;
     if (row.taken_at !== null && row.taken_at !== undefined) meta.takenAt = row.taken_at;
     if (row.done_at !== null && row.done_at !== undefined) meta.doneAt = row.done_at;
+    if (row.start_date !== null && row.start_date !== undefined) meta.startDate = row.start_date;
+    if (row.end_date !== null && row.end_date !== undefined) meta.endDate = row.end_date;
+    if (row.estimate !== null && row.estimate !== undefined) meta.estimate = Number(row.estimate);
     if (row.product !== null) meta.product = row.product;
     if (row.created_at !== null) meta.createdAt = row.created_at;
     if (row.updated_at !== null) meta.updatedAt = row.updated_at;
@@ -568,12 +587,22 @@ export class Vault {
     if (input.takenBy !== undefined) data.taken_by = input.takenBy;
     if (input.takenAt !== undefined) data.taken_at = input.takenAt;
     if (input.doneAt !== undefined) data.done_at = input.doneAt;
+    for (const [key, value] of [
+      ["start_date", input.startDate],
+      ["end_date", input.endDate],
+      ["estimate", input.estimate],
+    ] as const) {
+      if (value === null) delete data[key];
+      else if (value !== undefined) data[key] = value;
+    }
     if (input.relations !== undefined) data.relations = input.relations;
 
     const body = input.body.endsWith("\n") ? input.body : `${input.body}\n`;
+    const before = this.#taskSnap(id);
     await fsp.mkdir(path.dirname(filePath), { recursive: true });
     await fsp.writeFile(filePath, serializeNote(data, body));
     await this.#reindexFile(filePath);
+    this.#recordTaskDiff(before, this.#taskSnap(id));
 
     const saved = this.getConcept(id);
     if (!saved) throw new Error(`failed to index upserted concept: ${id}`);
@@ -588,10 +617,12 @@ export class Vault {
   async deleteConcept(id: string): Promise<{ deleted: boolean }> {
     const existing = this.getConcept(id);
     if (!existing) return { deleted: false };
+    const before = this.#taskSnap(id);
     await fsp.rm(existing.filePath, { force: true });
     // File is gone → #reindexFile drops the concept's rows (and its edges/FTS/
     // embedding via #removeConcept).
     await this.#reindexFile(existing.filePath);
+    this.#recordTaskDiff(before, null);
     return { deleted: true };
   }
 
@@ -616,8 +647,89 @@ export class Vault {
     relations[relation] = list;
     data.relations = relations;
 
+    const before = this.#taskSnap(from);
     await fsp.writeFile(source.filePath, serializeNote(data, parsed.content));
     await this.#reindexFile(source.filePath);
+    this.#recordTaskDiff(before, this.#taskSnap(from));
+  }
+
+  // ---------------------------------------------------------- task history
+
+  /** Path of the append-only task history log (vault content, not derived). */
+  get taskEventsPath(): string {
+    return path.join(this.dir, "history", "task-events.jsonl");
+  }
+
+  #taskSnap(id: string): TaskSnapshot | null {
+    const meta = this.#getMeta(id);
+    if (!meta) return null;
+    const edges = (
+      this.#db
+        .prepare("SELECT from_id, to_id, relation FROM edges WHERE from_id = ?")
+        .all(id) as { from_id: string; to_id: string; relation: string }[]
+    ).map((r) => ({ from: r.from_id, to: r.to_id, relation: r.relation }));
+    return taskSnapshot(meta, edges);
+  }
+
+  #recordTaskDiff(before: TaskSnapshot | null, after: TaskSnapshot | null): void {
+    const events = diffTaskEvents(before, after, new Date().toISOString());
+    if (events.length === 0) return;
+    fs.mkdirSync(path.dirname(this.taskEventsPath), { recursive: true });
+    fs.appendFileSync(this.taskEventsPath, events.map((e) => `${JSON.stringify(e)}\n`).join(""));
+  }
+
+  /** The recorded task history (malformed lines are skipped), in file order. */
+  taskEvents(): TaskEvent[] {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.taskEventsPath, "utf8");
+    } catch {
+      return [];
+    }
+    const kinds = new Set<string>(TASK_EVENT_KINDS);
+    const out: TaskEvent[] = [];
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const e = JSON.parse(line) as Partial<TaskEvent>;
+        if (
+          typeof e.at === "string" &&
+          typeof e.task === "string" &&
+          typeof e.kind === "string" &&
+          kinds.has(e.kind) &&
+          !Number.isNaN(Date.parse(e.at))
+        ) {
+          out.push(e as TaskEvent);
+        }
+      } catch {
+        /* skip a torn or hand-mangled line */
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Burndown metrics for a scope (SPEC.md "Burndown"). A task note with no
+   * `createdAt` frontmatter is dated by its file's birth time for backfill.
+   */
+  burndown(opts: BurndownOptions = {}, now: Date = new Date()): BurndownResult {
+    const concepts = this.listConcepts().map((m) => {
+      if (m.type !== "task" || m.createdAt) return m;
+      try {
+        const st = fs.statSync(m.filePath);
+        const born = st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs;
+        return { ...m, createdAt: new Date(born).toISOString() };
+      } catch {
+        return m;
+      }
+    });
+    return computeBurndown({
+      ...opts,
+      concepts,
+      edges: this.edges(),
+      events: this.taskEvents(),
+      now,
+    });
   }
 
   // ------------------------------------------------------------------ watch

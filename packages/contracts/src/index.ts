@@ -7,9 +7,10 @@
  */
 
 /** Bump on breaking wire-shape changes. */
-export const CONTRACTS_VERSION = "23";
+export const CONTRACTS_VERSION = "24";
 
 export * from "./domain.js";
+export * from "./burndown.js";
 export * from "./mcp.js";
 export * from "./api.js";
 export * from "./cli.js";

@@ -45,6 +45,8 @@ export const CONCEPT_TYPES = [
   "constraint",
   "pattern",
   "glossary",
+  "iteration",
+  "milestone",
 ] as const satisfies readonly ConceptType[];
 
 export const TASK_STATUSES = [
@@ -105,15 +107,15 @@ export interface ConceptTypeSeed {
 }
 
 /**
- * The 11 built-in concept types, in canonical order, with their CURRENT graph
+ * The 13 built-in concept types, in canonical order, with their CURRENT graph
  * colors (mirror src/app.css `--node-*` + graph-data TYPE_COLORS) and weights
  * mirroring the semantic-zoom signal ranking. Seeded verbatim into every
  * vault's registry so a fresh/backfilled vault behaves identically to today.
  *
  * Weight tiers (higher = higher signal, revealed earlier):
  *   100  domain
- *    80  feature, spec, constraint
- *    60  story, workflow, pattern, decision
+ *    80  feature, spec, constraint, milestone
+ *    60  story, workflow, pattern, decision, iteration
  *    40  glossary, concept, task
  */
 export const BUILTIN_CONCEPT_TYPES: readonly ConceptTypeSeed[] = [
@@ -128,6 +130,8 @@ export const BUILTIN_CONCEPT_TYPES: readonly ConceptTypeSeed[] = [
   { key: "constraint", label: "Constraint", color: "#f87171", weight: 80 },
   { key: "pattern", label: "Pattern", color: "#22d3ee", weight: 60 },
   { key: "glossary", label: "Glossary", color: "#f472b6", weight: 40 },
+  { key: "iteration", label: "Iteration", color: "#818cf8", weight: 60 },
+  { key: "milestone", label: "Milestone", color: "#e879f9", weight: 80 },
 ] as const;
 
 /** The `pending` pseudo-type color (edge targets with no concept yet). Not a
@@ -160,7 +164,7 @@ export const conceptTypeEntrySchema = z
     order: z.number().int(),
     /** Hidden from the graph + chips (built-ins are hidden, never deleted). */
     hidden: z.boolean(),
-    /** True for the 11 seeded types: re-weightable/hideable, not hard-deletable. */
+    /** True for the seeded built-in types: re-weightable/hideable, not hard-deletable. */
     builtin: z.boolean(),
   })
   .strict();
@@ -238,6 +242,9 @@ export const conceptMetaSchema = z
     takenBy: z.string().optional(),
     takenAt: z.string().optional(),
     doneAt: z.string().optional(),
+    startDate: z.string().optional(),
+    endDate: z.string().optional(),
+    estimate: z.number().optional(),
     filePath: z.string(),
     createdAt: z.string().optional(),
     updatedAt: z.string().optional(),

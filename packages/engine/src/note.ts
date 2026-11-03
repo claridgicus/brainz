@@ -14,6 +14,8 @@ const CONCEPT_TYPES: readonly ConceptType[] = [
   "constraint",
   "pattern",
   "glossary",
+  "iteration",
+  "milestone",
 ];
 
 const CONCEPT_STATUSES: readonly ConceptStatus[] = ["active", "draft", "deprecated"];
@@ -47,6 +49,28 @@ function asIso(value: unknown): string | undefined {
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "string" && value.trim()) return value.trim();
   return undefined;
+}
+
+/**
+ * Normalize a calendar-day value to `YYYY-MM-DD`: a YAML date (parsed to a
+ * Date) or an ISO date/timestamp string is cut to its UTC day; anything else
+ * is dropped (undefined).
+ */
+export function normalizeDay(value: unknown): string | undefined {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? undefined : value.toISOString().slice(0, 10);
+  }
+  if (typeof value !== "string") return undefined;
+  const raw = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}/.test(raw)) return undefined;
+  const d = new Date(raw.length === 10 ? `${raw}T00:00:00Z` : raw);
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString().slice(0, 10);
+}
+
+/** A story-point estimate: a finite number >= 0 (numeric strings accepted), else undefined. */
+export function normalizeEstimate(value: unknown): number | undefined {
+  const n = typeof value === "string" && value.trim() ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : undefined;
 }
 
 function asStringArray(value: unknown): string[] {
@@ -97,6 +121,9 @@ export function parseNote(markdown: string, opts: ParseNoteOptions): ParsedNote 
     typeof fm.taken_by === "string" && fm.taken_by.trim() ? fm.taken_by.trim() : undefined;
   const takenAt = asIso(fm.taken_at);
   const doneAt = asIso(fm.done_at);
+  const startDate = normalizeDay(fm.start_date);
+  const endDate = normalizeDay(fm.end_date);
+  const estimate = normalizeEstimate(fm.estimate);
 
   const meta: NoteMeta = {
     id,
@@ -110,6 +137,9 @@ export function parseNote(markdown: string, opts: ParseNoteOptions): ParsedNote 
     ...(takenBy !== undefined ? { takenBy } : {}),
     ...(takenAt !== undefined ? { takenAt } : {}),
     ...(doneAt !== undefined ? { doneAt } : {}),
+    ...(startDate !== undefined ? { startDate } : {}),
+    ...(endDate !== undefined ? { endDate } : {}),
+    ...(estimate !== undefined ? { estimate } : {}),
     createdAt: asIso(fm.createdAt),
     updatedAt: asIso(fm.updatedAt),
   };

@@ -79,6 +79,7 @@ const INPUT_SAMPLES: Record<AnyToolName, unknown> = {
   session_hook: { client: "claude-code" },
   dream: { action: "revert", id: "dream-20261027030000" },
   list_tasks: { taskStatus: "open" },
+  burndown: { scope: "sprint-1", unit: "points", metrics: ["series", "stale"] },
   take_task: { takenBy: "fleet-1" },
   complete_task: { id: "task-a", outcome: "Shipped it." },
   create_task: { title: "Fix auth", body: "Details", domain: "auth", tags: ["high"] },
@@ -160,6 +161,13 @@ const OUTPUT_SAMPLES: Record<AnyToolName, unknown> = {
   list_tasks: {
     count: 1,
     tasks: [{ ...META, id: "task-a", title: "Task A", type: "task", taskStatus: "open" }],
+  },
+  burndown: {
+    scope: { id: "sprint-1", kind: "concept", title: "Sprint 1", type: "iteration", startDate: "2026-11-02", endDate: "2026-11-13" },
+    window: { from: "2026-11-02T00:00:00.000Z", to: "2026-11-14T00:00:00.000Z", now: "2026-11-05T00:00:00.000Z", bucket: "day", unit: "points" },
+    totals: { scope: 8, done: 3, open: 5, taken: 2, unestimated: 0 },
+    series: [{ at: "2026-11-02T00:00:00.000Z", scope: 8, done: 0, open: 8, taken: 0, ideal: 8 }],
+    stale: [{ id: "task-a", title: "Task A", takenBy: "fleet-1", takenAt: "2026-11-03T00:00:00.000Z", ageHours: 48 }],
   },
   take_task: {
     task: { ...META, id: "task-a", title: "Task A", type: "task", taskStatus: "taken" },
@@ -243,6 +251,7 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOL
       sync: { action: "restart" },
       session_hook: { client: "emacs" },
       dream: { action: "nap" },
+      burndown: { unit: "hours" },
       signup: { email: "not-an-email" },
       sign_in: { email: "not-an-email" },
       claim: { email: "not-an-email" },
@@ -292,6 +301,7 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOL
       "take_task",
       "complete_task",
       "list_tasks",
+      "burndown",
     ];
     for (const w of WRITE_OR_MUTATION) {
       expect(PUBLIC_VAULT_READ_TOOL_NAMES).not.toContain(w);
@@ -332,6 +342,7 @@ describe("tool registry integrity (MCP_TOOLS + PUBLIC_MCP_TOOLS + CLOUD_MCP_TOOL
       vault_stats: [true, false, false],
       session_hook: [true, false, false],
       list_tasks: [true, false, false],
+      burndown: [true, false, false],
       upsert_concept: [false, true, false],
       delete_concept: [false, true, false],
       dream: [false, true, true],

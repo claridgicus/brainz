@@ -18,7 +18,14 @@ export type {
 
 export { slugify } from "./slugify.js";
 
-export { extractWikiLinks, parseNote, readFrontmatter, serializeNote } from "./note.js";
+export {
+  extractWikiLinks,
+  normalizeDay,
+  normalizeEstimate,
+  parseNote,
+  readFrontmatter,
+  serializeNote,
+} from "./note.js";
 export type { NoteMeta, ParsedNote, ParseNoteOptions } from "./note.js";
 
 export { cosineSim, packVector, rrfFuse, unpackVector } from "./search.js";
@@ -49,6 +56,34 @@ export {
 export type { SyncPlaybookOptions } from "./sync.js";
 
 export { TASK_COMPLETE_NOTICE, TASK_COMPLETE_REMINDER } from "./tasks.js";
+
+export {
+  BURNDOWN_DEFAULT_STALE_HOURS,
+  BURNDOWN_METRICS,
+  BurndownInputError,
+  MEMBERSHIP_RELATIONS,
+  TASK_EVENT_KINDS,
+  UnknownScopeError,
+  backfillTaskEvents,
+  computeBurndown,
+  diffTaskEvents,
+  scopeClosure,
+  sortTaskEvents,
+  taskSnapshot,
+} from "./burndown.js";
+export type {
+  BurndownBucket,
+  BurndownConcept,
+  BurndownInput,
+  BurndownMetric,
+  BurndownOptions,
+  BurndownResult,
+  BurndownStats,
+  BurndownUnit,
+  TaskEvent,
+  TaskEventKind,
+  TaskSnapshot,
+} from "./burndown.js";
 
 export {
   DEFAULT_MCP_SERVER_NAME,

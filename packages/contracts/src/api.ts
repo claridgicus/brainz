@@ -224,6 +224,11 @@ export type TaskMoveRequest = z.infer<typeof taskMoveRequestSchema>;
 /** PATCH .../tasks/:id response: the updated task meta. */
 export const taskMoveResponseSchema = taskMetaSchema;
 
+// ---------------------------------------------------------------- burndown
+
+/** GET .../burndown response — same shape as the burndown tool output. */
+export { burndownQuerySchema, burndownResultSchema as burndownResponseSchema } from "./burndown.js";
+
 // ----------------------------------------------------------------- api keys
 
 export const apiKeySchema = z.object({

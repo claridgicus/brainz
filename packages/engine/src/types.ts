@@ -18,7 +18,9 @@ export type ConceptType =
   | "decision"
   | "constraint"
   | "pattern"
-  | "glossary";
+  | "glossary"
+  | "iteration"
+  | "milestone";
 
 /**
  * A concept type as it may appear at runtime: any of the built-in
@@ -54,6 +56,12 @@ export interface ConceptMeta {
   takenAt?: string;
   /** ISO timestamp when the task was completed. */
   doneAt?: string;
+  /** Start day (`YYYY-MM-DD`, frontmatter `start_date`) — iterations/milestones. */
+  startDate?: string;
+  /** End / target day (`YYYY-MM-DD`, frontmatter `end_date`) — iterations/milestones. */
+  endDate?: string;
+  /** Story points (frontmatter `estimate`), a finite number >= 0 — tasks. */
+  estimate?: number;
   filePath: string; // absolute path
   createdAt?: string; // ISO dates from frontmatter if present
   updatedAt?: string;
@@ -129,6 +137,12 @@ export interface UpsertInput {
   takenAt?: string;
   /** ISO completion timestamp (frontmatter `done_at`). */
   doneAt?: string;
+  /** Start day `YYYY-MM-DD` (frontmatter `start_date`); null clears it. */
+  startDate?: string | null;
+  /** End / target day `YYYY-MM-DD` (frontmatter `end_date`); null clears it. */
+  endDate?: string | null;
+  /** Story points (frontmatter `estimate`); null clears it. */
+  estimate?: number | null;
   relations?: Record<string, string[]>;
 }
 
