@@ -15,7 +15,8 @@
  * browser save of the mode select) → epics (create_task's epic, the
  * epic-grouped board's lanes, columns and roll-up, a re-parent, an epic
  * burndown scope; in a browser the card's epic picker and a remembered
- * collapsed lane). When
+ * collapsed lane) → the features tree (SSR, the board's ?scope= filter, and
+ * in a browser collapse/expand, the node panel and Show on board). When
  * `agent-browser` is on PATH (E2E_UI_BROWSER=0 skips it) a real browser also
  * drives the consent search, chips and a double-clicked Allow, which must
  * reach the client's callback exactly once.
@@ -350,6 +351,68 @@ async function epicJourney(vaultId) {
       `document.querySelector('[aria-label="Epic: Checkout v2"] .epic-toggle')?.getAttribute('aria-expanded') === 'false'`,
     );
     step("browser: a collapsed epic lane stays collapsed after reload", collapsed !== null);
+  } finally {
+    spawnSync("agent-browser", ["--session", "brainz-e2e-ui", "close"]);
+  }
+}
+
+async function featuresJourney() {
+  // Runs after epicJourney: checkout-epic (Checkout v2) ← pay-button ← "Epic
+  // feature task", plus the earlier domain-linked tasks.
+  const ft = await page("/v/ui-vault/features");
+  step("/v/ui-vault/features → 200", ft.status === 200, `status ${ft.status}`);
+  step(
+    "features SSR: the tree renders nodes with a roll-up state",
+    ft.html.includes('aria-label="Feature tree"') && /data-state="(not-started|in-progress|done|blocked|empty)"/.test(ft.html),
+  );
+  step("features SSR: tasks-done count and links to the other views", /\d+\/\d+ tasks done/.test(ft.html) && ft.html.includes("/v/ui-vault/board"));
+  const ws = await page("/v/ui-vault");
+  step("workspace links to the features tab", ws.html.includes("/v/ui-vault/features"));
+  // "Show on board" lands on the epic board narrowed to the node's closure.
+  const scoped = await page("/v/ui-vault/board?group=epic&scope=pay-button");
+  step(
+    "board ?scope= narrows to the subtree (closure)",
+    scoped.status === 200 && scoped.html.includes('data-scope="pay-button"') && scoped.html.includes("Epic feature task") && !scoped.html.includes("Ship the board"),
+    `status ${scoped.status}`,
+  );
+
+  if (!hasAgentBrowser()) {
+    console.log("  [SKIP] browser features tree (agent-browser not on PATH, or E2E_UI_BROWSER=0)");
+    return;
+  }
+  try {
+    const base = new URL(BASE);
+    for (const [name, value] of jar) agentBrowser(["cookies", "set", name, value, "--url", `${base.origin}/`]);
+    agentBrowser(["open", `${BASE}/v/ui-vault/features`]);
+    // Controls are disabled until hydrated: wait for the marker, never a sleep.
+    const ready = await browserUntil(`document.querySelector('.ft-page')?.dataset.hydrated === 'true'`);
+    step("browser: the features tree hydrates", ready !== null);
+    if (process.env.E2E_UI_SCREENSHOT) {
+      agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-features.png")]);
+    }
+    // Collapse to the roots and frame them, then open one epic.
+    agentBrowser(["eval", `[...document.querySelectorAll('.controls .chip')].find((b) => b.textContent.trim() === 'Collapse all').click()`]);
+    agentBrowser(["eval", `[...document.querySelectorAll('.controls .chip')].find((b) => b.textContent.trim() === 'Fit').click()`]);
+    const root = await browserUntil(
+      `!document.querySelector('[data-id="pay-button"]') && !!document.querySelector('[data-id="checkout-epic"]')`,
+    );
+    step("browser: Collapse all leaves the roots (the epic is one)", root !== null);
+    agentBrowser(["click", '[data-id="checkout-epic"] .toggle']);
+    const opened = await browserUntil(`!!document.querySelector('[data-id="pay-button"]')`);
+    step("browser: expanding the epic reveals its feature", opened !== null);
+    agentBrowser(["click", '[data-id="checkout-epic"]']);
+    const link = await browserUntil(`document.querySelector('.panel-actions a')?.getAttribute('href') ?? ''`);
+    step(
+      "browser: clicking a node opens the panel with Show on board",
+      Boolean(link?.includes("/v/ui-vault/board?group=epic&scope=checkout-epic")),
+      link ?? "(timed out)",
+    );
+    if (process.env.E2E_UI_SCREENSHOT) {
+      agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-features-panel.png")]);
+    }
+    agentBrowser(["eval", `document.querySelector('.panel-actions a').click()`]);
+    const chip = await browserUntil(`document.querySelector('.scope-chip')?.dataset.scope ?? ''`);
+    step("browser: Show on board opens the board scoped to the node", chip === "checkout-epic", chip ?? "(timed out)");
   } finally {
     spawnSync("agent-browser", ["--session", "brainz-e2e-ui", "close"]);
   }
@@ -908,6 +971,10 @@ async function main() {
     // 6d. Epics: the epic type, create_task's epic, the epic-grouped board
     // (lanes with status columns + roll-up), re-parenting, burndown scope.
     await epicJourney(vault.id);
+
+    // 6e. Feature tree: /v/[slug]/features over the same epics and tasks,
+    // and the board's ?scope= subtree filter behind "Show on board".
+    await featuresJourney();
 
     // Dashboard shows the open-task chip now that a task exists.
     const dash2 = await page("/dashboard");

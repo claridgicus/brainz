@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { safeNextPath } from "./nav";
+import { safeNextPath, vaultTabLinks } from "./nav";
 
 describe("safeNextPath", () => {
   it("accepts same-origin relative paths", () => {
@@ -10,5 +10,16 @@ describe("safeNextPath", () => {
     expect(safeNextPath("https://evil.example")).toBe("/dashboard");
     expect(safeNextPath("//evil.example")).toBe("/dashboard");
     expect(safeNextPath("/\\evil.example")).toBe("/dashboard");
+  });
+});
+
+describe("vaultTabLinks", () => {
+  it("links every other workspace view, Features next to Board and Burndown", () => {
+    expect(vaultTabLinks("acme", "graph")).toEqual([
+      { href: "/v/acme/board", label: "Board" },
+      { href: "/v/acme/features", label: "Features" },
+      { href: "/v/acme/burndown", label: "Burndown" },
+    ]);
+    expect(vaultTabLinks("acme", "features").map((l) => l.label)).toEqual(["Graph", "Board", "Burndown"]);
   });
 });

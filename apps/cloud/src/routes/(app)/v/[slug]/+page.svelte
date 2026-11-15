@@ -4,6 +4,7 @@
 	import type { ApiConcept, ConceptTypeEntry, GraphNode, GraphPayload } from "@brainz/contracts";
 	import { ApiError, createApi, roleOf, type UpsertConceptBody, type VaultStats } from "$lib/api";
 	import { colorForType, typeColorsFromRegistry } from "$lib/graph-data";
+	import { vaultTabLinks } from "$lib/nav";
 	import {
 		defaultVisibleTypes,
 		filterModeStorageKey,
@@ -267,8 +268,9 @@
 	<div class="toolbar">
 		<div class="left">
 			<h1>{vault.name}</h1>
-			<a class="btn btn-ghost btn-sm" href="/v/{vault.slug}/board">Board</a>
-			<a class="btn btn-ghost btn-sm" href="/v/{vault.slug}/burndown">Burndown</a>
+			{#each vaultTabLinks(vault.slug, "graph") as link (link.href)}
+				<a class="btn btn-ghost btn-sm" href={link.href}>{link.label}</a>
+			{/each}
 			<a class="btn btn-ghost btn-sm" href="/v/{vault.slug}/settings">Settings</a>
 		</div>
 

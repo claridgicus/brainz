@@ -7,6 +7,7 @@
 	import type { ApiConcept, GraphNode, GraphPayload, TaskMeta } from "@brainz/contracts";
 	import { ApiError, createApi, roleOf } from "$lib/api";
 	import { TYPE_COLORS } from "$lib/graph-data";
+	import { vaultTabLinks } from "$lib/nav";
 	import ConceptPanel from "$lib/components/ConceptPanel.svelte";
 	import Mark from "$lib/components/Mark.svelte";
 	import { onMount } from "svelte";
@@ -26,6 +27,7 @@
 		nearestEpicOf,
 		parseCollapsed,
 		planEpicReparent,
+		scopeTasks,
 		serializeCollapsed,
 		statusOf as laneStatusOf,
 		titleForIn,
@@ -65,9 +67,19 @@
 	let groupBy = $state<GroupBy>(
 		GROUPS.find(([g]) => g === data.group)?.[0] ?? "status",
 	);
-	const lanes = $derived.by((): Lane[] => computeLanes(tasks, graph, groupBy));
+	// `?scope=<id>` (the feature tree's "Show on board") narrows the board to
+	// that concept's subtree; moves still act on the full pile.
+	const scope = $derived(data.scope ?? null);
+	const shown = $derived.by((): TaskMeta[] => scopeTasks(tasks, graph, scope));
+	const lanes = $derived.by((): Lane[] => computeLanes(shown, graph, groupBy));
+	// Scoped, empty epic lanes outside the subtree are noise: keep the lanes
+	// with tasks (and the scope's own lane, if it is an epic).
 	const epicLanes = $derived.by((): EpicLane[] =>
-		groupBy === "epic" ? computeEpicLanes(tasks, graph) : [],
+		groupBy === "epic"
+			? computeEpicLanes(shown, graph).filter(
+					(l) => !scope || l.rollup.total > 0 || l.id === scope,
+				)
+			: [],
 	);
 
 	// Collapsed epic lanes, remembered per vault in this browser (a per-viewer
@@ -459,9 +471,16 @@
 	<div class="toolbar">
 		<div class="left">
 			<h1>{vault.name} · Board</h1>
-			<a class="btn btn-ghost btn-sm" href="/v/{vault.slug}">Graph</a>
-			<a class="btn btn-ghost btn-sm" href="/v/{vault.slug}/burndown">Burndown</a>
+			{#each vaultTabLinks(vault.slug, "board") as link (link.href)}
+				<a class="btn btn-ghost btn-sm" href={link.href}>{link.label}</a>
+			{/each}
 		</div>
+		{#if scope}
+			<span class="scope-chip" data-scope={scope}>
+				Showing <strong>{titleFor(scope)}</strong>
+				<a href="/v/{vault.slug}/board?group={groupBy}" aria-label="Show the whole board">✕</a>
+			</span>
+		{/if}
 		<div class="group-control" role="group" aria-label="Group by">
 			<span class="glabel">Group by</span>
 			{#each GROUPS as [val, label] (val)}
@@ -477,7 +496,7 @@
 			{/each}
 		</div>
 		<div class="right">
-			<span class="count">{tasks.length} {tasks.length === 1 ? "task" : "tasks"}</span>
+			<span class="count">{shown.length} {shown.length === 1 ? "task" : "tasks"}</span>
 			<span class="live" class:on={polling} title="Live — polling every 4s">● live</span>
 		</div>
 	</div>
@@ -671,6 +690,27 @@
 	}
 	.live {
 		color: var(--text-dim);
+	}
+	.scope-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 3px 8px 3px 10px;
+		border: 1px solid var(--border-strong);
+		border-radius: 999px;
+		font-size: 12px;
+		color: var(--text-dim);
+	}
+	.scope-chip strong {
+		color: var(--text);
+		font-weight: 600;
+	}
+	.scope-chip a {
+		color: var(--text-dim);
+		text-decoration: none;
+	}
+	.scope-chip a:hover {
+		color: var(--text);
 	}
 	.live.on {
 		color: #34d399;

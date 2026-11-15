@@ -13,6 +13,7 @@ import {
 	parseCollapsed,
 	planEpicReparent,
 	priorityOf,
+	scopeTasks,
 	serializeCollapsed,
 	statusOf,
 	toggleCollapsed,
@@ -297,5 +298,25 @@ describe("hasTaskMiss / collapsed lanes", () => {
 		expect(parseCollapsed('[1,"a"]')).toEqual(new Set(["a"]));
 		expect(parseCollapsed(null)).toEqual(new Set());
 		expect(collapsedStorageKey("v1")).toBe("brainz:board:epic-collapsed:v1");
+	});
+});
+
+describe("scopeTasks", () => {
+	it("keeps the tasks in the scope's closure, or all without a scope", () => {
+		const graph: GraphPayload = {
+			nodes: [],
+			edges: [
+				{ from: "feat", to: "epic-a", relation: "part_of" },
+				{ from: "t1", to: "feat", relation: "realizes" },
+				{ from: "t2", to: "epic-a", relation: "part_of" },
+				{ from: "t3", to: "other", relation: "part_of" },
+			],
+		};
+		const pile = ["t1", "t2", "t3"].map(
+			(id) => ({ id, title: id, type: "task", status: "active", tags: [] }) as unknown as TaskMeta,
+		);
+		expect(scopeTasks(pile, graph, "epic-a").map((t) => t.id)).toEqual(["t1", "t2"]);
+		expect(scopeTasks(pile, graph, "feat").map((t) => t.id)).toEqual(["t1"]);
+		expect(scopeTasks(pile, graph, null)).toHaveLength(3);
 	});
 });

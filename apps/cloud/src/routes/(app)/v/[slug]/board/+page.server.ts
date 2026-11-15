@@ -11,5 +11,7 @@ export const load: PageServerLoad = async ({ fetch, parent, url }) => {
   const [tasks, graph] = await Promise.all([api.listTasks(vault.id), api.graph(vault.id)]);
   // `?group=epic|concept|priority|takenBy|status` picks the initial grouping
   // (the page ignores anything else), so other views can link to a grouped board.
-  return { tasks, graph, group: url.searchParams.get("group") };
+  // `?scope=<concept id>` narrows the board to that concept's subtree (its
+  // burndown closure), as the feature tree's "Show on board" links do.
+  return { tasks, graph, group: url.searchParams.get("group"), scope: url.searchParams.get("scope") };
 };

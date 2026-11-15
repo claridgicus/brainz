@@ -3,6 +3,7 @@
 // spec-board-grouping-client): the tasks endpoint returns one flat list and the
 // board derives lanes from the task set + the concept graph payload.
 import type { GraphPayload, TaskMeta } from "@brainz/contracts";
+import { scopeClosure } from "@brainz/engine";
 
 export const STATUSES = ["open", "taken", "done"] as const;
 export type Status = (typeof STATUSES)[number];
@@ -307,3 +308,21 @@ export function toggleCollapsed(set: ReadonlySet<string>, id: string): Set<strin
 }
 
 export const serializeCollapsed = (set: ReadonlySet<string>): string => JSON.stringify([...set].sort());
+
+// ------------------------------------------------------------------ scope
+// `?scope=<concept id>` narrows the board to one subtree (the feature tree's
+// "Show on board"): the tasks in the concept's burndown closure.
+
+/**
+ * The tasks inside `scope`'s closure (part_of/realizes, transitively, as
+ * burndown counts them). No scope returns the pile unchanged.
+ */
+export function scopeTasks(
+	tasks: readonly TaskMeta[],
+	graph: GraphPayload,
+	scope: string | null | undefined,
+): TaskMeta[] {
+	if (!scope) return [...tasks];
+	const members = scopeClosure(scope, graph.edges);
+	return tasks.filter((t) => members.has(t.id));
+}
