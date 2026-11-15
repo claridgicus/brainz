@@ -10,6 +10,8 @@
  *   5. marketing check  — scripts/check-build.mjs over the fresh build
  *   6. cloud E2E        — full backend journey vs wrangler dev (scripts/e2e.mjs)
  *   7. cloud UI E2E     — SSR dashboard journey vs wrangler dev (scripts/e2e-ui.mjs)
+ *   8. cloud graph E2E  — Graph.svelte on the bench harness in headless Chrome
+ *                         (scripts/e2e-graph.mjs; skipped when no Chrome)
  *
  * Any failing step exits non-zero and prints a summary. Steps run fail-fast:
  * later steps are reported as "skipped".
@@ -93,6 +95,14 @@ const FULL_STEPS = [
     cwd: cloudDir,
     // The build step above already produced .svelte-kit/cloudflare/_worker.js.
     env: { E2E_UI_SKIP_BUILD: "1" },
+  },
+  {
+    // The real Graph.svelte over synthetic vaults in headless Chrome (bench
+    // harness, no wrangler): clusters, LOD, bundling, ?focus= centring on a
+    // clustered vault. Skips itself when no Chrome is found.
+    name: "cloud graph E2E (bench harness)",
+    cmd: "npm",
+    args: ["run", "e2e:graph", "-w", "@brainz/cloud"],
   },
 ];
 

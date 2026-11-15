@@ -228,9 +228,11 @@
 	/** Centre on this node in place of the first fit (consumed once). */
 	let pendingCenter: string | null = startFocus;
 	/**
-	 * After that centring, the node to keep centred while the canvas changes
-	 * size (the parent opening its concept panel right after mount, a window
-	 * resize) — until the user pans, zooms or clicks.
+	 * The node to keep centred while the canvas changes size (the parent
+	 * opening its concept panel right after mount or after a search, a window
+	 * resize) — until the user pans, zooms or clicks. Set by every explicit
+	 * navigation (`panTo`: the initial `?focus=`, search, panel links, save), so
+	 * the latest one wins: an older target never pulls the view back.
 	 */
 	let centerHold: string | null = null;
 	/** If a centre is pending, pan to it (in place of the first fit). */
@@ -239,7 +241,6 @@
 		if (id === null) return false;
 		pendingCenter = null;
 		if (!posOf(id)) return false;
-		centerHold = id;
 		panTo(id);
 		return true;
 	}
@@ -1847,6 +1848,14 @@
 	/** Pan/zoom so `id` is centered (exported: parents call via bind:this). In the
 	 * clustered layout this also zooms far enough for its cluster to open. */
 	export function panTo(id: string): void {
+		// Explicit navigation retargets the hold (or drops it when `id` has no
+		// position), so a resize can't pan back to an older target.
+		centerHold = posOf(id) ? id : null;
+		centreOn(id);
+	}
+
+	/** Animate the view so `id` is centred; leaves the hold alone (resize re-centres). */
+	function centreOn(id: string): void {
 		const p = posOf(id);
 		if (!p) return;
 		const rect = svg.getBoundingClientRect();
@@ -1924,9 +1933,10 @@
 			resizeTimer = setTimeout(() => (mode === "flat" ? renderGraph() : scheduleLod()), 200);
 		};
 		window.addEventListener("resize", onResize);
-		// Keep an initially focused node centred while the canvas resizes (the
-		// workspace opens its panel just after mount). Any user pan/zoom/click
-		// releases it; capture so node handlers stopping propagation still count.
+		// Keep the last navigated-to node centred while the canvas resizes (the
+		// workspace opens its panel just after mount or a search). Any user
+		// pan/zoom/click releases it; capture so node handlers stopping
+		// propagation still count.
 		const release = (): void => {
 			centerHold = null;
 		};
@@ -1938,7 +1948,7 @@
 			const h = svg.clientHeight;
 			if (w === size.w && h === size.h) return;
 			size = { w, h };
-			if (centerHold !== null) panTo(centerHold);
+			if (centerHold !== null) centreOn(centerHold);
 		});
 		resizeObserver.observe(svg);
 		// Escape clears sticky focus (only when it's active — otherwise let other

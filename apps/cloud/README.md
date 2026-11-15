@@ -69,7 +69,8 @@ npm run e2e            # scripted journey against wrangler dev (see below)
 `npm run deploy` cannot proceed unless the monorepo's full test gate passes:
 the `predeploy` hook runs `node ../../scripts/test-all.mjs` (same as
 `npm run test:all` at the repo root) — typecheck, every unit suite,
-svelte-check, all builds, the backend E2E journey, and the UI E2E journey.
+svelte-check, all builds, the backend E2E journey, the UI E2E journey and
+the graph bench E2E (`npm run e2e:graph`).
 Any red step aborts the deploy. See `TESTING.md` at the repo root.
 
 ### Local dev notes

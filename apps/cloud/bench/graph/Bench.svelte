@@ -33,9 +33,14 @@
 	// Exposed for the drivers: select/pan like the search box does.
 	(window as unknown as { __bench: unknown }).__bench = {
 		graph: () => graph,
+		// The workspace's search: pan first, then select (which opens the panel).
 		select: (id: string) => {
-			selectedId = id;
 			graphRef?.panTo(id);
+			selectedId = id;
+		},
+		/** Close the panel (the workspace's panel close button). */
+		close: () => {
+			selectedId = null;
 		},
 		selected: () => selectedId,
 	};

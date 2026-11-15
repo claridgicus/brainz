@@ -257,6 +257,47 @@ try {
 	step("the focus vault uses the clustered layout", s2.mode === "tree", `mode=${s2.mode}`);
 	step("?focus= centres the focused node in the canvas left beside the panel", centred?.ok === true, `${focusId}: ${centred?.why}`);
 
+	console.log("search after ?focus= wins over the initial centre hold");
+	/** Distance of a node from the canvas centre, with the canvas width (null: not rendered). */
+	const offCentre = (id) =>
+		page.evaluate(`(() => {
+			const svg = ${SVG};
+			const g = svg?.querySelector('g.node[data-id="${id}"] circle.mark');
+			if (!svg || !g) return null;
+			const a = g.getBoundingClientRect(), b = svg.getBoundingClientRect();
+			return { off: Math.round(Math.hypot(a.x + a.width / 2 - (b.x + b.width / 2), a.y + a.height / 2 - (b.y + b.height / 2))), w: Math.round(b.width), panel: !!document.querySelector('.bench-panel') };
+		})()`);
+	/** Poll until `ok(sample)` holds (null on timeout). */
+	async function until(fn, ok, tries = 100) {
+		for (let i = 0; i < tries; i++) {
+			const v = await fn();
+			if (ok(v)) return v;
+			await sleep(100);
+		}
+		return null;
+	}
+	// Close the panel: the canvas widens and the hold keeps A centred in it.
+	await page.evaluate("window.__bench.close()");
+	const wideA = await until(() => offCentre(focusId), (v) => v !== null && !v.panel && v.w > 1300 && v.off < 30);
+	step("closing the panel widens the canvas and keeps A centred", wideA !== null);
+	// Search B: it pans to B and reopens the panel. That resize must re-centre
+	// B, not pull the view back to A.
+	const searchId = await page.evaluate(`window.__bench.graph().nodes.find((n, i) => i > 900 && n.type === "feature" && n.id !== ${JSON.stringify(focusId)})?.id ?? ""`);
+	await page.evaluate(`window.__bench.select(${JSON.stringify(searchId)})`);
+	const searched = await until(() => offCentre(searchId), (v) => v !== null && v.panel && v.w < 1100 && v.off < 30);
+	step("search pans to B and reopens the panel", searched !== null, searchId);
+	// Then it must stay there: B centred over 10 consecutive samples (well past
+	// a 380ms view animation), while A never comes back to the centre.
+	let streak = 0;
+	let last = null;
+	for (let i = 0; i < 60 && streak < 10; i++) {
+		const [b, a] = [await offCentre(searchId), await offCentre(focusId)];
+		last = { b, a };
+		streak = b !== null && b.off < 30 && !(a && a.off < 30) ? streak + 1 : 0;
+		await sleep(100);
+	}
+	step("B stays centred after the panel resize (no snap back to A)", streak >= 10, JSON.stringify(last));
+
 	step("no uncaught page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
 } finally {
 	await page.close();

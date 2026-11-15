@@ -20,7 +20,7 @@
     "db:migrate:remote": "wrangler d1 migrations apply brainz --remote",
     "test": "svelte-kit sync && vitest run",
     "e2e": "node scripts/e2e.mjs",
-    "e2e:graph": "node scripts/e2e-graph.mjs",
+    "e2e:graph": "svelte-kit sync && node scripts/e2e-graph.mjs",
     "perf:graph": "node scripts/graph-perf.mjs"
   },
   "dependencies": {
