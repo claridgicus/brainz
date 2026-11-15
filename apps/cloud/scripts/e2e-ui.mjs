@@ -369,11 +369,13 @@ async function featuresJourney() {
   const ws = await page("/v/ui-vault");
   step("workspace links to the features tab", ws.html.includes("/v/ui-vault/features"));
   // "Show on board" lands on the epic board narrowed to the node's closure.
+  // Card titles only: the hydration data still carries the whole pile.
   const scoped = await page("/v/ui-vault/board?group=epic&scope=pay-button");
+  const cards = [...scoped.html.matchAll(/<h3[^>]*>(.*?)<\/h3>/g)].map((m) => m[1].replace(/<!--.*?-->/g, "").trim());
   step(
     "board ?scope= narrows to the subtree (closure)",
-    scoped.status === 200 && scoped.html.includes('data-scope="pay-button"') && scoped.html.includes("Epic feature task") && !scoped.html.includes("Ship the board"),
-    `status ${scoped.status}`,
+    scoped.status === 200 && scoped.html.includes('data-scope="pay-button"') && cards.includes("Epic feature task") && !cards.includes("Ship the board"),
+    `status ${scoped.status} cards ${JSON.stringify(cards)}`,
   );
 
   if (!hasAgentBrowser()) {
