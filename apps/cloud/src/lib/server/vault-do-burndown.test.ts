@@ -333,7 +333,7 @@ describe("review regressions (VaultDO)", () => {
     // null clears just the iteration; a wrong type or unknown target is refused.
     await vault.setMembership({ id: "t", type: "iteration", target: null });
     expect((await storedEdges(vault, "t")).filter((e) => e.startsWith("part_of:"))).toEqual(["part_of:auth", "part_of:m1"]);
-    await expect(vault.setMembership({ id: "t", type: "iteration", target: "auth" })).rejects.toThrow(/not a iteration/);
+    expect(() => vault.setMembership({ id: "t", type: "iteration", target: "auth" })).toThrow(/not a iteration/);
     const res = await vault.fetch(
       new Request("https://vault-do/setMembership", {
         method: "POST",
@@ -341,6 +341,41 @@ describe("review regressions (VaultDO)", () => {
       }),
     );
     expect(res.status).toBe(404);
+  });
+
+  it("setMembership is atomic: a link added while the assignment is in flight survives", async () => {
+    // Re-review P1: the swap used to go through upsertConcept, which awaits
+    // hashing between reading the stored relations and writing them, so an
+    // agent's link landing in that window was overwritten.
+    const { vault } = await freshVault();
+    for (const [id, type] of [
+      ["auth", "domain"],
+      ["s1", "iteration"],
+      ["s2", "iteration"],
+    ] as const) {
+      await vault.upsertConcept({ id, title: id, body: "", type });
+    }
+    await vault.upsertConcept({ id: "t", title: "T", body: "", type: "task", relations: { part_of: ["s1"] } });
+
+    // Start the assignment, add a domain link before awaiting it, then await.
+    // (Called first and not awaited: the old code yielded inside the swap,
+    // so the link ran between its read and its write.)
+    const assignment = Promise.resolve(vault.setMembership({ id: "t", type: "iteration", target: "s2" }));
+    const linking = vault.link({ from: "t", to: "auth", relation: "part_of" });
+    await Promise.all([assignment, linking]);
+    expect((await storedEdges(vault, "t")).filter((e) => e.startsWith("part_of:"))).toEqual([
+      "part_of:auth",
+      "part_of:s2",
+    ]);
+
+    // And the other interleaving: the link first, the assignment in flight.
+    const linkFirst = vault.link({ from: "t", to: "s1", relation: "related_to" });
+    const reassign = Promise.resolve(vault.setMembership({ id: "t", type: "iteration", target: "s1" }));
+    await Promise.all([linkFirst, reassign]);
+    expect(await storedEdges(vault, "t")).toEqual(
+      expect.arrayContaining(["part_of:auth", "part_of:s1", "related_to:s1"]),
+    );
+    expect(await storedEdges(vault, "t")).not.toContain("part_of:s2");
   });
 
   it("deleting a task from before the history table keeps its rebuilt history", async () => {

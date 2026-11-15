@@ -702,7 +702,7 @@ export class VaultDO {
           return json(this.reopenTask(args as { id: string }));
         case "setMembership":
           return json(
-            await this.setMembership(
+            this.setMembership(
               args as { id: string; relation?: string; type: string; target: string | null },
             ),
           );
@@ -1283,12 +1283,12 @@ export class VaultDO {
    * so links added since the client last refreshed survive. Used by the
    * board's iteration picker and the burndown panel's milestone parent.
    */
-  async setMembership(args: {
+  setMembership(args: {
     id: string;
     relation?: string;
     type: string;
     target: string | null;
-  }): Promise<{ concept: WireConcept }> {
+  }): { concept: WireConcept } {
     const relation = args.relation ?? "part_of";
     if (relation !== "part_of" && relation !== "realizes") {
       throw new Error(`membership relation must be part_of or realizes, not "${relation}"`);
@@ -1303,12 +1303,29 @@ export class VaultDO {
       }
       if (args.target === args.id) throw new Error("a concept cannot be its own container");
     }
+    // Read-modify-write with NO await from the read to the write: a DO runs
+    // one synchronous section at a time, so no other request (an agent's
+    // link_concepts, another upsert) can interleave and have its change
+    // overwritten. Title and body are unchanged, so the stored content hash,
+    // FTS row and embedding stay valid: only relations, edges and history move.
     const relations = JSON.parse(row.relations_json) as Record<string, string[]>;
     const kept = (relations[relation] ?? []).filter((t) => this.#getRow(t)?.type !== args.type);
     if (args.target && !kept.includes(args.target)) kept.push(args.target);
     if (kept.length > 0) relations[relation] = kept;
     else delete relations[relation];
-    return this.upsertConcept({ id: row.id, title: row.title, body: row.body, relations });
+    const before = this.#taskState(row.id);
+    const at = new Date().toISOString();
+    this.#sql.exec(
+      `UPDATE concept SET relations_json = ?, updated_at = ? WHERE id = ?`,
+      JSON.stringify(relations),
+      at,
+      row.id,
+    );
+    this.#rebuildEdges(row.id, relations, row.body);
+    this.#recordTaskDiff(before, this.#taskState(row.id), at);
+    const saved = this.#getRow(row.id);
+    if (!saved) throw new Error(`failed to update concept: ${row.id}`);
+    return { concept: this.#rowToWire(saved) };
   }
 
   /** Reopen a task: back to open, clear takenBy/takenAt (board "move to Open"). */
