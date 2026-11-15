@@ -435,13 +435,24 @@ async function dreamingJourney(vaultId, settingsHtml) {
     const base = new URL(BASE);
     for (const [name, value] of jar) agentBrowser(["cookies", "set", name, value, "--url", `${base.origin}/`]);
     agentBrowser(["open", `${BASE}/v/ui-vault/settings`]);
-    agentBrowser(["wait", '[data-testid="vault-dreaming"] select[aria-label="Dreaming mode"]']);
-    const shown = agentBrowser(["eval", `document.querySelector('select[aria-label="Dreaming mode"]').value`]).replace(/"/g, "");
+    // Wait on conditions (hydration, then the stored outcome) against a
+    // deadline, never a fixed wait: under load hydration lands late, and a
+    // select/submit before it is dropped.
+    const hydrated = await browserUntil(
+      `document.querySelector('main.page')?.dataset.hydrated === 'true' && !document.querySelector('[data-testid="vault-dreaming"] button[type="submit"]')?.disabled`,
+    );
+    step("browser: the settings page hydrates (dreaming save enabled)", hydrated !== null);
+    const shown = (await browserUntil(`document.querySelector('select[aria-label="Dreaming mode"]')?.value ?? ''`)) ?? "";
     step("browser: the card shows the saved mode", shown === "propose", shown);
     agentBrowser(["select", 'select[aria-label="Dreaming mode"]', "light-only"]);
     agentBrowser(["click", '[data-testid="vault-dreaming"] button[type="submit"]']);
-    agentBrowser(["wait", '[data-testid="vault-dreaming"] .ok-text']);
-    const after = await api("GET", `/api/vaults/${vaultId}/dreaming`);
+    let after = { status: 0, json: null };
+    const savedDeadline = Date.now() + BROWSER_DEADLINE_MS;
+    while (Date.now() < savedDeadline) {
+      after = await api("GET", `/api/vaults/${vaultId}/dreaming`);
+      if (after.json?.status?.settings?.mode === "light-only") break;
+      await sleep(500);
+    }
     step(
       "browser: saving the card persists the mode (other settings kept)",
       after.json?.status?.settings?.mode === "light-only" && after.json?.status?.settings?.caps?.maxLinks === 4,
@@ -586,7 +597,8 @@ async function consentJourney() {
     agentBrowser(["set", "viewport", "480", "1100"]);
     agentBrowser(["open", `${BASE}/oauth/authorize?${authorizeQs("ui-browser")}`]);
     // The search box is server-rendered hidden; it shows once the page hydrates.
-    agentBrowser(["wait", ".search:not([hidden]) #vault-search"]);
+    // Poll for it against the long deadline (agent-browser's own wait caps at 25s).
+    await browserUntil(`!!document.querySelector(".search:not([hidden]) #vault-search")`);
     const visibleRows = () => Number(agentBrowser(["eval", `document.querySelectorAll("#vault-options .vault:not([hidden])").length`]));
     const chips = () => agentBrowser(["eval", `[...document.querySelectorAll(".chip")].map((c) => c.getAttribute("aria-label")).join("|")`]).replace(/^"|"$/g, "");
     step("browser: the search box shows once hydrated", agentBrowser(["is", "visible", "#vault-search"]).includes("true"));
@@ -619,9 +631,10 @@ async function consentJourney() {
       `localStorage.setItem("e2eSubmits", "0"); addEventListener("submit", (e) => { if (!e.defaultPrevented) localStorage.setItem("e2eSubmits", String(Number(localStorage.getItem("e2eSubmits")) + 1)); }); 1`,
     ]);
     agentBrowser(["dblclick", 'button[form="consent-approve"]']);
-    const deadline = Date.now() + 10_000;
-    while (callbacks.hits.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
-    await new Promise((r) => setTimeout(r, 1500));
+    const deadline = Date.now() + BROWSER_DEADLINE_MS;
+    while (callbacks.hits.length === 0 && Date.now() < deadline) await sleep(100);
+    // Then a short quiet window: a second (duplicate) callback would land here.
+    await sleep(1500);
     step(
       "browser: a double-clicked Allow reaches the callback exactly once",
       callbacks.hits.length === 1,

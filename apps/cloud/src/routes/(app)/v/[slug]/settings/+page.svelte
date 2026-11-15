@@ -13,11 +13,21 @@
 	import { ApiError, createApi, roleOf } from "$lib/api";
 	import CopyButton from "$lib/components/CopyButton.svelte";
 	import Modal from "$lib/components/Modal.svelte";
+	import { onMount } from "svelte";
 
 	let { data } = $props();
 	const api = createApi(fetch);
 	const vault = $derived(data.vault);
 	const role = $derived(roleOf(data.vault));
+
+	// The dreaming card's submit is enabled in the server-rendered HTML (unlike
+	// the other forms, whose inputs start empty or unchanged), so a save before
+	// hydration would be a native GET that drops the change. It stays disabled
+	// until hydrated; `data-hydrated` on the root marks the moment.
+	let hydrated = $state(false);
+	onMount(() => {
+		hydrated = true;
+	});
 	const isOwner = $derived(role === "owner");
 	const me = $derived(data.user.id);
 
@@ -522,7 +532,7 @@
 
 <svelte:head><title>Settings · {vault.name} — Brainz</title></svelte:head>
 
-<main class="page">
+<main class="page" data-hydrated={hydrated ? "true" : "false"}>
 	<nav class="crumbs">
 		<a href="/v/{vault.slug}">← {vault.name}</a>
 	</nav>
@@ -1136,7 +1146,7 @@
 				</fieldset>
 				{#if canEditDreaming}
 					<div class="row">
-						<button type="submit" class="btn btn-primary" disabled={dreamSaving}>
+						<button type="submit" class="btn btn-primary" disabled={!hydrated || dreamSaving}>
 							{#if dreamSaving}<span class="spinner"></span>{/if}
 							Save dreaming settings
 						</button>
