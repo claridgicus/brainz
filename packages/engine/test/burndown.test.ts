@@ -5,6 +5,7 @@ import {
   computeBurndown,
   diffTaskEvents,
   missingTaskHistory,
+  nearestContainer,
   scopeClosure,
   taskSnapshot,
   type BurndownConcept,
@@ -364,6 +365,22 @@ describe("computeBurndown", () => {
       { from: "b", to: "a", relation: "realizes" },
     ];
     expect([...scopeClosure("a", loop)].sort()).toEqual(["a", "b"]);
+  });
+
+  it("finds the nearest container outward: fewest hops, part_of first, cycle-safe", () => {
+    const edges: Edge[] = [
+      { from: "t", to: "f", relation: "realizes" },
+      { from: "t", to: "e1", relation: "part_of" },
+      { from: "f", to: "e2", relation: "part_of" },
+      { from: "x", to: "y", relation: "part_of" },
+      { from: "y", to: "x", relation: "realizes" },
+    ];
+    const epics = new Set(["e1", "e2"]);
+    expect(nearestContainer("t", edges, (id) => epics.has(id))).toBe("e1");
+    // Without the direct edge, the epic inherited through the feature remains.
+    const inherited = edges.filter((e) => e.to !== "e1");
+    expect(nearestContainer("t", inherited, (id) => epics.has(id))).toBe("e2");
+    expect(nearestContainer("x", edges, (id) => epics.has(id))).toBeUndefined();
   });
 });
 

@@ -199,10 +199,16 @@ export const conceptUpsertRequestSchema = upsertConceptInputSchema;
  * iteration's milestone). The server drops the `relation` targets whose
  * concept has `type`, adds `target` (null = none) and keeps every other
  * relation as stored. Response: the updated concept (apiConceptSchema).
+ *
+ * `relation: "any"` replaces every container of `type` the concept points at
+ * through part_of OR realizes, and adds `target` as a part_of (the epic
+ * board's re-parent). With `target: null` the server refuses (409, naming it)
+ * when a container of `type` would still be inherited through another
+ * part_of/realizes path, so "none" never silently means "another one".
  */
 export const conceptMembershipRequestSchema = z
   .object({
-    relation: z.enum(["part_of", "realizes"]).optional(),
+    relation: z.enum(["part_of", "realizes", "any"]).optional(),
     type: z.string().min(1),
     target: z.string().min(1).nullable(),
   })

@@ -52,7 +52,10 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "25"', () => {
+  it('is "26"', () => {
+    // 26: conceptMembershipRequestSchema `relation` gains "any" (replace the
+    //     containers of a type across part_of AND realizes; "No epic" refused
+    //     while an inherited one remains). Additive.
     // 25: epics — built-in type `epic` (the 14th); create_task gains an
     //     optional `epic` id (another part_of edge). Additive.
     // 24: burndown — new `burndown` MCP tool (burndownInputSchema +
@@ -109,7 +112,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("25");
+    expect(CONTRACTS_VERSION).toBe("26");
   });
 });
 

@@ -92,7 +92,7 @@ export interface VaultClient {
   }>;
   setMembership(args: {
     id: string;
-    relation?: "part_of" | "realizes";
+    relation?: "part_of" | "realizes" | "any";
     type: string;
     target: string | null;
   }): Promise<{ concept: WireConcept }>;

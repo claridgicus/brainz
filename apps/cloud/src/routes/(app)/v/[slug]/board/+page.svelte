@@ -250,10 +250,12 @@
 			.filter((n) => n.type === "epic" && !n.pending)
 			.sort((a, b) => a.title.localeCompare(b.title)),
 	);
-	// Dropping a card on another epic's lane re-parents it. Each swap is one
-	// atomic server-side membership change (POST /concepts/:id/membership,
-	// type "epic") computed from the STORED relations, never rebuilt from this
-	// page's cached graph; planEpicReparent only picks which swaps to ask for.
+	// Dropping a card on another epic's lane re-parents it in ONE atomic
+	// server-side membership change (POST /concepts/:id/membership, relation
+	// "any", type "epic"): the server drops every epic link it has STORED and
+	// refuses "No epic" (409) while an epic is still inherited, so a link an
+	// agent added since this page fetched its graph can't be left behind.
+	// planEpicReparent refuses the same case from the cached graph first.
 	/** Resolves true when the task is now in the target epic lane. */
 	async function moveToEpic(task: TaskMeta, target: string | null): Promise<boolean> {
 		if (!canEdit) return false;
@@ -263,25 +265,19 @@
 			error = plan.reason;
 			return false;
 		}
-		if (plan.calls.length === 0) return true;
+		if (!plan.call) return true;
 		busyId = task.id;
 		error = null;
 		const snapshot = graph;
 		graph = withEpicReparent(graph, task.id, target, epics);
 		try {
-			for (const call of plan.calls) {
-				await api.setMembership(vault.id, task.id, {
-					relation: call.relation,
-					type: "epic",
-					target: call.target,
-				});
-			}
+			await api.setMembership(vault.id, task.id, { ...plan.call, type: "epic" });
 			void refreshGraph();
 			return true;
 		} catch (err) {
-			graph = snapshot; // roll back
+			graph = snapshot; // roll back: the server wrote nothing
 			error = err instanceof ApiError ? err.message : "Could not move the task to that epic.";
-			void refreshGraph(); // the first swap may have landed
+			void refreshGraph(); // the stored links may differ from this page's graph
 			return false;
 		} finally {
 			busyId = null;

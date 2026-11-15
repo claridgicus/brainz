@@ -139,4 +139,43 @@ describe("VaultDO epic re-parent (board drag to another epic lane)", () => {
     expect(await edgesOf(vault, "t")).toEqual(["part_of:auth"]);
     expect(() => vault.setMembership({ id: "t", type: "epic", target: "auth" })).toThrow(/not a epic/);
   });
+
+  it('relation "any" clears a realizes epic the board never saw (stale graph) when moving', async () => {
+    const vault = await seeded();
+    // An agent adds `realizes: e3` after the board loaded the task in e1.
+    await vault.upsertConcept({ id: "e3", title: "Epic 3", body: "", type: "epic" });
+    await vault.link({ from: "t", to: "e3", relation: "realizes" });
+    vault.setMembership({ id: "t", relation: "any", type: "epic", target: "e2" });
+    expect(await edgesOf(vault, "t")).toEqual(["part_of:auth", "part_of:e2"]);
+    // ...and "No epic" clears every stored epic link too.
+    await vault.link({ from: "t", to: "e3", relation: "realizes" });
+    vault.setMembership({ id: "t", relation: "any", type: "epic", target: null });
+    expect(await edgesOf(vault, "t")).toEqual(["part_of:auth"]);
+  });
+
+  it('relation "any" refuses No epic (409, naming it, nothing written) while an epic is inherited', async () => {
+    const vault = await seeded();
+    // t is directly in e1 AND realizes a feature that is part_of e2.
+    await vault.upsertConcept({
+      id: "pay",
+      title: "Pay button",
+      body: "",
+      type: "feature",
+      relations: { part_of: ["e2"] },
+    });
+    await vault.link({ from: "t", to: "pay", relation: "realizes" });
+    const before = await edgesOf(vault, "t");
+    const res = await vault.fetch(
+      new Request("https://vault-do/setMembership", {
+        method: "POST",
+        body: JSON.stringify({ id: "t", relation: "any", type: "epic", target: null }),
+      }),
+    );
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain('"Epic 2" (e2)');
+    expect(await edgesOf(vault, "t")).toEqual(before);
+    // Moving to another epic is still fine: the direct part_of is nearer.
+    vault.setMembership({ id: "t", relation: "any", type: "epic", target: "e1" });
+    expect(await edgesOf(vault, "t")).toEqual(["part_of:auth", "part_of:e1", "realizes:pay"]);
+  });
 });

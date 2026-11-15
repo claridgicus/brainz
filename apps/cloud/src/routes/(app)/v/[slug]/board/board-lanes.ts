@@ -3,7 +3,7 @@
 // spec-board-grouping-client): the tasks endpoint returns one flat list and the
 // board derives lanes from the task set + the concept graph payload.
 import type { GraphPayload, TaskMeta } from "@brainz/contracts";
-import { scopeClosure } from "@brainz/engine";
+import { nearestContainer, scopeClosure } from "@brainz/engine";
 
 export const STATUSES = ["open", "taken", "done"] as const;
 export type Status = (typeof STATUSES)[number];
@@ -106,10 +106,6 @@ export function hasLaneMiss(tasks: TaskMeta[], graph: GraphPayload): boolean {
 /** Lane id of the "No epic" swimlane (not a valid slug, so never an epic id). */
 export const NO_EPIC = "_none";
 export const NO_EPIC_LABEL = "No epic";
-/** Relations that put a concept inside a container (mirrors engine MEMBERSHIP_RELATIONS). */
-const MEMBERSHIP = ["part_of", "realizes"] as const;
-/** Hop cap, as engine scopeClosure. */
-const MAX_HOPS = 6;
 
 /** Ids of the real (non-pending) epic concepts in the graph. */
 export function epicIdsIn(graph: GraphPayload): Set<string> {
@@ -119,7 +115,7 @@ export function epicIdsIn(graph: GraphPayload): Set<string> {
 /**
  * A concept's nearest epic: breadth-first over its outgoing part_of/realizes
  * edges (part_of before realizes, then edge order, at each hop), cycle-safe,
- * at most {@link MAX_HOPS} hops. Undefined when no epic is reachable.
+ * at most 6 hops (engine `nearestContainer`). Undefined when no epic is reachable.
  */
 export function nearestEpicOf(
 	graph: GraphPayload,
@@ -127,30 +123,7 @@ export function nearestEpicOf(
 	epics: Set<string> = epicIdsIn(graph),
 ): string | undefined {
 	if (epics.size === 0) return undefined;
-	const out = new Map<string, string[]>();
-	for (const rel of MEMBERSHIP) {
-		for (const e of graph.edges) {
-			if (e.relation !== rel) continue;
-			const list = out.get(e.from);
-			if (list) list.push(e.to);
-			else out.set(e.from, [e.to]);
-		}
-	}
-	const seen = new Set([id]);
-	let frontier = [id];
-	for (let hop = 0; hop < MAX_HOPS && frontier.length > 0; hop++) {
-		const next: string[] = [];
-		for (const from of frontier) {
-			for (const to of out.get(from) ?? []) {
-				if (seen.has(to)) continue;
-				if (epics.has(to)) return to;
-				seen.add(to);
-				next.push(to);
-			}
-		}
-		frontier = next;
-	}
-	return undefined;
+	return nearestContainer(id, graph.edges, (to) => epics.has(to));
 }
 
 /** Progress roll-up for one epic lane. */
@@ -209,19 +182,23 @@ export function computeEpicLanes(tasks: readonly TaskMeta[], graph: GraphPayload
 	return lanes;
 }
 
-/** The membership calls that move a task to another epic lane. */
+/**
+ * The membership call that moves a task to another epic lane (null = it is
+ * already there), or why the move is refused.
+ */
 export type EpicReparent =
-	| { ok: true; calls: { relation: "part_of" | "realizes"; target: string | null }[] }
+	| { ok: true; call: { relation: "any"; target: string | null } | null }
 	| { ok: false; reason: string };
 
 /**
  * Plan a drag of `taskId` onto the `target` epic lane (null = "No epic").
- * The server does each swap atomically from stored relations
- * (POST /concepts/:id/membership, type "epic"); this only decides which:
- * part_of is set to the target, and a direct `realizes` edge to an epic is
- * cleared so the task cannot keep a second, equally near epic. Dropping on
- * "No epic" is refused when the epic is inherited through a feature: the task
- * has no epic edge of its own to remove.
+ * The move is ONE atomic call (POST /concepts/:id/membership, relation "any",
+ * type "epic"): the server drops every direct part_of/realizes epic link it
+ * has STORED, links (part_of) the target, and refuses "No epic" with a 409
+ * when an epic would still be inherited. This board-side check is the same
+ * refusal from the cached graph, so the common case answers without a round
+ * trip: dropping on "No epic" is refused while the task would still reach an
+ * epic through another path (a feature it realizes, say), naming that epic.
  */
 export function planEpicReparent(
 	graph: GraphPayload,
@@ -230,19 +207,17 @@ export function planEpicReparent(
 	epics: Set<string> = epicIdsIn(graph),
 ): EpicReparent {
 	const current = nearestEpicOf(graph, taskId, epics) ?? null;
-	if (current === target) return { ok: true, calls: [] };
-	const direct = (rel: string) =>
-		graph.edges.some((e) => e.from === taskId && e.relation === rel && epics.has(e.to));
-	if (target === null && !direct("part_of") && !direct("realizes")) {
-		return {
-			ok: false,
-			reason: `This task is in "${titleForIn(graph, current!)}" through a parent concept; unlink that parent to remove it.`,
-		};
+	if (current === target) return { ok: true, call: null };
+	if (target === null) {
+		const remaining = nearestEpicOf(withEpicReparent(graph, taskId, null, epics), taskId, epics);
+		if (remaining) {
+			return {
+				ok: false,
+				reason: `This task is still in "${titleForIn(graph, remaining)}" through a parent concept; unlink that parent to remove it.`,
+			};
+		}
 	}
-	const calls: { relation: "part_of" | "realizes"; target: string | null }[] = [];
-	if (target !== null || direct("part_of")) calls.push({ relation: "part_of", target });
-	if (direct("realizes")) calls.push({ relation: "realizes", target: null });
-	return { ok: true, calls };
+	return { ok: true, call: { relation: "any", target } };
 }
 
 /**

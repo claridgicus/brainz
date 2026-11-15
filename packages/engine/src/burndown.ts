@@ -640,6 +640,43 @@ export function scopeClosure(scope: string, edges: readonly Edge[]): Set<string>
   return seen;
 }
 
+/**
+ * A concept's nearest container: the first concept satisfying `isContainer`
+ * reached breadth-first over `id`'s outgoing part_of/realizes edges (part_of
+ * targets before realizes, then edge order, at each hop), cycle-safe, at most
+ * 6 hops: the closure walked outward. A task's nearest epic (SPEC.md "Epics").
+ */
+export function nearestContainer(
+  id: string,
+  edges: readonly Edge[],
+  isContainer: (id: string) => boolean,
+): string | undefined {
+  const out = new Map<string, string[]>();
+  for (const rel of MEMBERSHIP_RELATIONS) {
+    for (const e of edges) {
+      if (e.relation !== rel) continue;
+      const list = out.get(e.from);
+      if (list) list.push(e.to);
+      else out.set(e.from, [e.to]);
+    }
+  }
+  const seen = new Set<string>([id]);
+  let frontier = [id];
+  for (let hop = 0; hop < 6 && frontier.length > 0; hop++) {
+    const next: string[] = [];
+    for (const from of frontier) {
+      for (const to of out.get(from) ?? []) {
+        if (seen.has(to)) continue;
+        if (isContainer(to)) return to;
+        seen.add(to);
+        next.push(to);
+      }
+    }
+    frontier = next;
+  }
+  return undefined;
+}
+
 /** Compute burndown metrics for one scope and window (SPEC.md "Metrics"). */
 export function computeBurndown(input: BurndownInput): BurndownResult {
   const nowMs = typeof input.now === "string" ? Date.parse(input.now) : input.now.getTime();

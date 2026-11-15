@@ -29,7 +29,9 @@ import {
   BurndownInputError,
   computeBurndown,
   diffTaskEvents,
+  MEMBERSHIP_RELATIONS,
   missingTaskHistory,
+  nearestContainer,
   normalizeDay,
   normalizeEstimate,
   taskSnapshot,
@@ -224,6 +226,8 @@ interface ConceptRow {
 }
 
 class NotFoundError extends Error {}
+/** A write refused because of the vault's current state (409). */
+class ConflictError extends Error {}
 
 /** A task's burndown state before/after a write (see #taskState). */
 interface TaskState {
@@ -800,6 +804,7 @@ export class VaultDO {
       }
     } catch (err) {
       if (err instanceof NotFoundError) return json({ error: err.message }, 404);
+      if (err instanceof ConflictError) return json({ error: err.message }, 409);
       return json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
   }
@@ -1301,6 +1306,12 @@ export class VaultDO {
    * this one, is read from storage here, never from a client's cached graph,
    * so links added since the client last refreshed survive. Used by the
    * board's iteration picker and the burndown panel's milestone parent.
+   *
+   * `relation: "any"` (the epic board's re-parent) drops the containers of
+   * `type` from part_of AND realizes and adds `target` as a part_of. With no
+   * target it first checks the stored graph: when a container of `type` would
+   * still be inherited (through a feature the concept realizes, say), it
+   * refuses with a ConflictError naming it and writes nothing.
    */
   setMembership(args: {
     id: string;
@@ -1309,8 +1320,8 @@ export class VaultDO {
     target: string | null;
   }): { concept: WireConcept } {
     const relation = args.relation ?? "part_of";
-    if (relation !== "part_of" && relation !== "realizes") {
-      throw new Error(`membership relation must be part_of or realizes, not "${relation}"`);
+    if (relation !== "part_of" && relation !== "realizes" && relation !== "any") {
+      throw new Error(`membership relation must be part_of, realizes or any, not "${relation}"`);
     }
     const row = this.#getRow(args.id);
     if (!row) throw new NotFoundError(`no concept with id "${args.id}"`);
@@ -1328,10 +1339,32 @@ export class VaultDO {
     // overwritten. Title and body are unchanged, so the stored content hash,
     // FTS row and embedding stay valid: only relations, edges and history move.
     const relations = JSON.parse(row.relations_json) as Record<string, string[]>;
-    const kept = (relations[relation] ?? []).filter((t) => this.#getRow(t)?.type !== args.type);
-    if (args.target && !kept.includes(args.target)) kept.push(args.target);
-    if (kept.length > 0) relations[relation] = kept;
-    else delete relations[relation];
+    const typeOf = new Map<string, string | undefined>();
+    const isType = (t: string): boolean => {
+      if (!typeOf.has(t)) typeOf.set(t, this.#getRow(t)?.type);
+      return typeOf.get(t) === args.type;
+    };
+    const cleared = relation === "any" ? MEMBERSHIP_RELATIONS : [relation];
+    if (relation === "any" && !args.target) {
+      // Would a container of `type` remain once the direct ones are gone?
+      const edges = this.#edges().filter(
+        (e) => !(e.from === row.id && cleared.includes(e.relation) && isType(e.to)),
+      );
+      const inherited = nearestContainer(row.id, edges, isType);
+      if (inherited) {
+        const title = this.#getRow(inherited)?.title ?? inherited;
+        throw new ConflictError(
+          `"${row.title}" is still in ${args.type} "${title}" (${inherited}) through another link; unlink that to remove it`,
+        );
+      }
+    }
+    const added = relation === "any" ? "part_of" : relation;
+    for (const rel of cleared) {
+      const kept = (relations[rel] ?? []).filter((t) => !isType(t));
+      if (rel === added && args.target && !kept.includes(args.target)) kept.push(args.target);
+      if (kept.length > 0) relations[rel] = kept;
+      else delete relations[rel];
+    }
     const before = this.#taskState(row.id);
     const at = new Date().toISOString();
     this.#sql.exec(

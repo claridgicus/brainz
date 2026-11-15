@@ -69,6 +69,7 @@ export {
   computeBurndown,
   diffTaskEvents,
   missingTaskHistory,
+  nearestContainer,
   scopeClosure,
   sortTaskEvents,
   taskSnapshot,

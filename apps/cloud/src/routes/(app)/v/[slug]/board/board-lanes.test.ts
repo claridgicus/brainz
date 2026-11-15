@@ -236,39 +236,42 @@ describe("computeEpicLanes", () => {
 });
 
 describe("planEpicReparent / withEpicReparent", () => {
-	it("moves a direct member: one part_of swap", () => {
+	it("every move is one atomic relation-\"any\" call (the server clears stored epic links)", () => {
 		expect(planEpicReparent(epicGraph, "t-direct", "platform")).toEqual({
 			ok: true,
-			calls: [{ relation: "part_of", target: "platform" }],
+			call: { relation: "any", target: "platform" },
 		});
-	});
-	it("a realizes-linked task also drops its realizes epic", () => {
 		expect(planEpicReparent(epicGraph, "t-real", "platform")).toEqual({
 			ok: true,
-			calls: [
-				{ relation: "part_of", target: "platform" },
-				{ relation: "realizes", target: null },
-			],
+			call: { relation: "any", target: "platform" },
 		});
 		expect(planEpicReparent(epicGraph, "t-real", null)).toEqual({
 			ok: true,
-			calls: [{ relation: "realizes", target: null }],
+			call: { relation: "any", target: null },
 		});
 	});
 	it("an inherited member can move to another epic but not to No epic", () => {
 		expect(planEpicReparent(epicGraph, "t-feature", "platform")).toEqual({
 			ok: true,
-			calls: [{ relation: "part_of", target: "platform" }],
+			call: { relation: "any", target: "platform" },
 		});
 		const refused = planEpicReparent(epicGraph, "t-feature", null);
 		expect(refused.ok).toBe(false);
 		expect(!refused.ok && refused.reason).toContain("Checkout v2");
 	});
-	it("same lane is a no-op; No epic → epic adds part_of", () => {
-		expect(planEpicReparent(epicGraph, "t-direct", "checkout")).toEqual({ ok: true, calls: [] });
+	it("refuses No epic for a mixed member: a direct epic plus one inherited through a feature", () => {
+		// t-two is part_of Platform directly AND part_of a feature under Checkout v2.
+		// Dropping the direct link would leave it in Checkout v2, not in No epic.
+		expect(nearestEpicOf(epicGraph, "t-two")).toBe("platform");
+		const refused = planEpicReparent(epicGraph, "t-two", null);
+		expect(refused.ok).toBe(false);
+		expect(!refused.ok && refused.reason).toContain("Checkout v2");
+	});
+	it("same lane is a no-op; No epic → epic links the target", () => {
+		expect(planEpicReparent(epicGraph, "t-direct", "checkout")).toEqual({ ok: true, call: null });
 		expect(planEpicReparent(epicGraph, "t-loose", "checkout")).toEqual({
 			ok: true,
-			calls: [{ relation: "part_of", target: "checkout" }],
+			call: { relation: "any", target: "checkout" },
 		});
 	});
 	it("the optimistic graph puts the task in the target lane and keeps other links", () => {

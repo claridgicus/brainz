@@ -214,7 +214,7 @@ export function createApi(fetchFn: Fetch) {
     setMembership(
       vaultId: string,
       id: string,
-      body: { type: string; target: string | null; relation?: "part_of" | "realizes" },
+      body: { type: string; target: string | null; relation?: "part_of" | "realizes" | "any" },
     ): Promise<ApiConcept> {
       return request(
         apiConceptSchema,

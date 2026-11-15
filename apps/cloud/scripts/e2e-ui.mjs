@@ -301,6 +301,16 @@ async function epicJourney(vaultId) {
     body: { type: "epic", target: "pay-button" },
   });
   step("re-parent onto a non-epic → 400", wrong.status === 400, `status ${wrong.status}`);
+  // "No epic" (relation "any", what the board sends) on a task whose epic is
+  // inherited through its feature: refused, naming the epic, nothing written.
+  const noEpic = await api("POST", `/api/vaults/${vaultId}/concepts/${inherited.json?.id}/membership`, {
+    body: { relation: "any", type: "epic", target: null },
+  });
+  step(
+    "No epic while an epic is inherited → 409 naming it",
+    noEpic.status === 409 && String(noEpic.json?.error ?? "").includes("Checkout v2"),
+    `status ${noEpic.status} ${JSON.stringify(noEpic.json)}`,
+  );
   const bd = await api("GET", `/api/vaults/${vaultId}/burndown?scope=checkout-epic`);
   step(
     "an epic is a burndown scope (closure counts the feature's task)",

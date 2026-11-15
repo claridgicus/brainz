@@ -28,6 +28,9 @@ vi.mock("$lib/server/vault-client", async () => {
       setMembership: async (args: Record<string, unknown>) => {
         lastArgs = args;
         if (args.target === "ghost") throw new actual.VaultDoError('no concept with id "ghost"', 404);
+        if (args.relation === "any" && args.target === null) {
+          throw new actual.VaultDoError('"T" is still in epic "Checkout" (checkout) through another link', 409);
+        }
         return {
           concept: { id: args.id, title: "T", type: "task", status: "active", tags: [], body: "b\n" },
         };
@@ -60,6 +63,15 @@ describe("POST /api/vaults/:vaultId/concepts/:id/membership", () => {
     expect(res.status).toBe(200);
     expect(apiConceptSchema.safeParse(await res.json()).success).toBe(true);
     expect(lastArgs).toEqual({ id: "t", type: "iteration", target: "s2" });
+  });
+
+  it('passes relation "any" through and maps the inherited-epic refusal to 409', async () => {
+    const ok = await POST(postEvent({ relation: "any", type: "epic", target: "e2" }, "editor"));
+    expect(ok.status).toBe(200);
+    expect(lastArgs).toEqual({ id: "t", relation: "any", type: "epic", target: "e2" });
+    const refused = await POST(postEvent({ relation: "any", type: "epic", target: null }, "editor"));
+    expect(refused.status).toBe(409);
+    expect(((await refused.json()) as { error: string }).error).toContain("Checkout");
   });
 
   it("refuses a viewer, a bad body and an unknown target", async () => {
