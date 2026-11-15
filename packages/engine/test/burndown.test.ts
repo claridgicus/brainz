@@ -535,4 +535,27 @@ describe("projection onTrack", () => {
   it("is true when it finished by its end date", () => {
     expect(run("2026-11-05")).toMatchObject({ remaining: 0, onTrack: true });
   });
+  it("ignores completions made after the task left the scope", () => {
+    // Done in Sprint A on Nov 3, moved out on Nov 4, reopened and done elsewhere on Nov 10.
+    const p = computeBurndown({
+      concepts: [
+        { id: "a", title: "A", type: "iteration", tags: [], startDate: "2026-11-01", endDate: "2026-11-05" },
+        { id: "b", title: "B", type: "iteration", tags: [] },
+        task("t", { taskStatus: "done", createdAt: D("2026-11-01"), doneAt: D("2026-11-10") }),
+      ],
+      edges: [{ from: "t", to: "b", relation: "part_of" }],
+      events: [
+        { at: D("2026-11-01"), task: "t", kind: "created" },
+        { at: D("2026-11-01"), task: "t", kind: "scope_added", scope: "a" },
+        { at: D("2026-11-03"), task: "t", kind: "done" },
+        { at: D("2026-11-04"), task: "t", kind: "scope_added", scope: "b" },
+        { at: D("2026-11-04"), task: "t", kind: "scope_removed", scope: "a" },
+        { at: D("2026-11-08"), task: "t", kind: "reopened" },
+        { at: D("2026-11-10"), task: "t", kind: "done" },
+      ],
+      now: D("2026-11-12"),
+      scope: "a",
+    }).projection;
+    expect(p).toMatchObject({ remaining: 0, likely: D("2026-11-03"), onTrack: true });
+  });
 });

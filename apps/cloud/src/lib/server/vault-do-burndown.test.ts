@@ -283,10 +283,21 @@ describe("VaultDO schema v9 migration on a v8 vault that already has tasks", () 
     const oct4 = r.series?.find((p) => p.at === "2026-10-04T00:00:00.000Z");
     expect(oct4).toMatchObject({ scope: 2, done: 1, open: 1 }); // t-open arrives 10-05
 
-    // A write after the upgrade appends live events on top of the backfill
-    // without duplicating it: one done, no second created/taken.
+    // A write after the upgrade first persists the history the task's fields
+    // can rebuild (the write overwrites them), then appends the live event.
     await vault.completeTask({ id: "t-taken", outcome: "finished after the upgrade" });
-    expect(vault.taskEvents().map((e) => `${e.task}:${e.kind}`)).toEqual(["t-taken:done"]);
+    const events = vault.taskEvents();
+    expect(events.map((e) => `${e.task}:${e.kind}`)).toEqual([
+      "t-taken:created",
+      "t-taken:scope_added",
+      "t-taken:taken",
+      "t-taken:done",
+    ]);
+    expect(events[2]).toMatchObject({ at: "2026-10-04T00:00:00.000Z", by: "agent-b" });
+    // Idempotent: backfill reads the persisted events as the log and adds no
+    // second created/taken, and a further write persists nothing more.
+    await vault.upsertConcept({ id: "t-taken", title: "T-TAKEN", body: "body\n", estimate: 1 });
+    expect(vault.taskEvents().slice(4).map((e) => e.kind)).toEqual(["estimated"]);
     const r2 = vault.burndown({ scope: "auth", from: "2026-10-01" });
     expect(r2.totals).toMatchObject({ scope: 3, done: 2, open: 1, taken: 0 });
     expect(r2.agents?.find((a) => a.agent === "agent-b")).toMatchObject({ held: 0, done: 1 });

@@ -184,6 +184,8 @@ export function sortTaskEvents(events: readonly TaskEvent[]): TaskEvent[] {
 
 interface ReplayState {
   alive: boolean;
+  /** Deleted at some point: the next `created` is a re-creation. */
+  gone?: boolean;
   status: TaskStatus;
   by?: string;
   takenAt?: number;
@@ -203,14 +205,19 @@ function applyEvent(st: ReplayState, e: TaskEvent): void {
   st.lastAt = Math.max(st.lastAt, t);
   switch (e.kind) {
     case "created":
-      // A (re-)created id starts a fresh lifecycle: nothing of a deleted
-      // predecessor's status, claim, estimate or memberships carries over.
+      // A re-created id (after a `deleted`) starts a fresh lifecycle: nothing
+      // of its predecessor's status, claim, estimate or memberships carries
+      // over. A first `created` resets nothing, so an event that sorts before
+      // it (clock skew) still counts.
+      if (st.gone) {
+        st.status = "open";
+        st.by = undefined;
+        st.takenAt = undefined;
+        st.estimate = undefined;
+        st.scopes.clear();
+        st.gone = false;
+      }
       st.alive = true;
-      st.status = "open";
-      st.by = undefined;
-      st.takenAt = undefined;
-      st.estimate = undefined;
-      st.scopes.clear();
       break;
     case "taken":
       st.alive = true;
@@ -239,6 +246,7 @@ function applyEvent(st: ReplayState, e: TaskEvent): void {
       break;
     case "deleted":
       st.alive = false;
+      st.gone = true;
       break;
   }
 }
@@ -279,18 +287,23 @@ export function backfillTaskEvents(
     if (!snap) continue;
     current.add(c.id);
     const fullLog = byTask.get(c.id) ?? [];
-    // Only the current incarnation counts: a `created` resets the replay, so
-    // a deleted predecessor of the same id says nothing about this note. The
-    // synthesized events go right after the latest logged `created`.
-    const createdIdx = fullLog.map((e) => e.kind).lastIndexOf("created");
-    const earlier = createdIdx >= 0 ? fullLog.slice(0, createdIdx + 1) : [];
-    const log = createdIdx >= 0 ? fullLog.slice(createdIdx + 1) : fullLog;
+    // Only the current incarnation counts: a `created` after a `deleted`
+    // resets the replay, so a deleted predecessor of the same id says nothing
+    // about this note. The synthesized events go right after that re-creation.
+    let rebirth = -1;
+    let deletedSeen = false;
+    fullLog.forEach((e, i) => {
+      if (e.kind === "deleted") deletedSeen = true;
+      else if (e.kind === "created" && deletedSeen) rebirth = i;
+    });
+    const earlier = rebirth >= 0 ? fullLog.slice(0, rebirth + 1) : [];
+    const log = rebirth >= 0 ? fullLog.slice(rebirth + 1) : fullLog;
     const add: TaskEvent[] = [];
     const task = c.id;
 
     // created
     let createdAt: number;
-    const loggedCreated = createdIdx >= 0 ? fullLog[createdIdx] : undefined;
+    const loggedCreated = rebirth >= 0 ? fullLog[rebirth] : log.find((e) => e.kind === "created");
     if (loggedCreated) {
       createdAt = ms(loggedCreated.at) ?? 0;
     } else {
@@ -920,11 +933,19 @@ export function computeBurndown(input: BurndownInput): BurndownResult {
       likely = optimistic = pessimistic = null;
       reason = "no tasks in scope";
     } else if (remaining <= 0) {
+      // The last completion made while the task was in the scope: one done
+      // after the task left it (finished elsewhere) says nothing about this
+      // scope's deadline.
       let last = -Infinity;
       for (const tl of relevant) {
-        tl.events.forEach((e, i) => {
-          if (e.kind === "done" && tl.times[i] <= nowMs) last = Math.max(last, tl.times[i]);
-        });
+        const st: ReplayState = { alive: false, status: "open", scopes: new Set(), lastAt: -Infinity };
+        for (let i = 0; i < tl.events.length; i++) {
+          const t = tl.times[i];
+          if (t > nowMs) break;
+          const e = tl.events[i];
+          applyEvent(st, e);
+          if (e.kind === "done" && inScope(st)) last = Math.max(last, t);
+        }
       }
       likely = optimistic = pessimistic = Number.isFinite(last) ? iso(last) : null;
       reason = "nothing remaining";
@@ -969,14 +990,17 @@ export function computeBurndown(input: BurndownInput): BurndownResult {
         const e = tl.events[i];
         const t = tl.times[i];
         if (t > end) break;
+        const reborn = e.kind === "created" && st.gone === true;
         applyEvent(st, e);
-        if (e.kind === "created") {
+        if (reborn) {
           // A re-created id is a new task: keep the predecessor's finish (it
           // was real work) and time the new one from its own creation.
           if (hit) finished.push(hit);
           hit = undefined;
           created = t;
           lastTaken = undefined;
+        } else if (e.kind === "created" && created === undefined) {
+          created = t;
         }
         if (e.kind === "taken") lastTaken = t;
         if (e.kind === "reopened" || e.kind === "released") lastTaken = undefined;
