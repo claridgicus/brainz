@@ -210,6 +210,18 @@ export function createApi(fetchFn: Fetch) {
             body,
           });
     },
+    /** Atomically replace the concept's container of `type` (server keeps every other link). */
+    setMembership(
+      vaultId: string,
+      id: string,
+      body: { type: string; target: string | null; relation?: "part_of" | "realizes" },
+    ): Promise<ApiConcept> {
+      return request(
+        apiConceptSchema,
+        `/api/vaults/${enc(vaultId)}/concepts/${enc(id)}/membership`,
+        { method: "POST", body },
+      );
+    },
     async deleteConcept(vaultId: string, id: string): Promise<void> {
       await expectNoContent(
         await fetchFn(`/api/vaults/${enc(vaultId)}/concepts/${enc(id)}`, { method: "DELETE" }),

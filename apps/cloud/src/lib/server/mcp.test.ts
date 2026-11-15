@@ -301,6 +301,9 @@ function fakeVault(): FakeVault {
     dreamApply: async (id) => {
       throw new VaultDoError(`dream "${id}" has no pending proposals (status applied)`, 400);
     },
+    setMembership: async (args) => {
+      throw new VaultDoError(`no concept with id "${args.id}"`, 404);
+    },
     burndown: async (opts = {}) => {
       if (opts.scope === "nope") throw new VaultDoError('unknown burndown scope: "nope"', 404);
       return {

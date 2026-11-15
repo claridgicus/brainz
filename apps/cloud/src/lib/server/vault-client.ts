@@ -90,6 +90,12 @@ export interface VaultClient {
   reopenTask(args: { id: string }): Promise<{
     task: ToolConceptMeta & { createdAt?: string; updatedAt?: string };
   }>;
+  setMembership(args: {
+    id: string;
+    relation?: "part_of" | "realizes";
+    type: string;
+    target: string | null;
+  }): Promise<{ concept: WireConcept }>;
   search(args: SearchArgs): Promise<{ hits: WireHit[] }>;
   related(args: RelatedArgs): Promise<{ id: string; related: WireRelated[] }>;
   graph(): Promise<GraphPayload>;
@@ -149,6 +155,7 @@ export function vaultClient(ns: DurableObjectNamespace, vaultId: string): VaultC
     takeTask: (args = {}) => call("takeTask", args),
     completeTask: (args) => call("completeTask", args),
     reopenTask: (args) => call("reopenTask", args),
+    setMembership: (args) => call("setMembership", args),
     search: (args) => call("search", args),
     related: (args) => call("related", args),
     graph: () => call("graph"),

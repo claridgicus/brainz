@@ -769,3 +769,24 @@ describe("task history + burndown", () => {
     expect(r.cycle?.leadHours.median).toBe(48);
   });
 });
+
+describe("task history: deleting a note from before the log", () => {
+  it("persists the rebuildable history before the deleted event", async () => {
+    const vault = await makeVault({
+      "t.md": note(
+        { id: "t", title: "T", type: "task", task_status: "done", taken_by: "w", createdAt: "2026-10-01T00:00:00Z", taken_at: "2026-10-02T00:00:00Z", done_at: "2026-10-03T00:00:00Z", relations: { part_of: ["m"] } },
+        "",
+      ),
+      "m.md": note({ id: "m", title: "M", type: "milestone" }, ""),
+    });
+    const now = new Date("2026-11-10T00:00:00Z");
+    const oct5 = () =>
+      vault.burndown({ scope: "m", from: "2026-10-01" }, now).series?.find((p) => p.at === "2026-10-05T00:00:00.000Z");
+    expect(oct5()).toMatchObject({ scope: 1, done: 1 });
+    await vault.deleteConcept("t");
+    expect(vault.taskEvents().map((e) => e.kind)).toEqual(["created", "scope_added", "taken", "done", "deleted"]);
+    expect(oct5()).toMatchObject({ scope: 1, done: 1 });
+    // Gone from the moment it was deleted (the deleted event is stamped with the real clock).
+    expect(vault.burndown({ scope: "m" }, new Date(Date.now() + 60_000)).totals.scope).toBe(0);
+  });
+});

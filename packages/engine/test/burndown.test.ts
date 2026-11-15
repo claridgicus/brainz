@@ -4,6 +4,7 @@ import {
   backfillTaskEvents,
   computeBurndown,
   diffTaskEvents,
+  missingTaskHistory,
   scopeClosure,
   taskSnapshot,
   type BurndownConcept,
@@ -363,5 +364,90 @@ describe("computeBurndown", () => {
       { from: "b", to: "a", relation: "realizes" },
     ];
     expect([...scopeClosure("a", loop)].sort()).toEqual(["a", "b"]);
+  });
+});
+
+describe("review regressions", () => {
+  const at = D("2026-11-02", 9);
+
+  it("keeps recorded order for equal timestamps (remove then re-add a scope)", () => {
+    // Two writes inside one millisecond: s1 removed, then re-added.
+    const log: TaskEvent[] = [
+      { at: D("2026-11-01"), task: "t", kind: "created" },
+      { at: D("2026-11-01"), task: "t", kind: "scope_added", scope: "s1" },
+      { at, task: "t", kind: "scope_removed", scope: "s1" },
+      { at, task: "t", kind: "scope_added", scope: "s1" },
+    ];
+    const concepts = [task("t", { createdAt: D("2026-11-01") })];
+    const edges: Edge[] = [{ from: "t", to: "s1", relation: "part_of" }];
+    const once = backfillTaskEvents(concepts, edges, log);
+    expect(once.map((e) => e.kind)).toEqual(["created", "scope_added", "scope_removed", "scope_added"]);
+    // Idempotent: nothing reconciled, nothing reordered, the log never grows.
+    expect(backfillTaskEvents(concepts, edges, once)).toEqual(once);
+    const s1 = { id: "s1", title: "S1", type: "iteration", tags: [] };
+    const r = computeBurndown({ concepts: [...concepts, s1], edges, events: log, now: D("2026-11-03"), scope: "s1" });
+    expect(r.totals.scope).toBe(1);
+  });
+
+  it("records a reclaim under the same label and clears the stale claim", () => {
+    const prev = { id: "t", taskStatus: "taken" as const, takenBy: "an agent", takenAt: D("2026-11-01"), scopes: [] };
+    const next = { ...prev, takenAt: D("2026-11-03") };
+    expect(diffTaskEvents(prev, next, D("2026-11-03")).map((e) => [e.kind, e.by])).toEqual([["taken", "an agent"]]);
+    // Same claim, unrelated write: no event.
+    expect(diffTaskEvents(prev, { ...prev }, D("2026-11-03"))).toEqual([]);
+
+    // Backfill also notices a claim newer than the replayed one.
+    const concepts = [
+      task("t", { createdAt: D("2026-11-01", 0), taskStatus: "taken", takenBy: "an agent", takenAt: D("2026-11-03", 11) }),
+    ];
+    const log: TaskEvent[] = [
+      { at: D("2026-11-01", 0), task: "t", kind: "created" },
+      { at: D("2026-11-01", 12), task: "t", kind: "taken", by: "an agent" },
+    ];
+    const r = computeBurndown({ concepts, edges: [], events: log, now: D("2026-11-03", 12), staleAfterHours: 24 });
+    expect(r.stale).toEqual([]);
+    expect(r.agents?.[0]).toMatchObject({ agent: "an agent", held: 1, stale: 0 });
+    const ev = backfillTaskEvents(concepts, [], log);
+    expect(backfillTaskEvents(concepts, [], ev)).toEqual(ev);
+  });
+
+  it("counts each iteration's velocity from its own tasks only", () => {
+    const concepts: BurndownConcept[] = [
+      { id: "m", title: "M", type: "milestone", tags: [] },
+      { id: "i1", title: "I1", type: "iteration", tags: [], startDate: "2026-11-02", endDate: "2026-11-13" },
+      { id: "i2", title: "I2", type: "iteration", tags: [], startDate: "2026-11-02", endDate: "2026-11-13" },
+      task("t", { createdAt: D("2026-11-02"), taskStatus: "done", doneAt: D("2026-11-04") }),
+    ];
+    const edges: Edge[] = [
+      { from: "i1", to: "m", relation: "part_of" },
+      { from: "i2", to: "m", relation: "part_of" },
+      { from: "t", to: "i1", relation: "part_of" },
+    ];
+    const r = computeBurndown({ concepts, edges, events: [], now: D("2026-11-06"), scope: "m" });
+    expect(r.velocity?.periods.map((p) => [p.id, p.done])).toEqual([
+      ["i1", 1],
+      ["i2", 0],
+    ]);
+  });
+
+  it("missingTaskHistory returns what a deletion must persist", () => {
+    const c = task("t", {
+      createdAt: D("2026-10-01"),
+      taskStatus: "done",
+      takenBy: "w",
+      takenAt: D("2026-10-02"),
+      doneAt: D("2026-10-03"),
+    });
+    const edges: Edge[] = [{ from: "t", to: "dom", relation: "part_of" }];
+    const missing = missingTaskHistory(c, edges, []);
+    expect(missing.map((e) => e.kind)).toEqual(["created", "scope_added", "taken", "done"]);
+    // Persisted + deleted, the task still counts for October.
+    const after = [...missing, { at: D("2026-11-10"), task: "t", kind: "deleted" as const }];
+    const dom = { id: "dom", title: "Dom", type: "domain", tags: [] };
+    const r = computeBurndown({ concepts: [dom], edges: [], events: after, now: D("2026-11-12"), scope: "dom", from: "2026-10-01" });
+    expect(r.series?.find((p) => p.at === D("2026-10-05", 0))).toMatchObject({ scope: 1, done: 1 });
+    expect(r.totals.scope).toBe(0);
+    // Nothing missing once the log has it all.
+    expect(missingTaskHistory(c, edges, missing)).toEqual([]);
   });
 });

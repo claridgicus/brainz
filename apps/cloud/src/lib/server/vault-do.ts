@@ -29,6 +29,7 @@ import {
   BurndownInputError,
   computeBurndown,
   diffTaskEvents,
+  missingTaskHistory,
   normalizeDay,
   normalizeEstimate,
   taskSnapshot,
@@ -223,6 +224,13 @@ interface ConceptRow {
 }
 
 class NotFoundError extends Error {}
+
+/** A task's burndown state before/after a write (see #taskState). */
+interface TaskState {
+  meta: ConceptMeta;
+  edges: Edge[];
+  snap: TaskSnapshot | null;
+}
 
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -692,6 +700,12 @@ export class VaultDO {
           return json(await this.completeTask(args as { id: string; outcome: string }));
         case "reopenTask":
           return json(this.reopenTask(args as { id: string }));
+        case "setMembership":
+          return json(
+            await this.setMembership(
+              args as { id: string; relation?: string; type: string; target: string | null },
+            ),
+          );
         case "search":
           return json(await this.search(args as unknown as SearchArgs));
         case "related":
@@ -828,7 +842,7 @@ export class VaultDO {
         : input.estimate !== undefined
           ? (normalizeEstimate(input.estimate) ?? null)
           : (existing?.estimate ?? null);
-    const before = this.#taskSnap(id);
+    const before = this.#taskState(id);
     const body = input.body.endsWith("\n") ? input.body : `${input.body}\n`;
     const createdAt = existing?.created_at ?? now;
     const hash = await sha256Hex(`${title}\n\n${body}`);
@@ -869,7 +883,7 @@ export class VaultDO {
 
     this.#rebuildEdges(id, relations, body);
     this.#updateFts(id, title, body, tags);
-    this.#recordTaskDiff(before, this.#taskSnap(id), now);
+    this.#recordTaskDiff(before, this.#taskState(id), now);
 
     // Re-embed only when content changed; failures never fail the write.
     const prev = this.#sql
@@ -887,7 +901,7 @@ export class VaultDO {
   deleteConcept(id: string): { ok: true; deleted: boolean } {
     const existing = this.#getRow(id);
     if (!existing) return { ok: true, deleted: false };
-    const before = this.#taskSnap(id);
+    const before = this.#taskState(id);
     // FTS first: its rowid is the concept row's, which is gone after the DELETE.
     if (this.#fts) this.#sql.exec(`DELETE FROM concept_fts WHERE rowid = ?`, this.#rowidOf(id));
     this.#sql.exec(`DELETE FROM concept WHERE id = ?`, id);
@@ -910,7 +924,7 @@ export class VaultDO {
     const list = relations[relation] ?? [];
     if (!list.includes(args.to)) list.push(args.to);
     relations[relation] = list;
-    const before = this.#taskSnap(args.from);
+    const before = this.#taskState(args.from);
     const at = new Date().toISOString();
     this.#sql.exec(
       `UPDATE concept SET relations_json = ?, updated_at = ? WHERE id = ?`,
@@ -919,7 +933,7 @@ export class VaultDO {
       args.from,
     );
     this.#rebuildEdges(args.from, relations, row.body);
-    this.#recordTaskDiff(before, this.#taskSnap(args.from), at);
+    this.#recordTaskDiff(before, this.#taskState(args.from), at);
     return { ok: true, from: args.from, to: args.to, relation };
   }
 
@@ -1186,7 +1200,7 @@ export class VaultDO {
 
     const takenBy = args.takenBy?.trim() || "an agent";
     const takenAt = new Date().toISOString();
-    const before = this.#taskSnap(row.id);
+    const before = this.#taskState(row.id);
     this.#sql.exec(
       `UPDATE concept SET task_status = 'taken', taken_by = ?, taken_at = ?, updated_at = ? WHERE id = ?`,
       takenBy,
@@ -1194,7 +1208,7 @@ export class VaultDO {
       takenAt,
       row.id,
     );
-    this.#recordTaskDiff(before, this.#taskSnap(row.id), takenAt);
+    this.#recordTaskDiff(before, this.#taskState(row.id), takenAt);
 
     const claimed = this.#getRow(row.id);
     if (!claimed) throw new Error(`failed to claim task: ${row.id}`);
@@ -1261,6 +1275,42 @@ export class VaultDO {
     };
   }
 
+  /**
+   * Atomically replace a concept's container of one type: drop its
+   * `relation` (part_of by default) targets whose concept is of `type`, then
+   * add `target` (or none). Every other relation, and every other target of
+   * this one, is read from storage here, never from a client's cached graph,
+   * so links added since the client last refreshed survive. Used by the
+   * board's iteration picker and the burndown panel's milestone parent.
+   */
+  async setMembership(args: {
+    id: string;
+    relation?: string;
+    type: string;
+    target: string | null;
+  }): Promise<{ concept: WireConcept }> {
+    const relation = args.relation ?? "part_of";
+    if (relation !== "part_of" && relation !== "realizes") {
+      throw new Error(`membership relation must be part_of or realizes, not "${relation}"`);
+    }
+    const row = this.#getRow(args.id);
+    if (!row) throw new NotFoundError(`no concept with id "${args.id}"`);
+    if (args.target) {
+      const target = this.#getRow(args.target);
+      if (!target) throw new NotFoundError(`no concept with id "${args.target}"`);
+      if (target.type !== args.type) {
+        throw new Error(`concept "${args.target}" is a ${target.type}, not a ${args.type}`);
+      }
+      if (args.target === args.id) throw new Error("a concept cannot be its own container");
+    }
+    const relations = JSON.parse(row.relations_json) as Record<string, string[]>;
+    const kept = (relations[relation] ?? []).filter((t) => this.#getRow(t)?.type !== args.type);
+    if (args.target && !kept.includes(args.target)) kept.push(args.target);
+    if (kept.length > 0) relations[relation] = kept;
+    else delete relations[relation];
+    return this.upsertConcept({ id: row.id, title: row.title, body: row.body, relations });
+  }
+
   /** Reopen a task: back to open, clear takenBy/takenAt (board "move to Open"). */
   reopenTask(args: { id: string }): {
     task: ReturnType<typeof compactMeta> & { createdAt?: string; updatedAt?: string };
@@ -1269,13 +1319,13 @@ export class VaultDO {
     if (!row) throw new NotFoundError(`no task with id "${args.id}"`);
     if (row.type !== "task") throw new Error(`concept "${args.id}" is not a task`);
     const now = new Date().toISOString();
-    const before = this.#taskSnap(args.id);
+    const before = this.#taskState(args.id);
     this.#sql.exec(
       `UPDATE concept SET task_status = 'open', taken_by = NULL, taken_at = NULL, done_at = NULL, updated_at = ? WHERE id = ?`,
       now,
       args.id,
     );
-    this.#recordTaskDiff(before, this.#taskSnap(args.id), now);
+    this.#recordTaskDiff(before, this.#taskState(args.id), now);
     const saved = this.#getRow(args.id);
     if (!saved) throw new Error(`failed to reopen task: ${args.id}`);
     const meta = this.#rowToMeta(saved);
@@ -1886,7 +1936,7 @@ export class VaultDO {
 
   /** Upsert a full concept row verbatim and rebuild its derived state (edges, FTS). */
   #putRow(row: ConceptRow): void {
-    const before = this.#taskSnap(row.id);
+    const before = this.#taskState(row.id);
     this.#sql.exec(
       `INSERT INTO concept (id, title, type, status, product, tags_json, code_areas_json, task_status, taken_by, taken_at, done_at, start_date, end_date, estimate, relations_json, body, hash, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1926,7 +1976,7 @@ export class VaultDO {
       row.body,
     );
     this.#updateFts(row.id, row.title, row.body, JSON.parse(row.tags_json) as string[]);
-    this.#recordTaskDiff(before, this.#taskSnap(row.id), new Date().toISOString());
+    this.#recordTaskDiff(before, this.#taskState(row.id), new Date().toISOString());
   }
 
   async #reembedIfStale(id: string): Promise<void> {
@@ -2140,7 +2190,8 @@ export class VaultDO {
 
   // ------------------------------------------------------------ burndown
 
-  #taskSnap(id: string): TaskSnapshot | null {
+  /** A task's burndown state (snapshot + the meta/edges it came from); snap is null for non-tasks. */
+  #taskState(id: string): TaskState | null {
     const meta = this.#getMeta(id);
     if (!meta) return null;
     const edges = this.#sql
@@ -2150,21 +2201,31 @@ export class VaultDO {
       )
       .toArray()
       .map((r) => ({ from: r.from_id, to: r.to_id, relation: r.relation }));
-    return taskSnapshot(meta, edges);
+    return { meta, edges, snap: taskSnapshot(meta, edges) };
   }
 
-  #recordTaskDiff(before: TaskSnapshot | null, after: TaskSnapshot | null, at: string): void {
-    for (const e of diffTaskEvents(before, after, at)) {
-      this.#sql.exec(
-        `INSERT INTO task_event (at, task, kind, by, scope, points) VALUES (?, ?, ?, ?, ?, ?)`,
-        e.at,
-        e.task,
-        e.kind,
-        e.by ?? null,
-        e.scope ?? null,
-        e.points ?? null,
-      );
+  #insertTaskEvent(e: TaskEvent): void {
+    this.#sql.exec(
+      `INSERT INTO task_event (at, task, kind, by, scope, points) VALUES (?, ?, ?, ?, ?, ?)`,
+      e.at,
+      e.task,
+      e.kind,
+      e.by ?? null,
+      e.scope ?? null,
+      e.points ?? null,
+    );
+  }
+
+  #recordTaskDiff(before: TaskState | null, after: TaskState | null, at: string): void {
+    const events = diffTaskEvents(before?.snap ?? null, after?.snap ?? null, at);
+    // A task leaving (deleted, or no longer a task): first persist the history
+    // its fields can still rebuild (a task from before the history table has
+    // none recorded), so its past contribution survives the deletion.
+    if (before?.snap && events.some((e) => e.kind === "deleted")) {
+      const logged = this.taskEvents().filter((e) => e.task === before.meta.id);
+      for (const e of missingTaskHistory(before.meta, before.edges, logged)) this.#insertTaskEvent(e);
     }
+    for (const e of events) this.#insertTaskEvent(e);
   }
 
   /** The recorded task history, in append order. */

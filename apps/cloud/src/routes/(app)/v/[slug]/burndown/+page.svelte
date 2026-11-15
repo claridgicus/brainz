@@ -136,20 +136,10 @@
 			return void (formError = "The end date is before the start date.");
 		saving = true;
 		try {
-			let relations: Record<string, string[]> | undefined;
-			if (draft.id) {
-				const graph = await api.graph(vault.id);
-				relations = {};
-				for (const ed of graph.edges) {
-					if (ed.from !== draft.id || ed.relation === "references") continue;
-					(relations[ed.relation] ??= []).push(ed.to);
-				}
-				const others = (relations.part_of ?? []).filter((id) => !milestones.some((m) => m.id === id));
-				relations.part_of = draft.parent ? [...others, draft.parent] : others;
-				if (relations.part_of.length === 0) delete relations.part_of;
-			} else if (draft.parent) {
-				relations = { part_of: [draft.parent] };
-			}
+			// A new concept carries its parent in the create; an edit keeps its
+			// stored relations (omitted from the PUT) and swaps the milestone
+			// parent server-side, so nothing is rebuilt from a cached graph.
+			const isNew = !draft.id;
 			const saved = await api.upsertConcept(vault.id, {
 				...(draft.id ? { id: draft.id } : {}),
 				title: draft.title.trim(),
@@ -157,8 +147,14 @@
 				type: draft.type,
 				startDate: draft.startDate || null,
 				endDate: draft.endDate || null,
-				...(relations ? { relations } : {}),
+				...(isNew && draft.parent ? { relations: { part_of: [draft.parent] } } : {}),
 			});
+			if (!isNew && draft.type === "iteration") {
+				await api.setMembership(vault.id, saved.id, {
+					type: "milestone",
+					target: draft.parent || null,
+				});
+			}
 			draft = null;
 			concepts = (await api.listConcepts(vault.id)).concepts;
 			if (!scope) setQuery({ scope: saved.id });

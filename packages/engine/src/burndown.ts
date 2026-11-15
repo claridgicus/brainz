@@ -46,6 +46,8 @@ export interface TaskSnapshot {
   id: string;
   taskStatus: TaskStatus;
   takenBy?: string;
+  /** When the current claim was made; a new value with the same holder is a reclaim. */
+  takenAt?: string;
   estimate?: number;
   /** Direct memberships: part_of/realizes targets plus `tag:<tag>` entries, sorted. */
   scopes: string[];
@@ -73,7 +75,10 @@ export interface BurndownConcept {
  * `edges` may be the whole vault's edges or just this concept's outgoing ones.
  */
 export function taskSnapshot(
-  meta: Pick<BurndownConcept, "id" | "type" | "tags" | "taskStatus" | "takenBy" | "estimate">,
+  meta: Pick<
+    BurndownConcept,
+    "id" | "type" | "tags" | "taskStatus" | "takenBy" | "takenAt" | "estimate"
+  >,
   edges: readonly Edge[],
 ): TaskSnapshot | null {
   if (meta.type !== "task") return null;
@@ -90,6 +95,7 @@ export function taskSnapshot(
     scopes: [...scopes].sort(),
   };
   if (meta.takenBy !== undefined) snap.takenBy = meta.takenBy;
+  if (meta.takenAt !== undefined) snap.takenAt = meta.takenAt;
   if (meta.estimate !== undefined) snap.estimate = meta.estimate;
   return snap;
 }
@@ -144,26 +150,15 @@ export function diffTaskEvents(
     } else {
       out.push({ at, task, kind: "released" });
     }
-  } else if (to === "taken" && n.takenBy !== prev.takenBy) {
-    // A reclaim (stale claim handed to someone else) is a fresh take.
+  } else if (to === "taken" && (n.takenBy !== prev.takenBy || n.takenAt !== prev.takenAt)) {
+    // A reclaim is a fresh take: a stale claim handed to someone else, or
+    // re-taken under the same label (the default "an agent" included).
     out.push({ at, task, kind: "taken", ...by(n.takenBy) });
   }
   return out;
 }
 
 // ----------------------------------------------------------------- backfill
-
-const KIND_RANK: Record<TaskEventKind, number> = {
-  created: 0,
-  scope_added: 1,
-  estimated: 1,
-  scope_removed: 2,
-  taken: 2,
-  released: 2,
-  done: 2,
-  reopened: 2,
-  deleted: 3,
-};
 
 function ms(iso: string | undefined): number | undefined {
   if (!iso) return undefined;
@@ -175,11 +170,15 @@ function iso(t: number): string {
   return new Date(t).toISOString();
 }
 
-/** Sort events by time, then created → memberships → transitions, keeping input order. */
+/**
+ * Sort events by time. Ties keep their input order: separate writes inside
+ * one millisecond (remove then re-add a scope, release then retake) must
+ * replay in the order they were recorded, never be regrouped by kind.
+ */
 export function sortTaskEvents(events: readonly TaskEvent[]): TaskEvent[] {
   return events
     .map((e, i) => ({ e, i, t: ms(e.at) ?? 0 }))
-    .sort((a, b) => a.t - b.t || KIND_RANK[a.e.kind] - KIND_RANK[b.e.kind] || a.i - b.i)
+    .sort((a, b) => a.t - b.t || a.i - b.i)
     .map((x) => x.e);
 }
 
@@ -263,7 +262,10 @@ export function backfillTaskEvents(
     else outgoing.set(e.from, [e]);
   }
 
-  const out: TaskEvent[] = [...events];
+  // Per task: synthesized events first (they describe what happened before
+  // the log started), then the log in recorded order, then reconciliation.
+  // The final sort is stable, so equal timestamps keep exactly this order.
+  const out: TaskEvent[] = [];
   const current = new Set<string>();
   for (const c of concepts) {
     const snap = taskSnapshot(c, outgoing.get(c.id) ?? []);
@@ -313,7 +315,7 @@ export function backfillTaskEvents(
     }
 
     // Replay what we have so far and reconcile with the frontmatter.
-    const merged = sortTaskEvents([...log, ...add]);
+    const merged = sortTaskEvents([...add, ...log]);
     const st = replayOne(merged);
     const updated = ms(c.updatedAt);
     const after = (t: number | undefined): number => {
@@ -340,7 +342,19 @@ export function backfillTaskEvents(
       });
     }
     const want = snap.taskStatus;
-    if (want !== st.status || (want === "taken" && snap.takenBy !== st.by && snap.takenBy)) {
+    // A claim newer than the replayed one (re-taken under the same label
+    // outside the recorded writes) is a fresh take too.
+    const claimMoved =
+      want === "taken" &&
+      st.status === "taken" &&
+      ms(c.takenAt) !== undefined &&
+      st.takenAt !== undefined &&
+      (ms(c.takenAt) as number) > st.takenAt;
+    if (
+      want !== st.status ||
+      (want === "taken" && snap.takenBy !== st.by && snap.takenBy) ||
+      claimMoved
+    ) {
       if (want === "taken") {
         if (st.status === "done") reconcile.push({ at: iso(after(ms(c.takenAt))), task, kind: "reopened" });
         reconcile.push({
@@ -364,16 +378,35 @@ export function backfillTaskEvents(
         });
       }
     }
-    out.push(...add, ...reconcile);
+    out.push(...add, ...log, ...reconcile);
   }
 
   // Tasks the log knows that are gone now (deleted by hand): close them.
   for (const [task, log] of byTask) {
     if (current.has(task)) continue;
+    out.push(...log);
     const st = replayOne(log);
     if (st.alive) out.push({ at: iso(st.lastAt), task, kind: "deleted" });
   }
   return sortTaskEvents(out);
+}
+
+/**
+ * The events backfill would synthesize for one task that its recorded log
+ * lacks. A store appends these just before it records the task's `deleted`
+ * event: once the concept is gone, its frontmatter (createdAt, takenAt,
+ * doneAt, memberships) can no longer be read, so a task that predates the
+ * log would otherwise lose its whole historical contribution.
+ */
+export function missingTaskHistory(
+  concept: BurndownConcept,
+  edges: readonly Edge[],
+  events: readonly TaskEvent[],
+  fallbackAt?: string,
+): TaskEvent[] {
+  const log = events.filter((e) => e.task === concept.id);
+  const have = new Set(log);
+  return backfillTaskEvents([concept], edges, log, fallbackAt).filter((e) => !have.has(e));
 }
 
 // ------------------------------------------------------------------ metrics
@@ -696,8 +729,9 @@ export function computeBurndown(input: BurndownInput): BurndownResult {
     },
   };
 
-  // Net done amount in [a, b): done transitions minus reopen-from-done.
-  const doneBetween = (a: number, b: number): number => {
+  // Net done amount in [a, b): done transitions minus reopen-from-done, for
+  // tasks that are members (by `member`, the scope by default) when it happens.
+  const doneBetween = (a: number, b: number, member: (st: ReplayState) => boolean = inScope): number => {
     let total = 0;
     for (const tl of relevant) {
       const st: ReplayState = { alive: false, status: "open", scopes: new Set(), lastAt: -Infinity };
@@ -708,8 +742,8 @@ export function computeBurndown(input: BurndownInput): BurndownResult {
         const wasDone = st.status === "done";
         applyEvent(st, e);
         if (t < a) continue;
-        if (e.kind === "done" && !wasDone && inScope(st)) total += amount(st);
-        if (e.kind === "reopened" && wasDone && inScope(st)) total -= amount(st);
+        if (e.kind === "done" && !wasDone && member(st)) total += amount(st);
+        if (e.kind === "reopened" && wasDone && member(st)) total -= amount(st);
       }
     }
     return round(total);
@@ -806,12 +840,20 @@ export function computeBurndown(input: BurndownInput): BurndownResult {
         const a = dayStart(it.startDate as string);
         const b = dayStart(it.endDate as string) + DAY;
         if (a > nowMs) continue;
+        // Count only this iteration's own work (its closure), not everything
+        // in the parent scope that finished between its dates.
+        const own = scopeClosure(it.id, input.edges);
+        const inIteration = (st: ReplayState): boolean => {
+          if (!st.alive) return false;
+          for (const sc of st.scopes) if (own.has(sc)) return true;
+          return false;
+        };
         periods.push({
           label: it.title,
           id: it.id,
           from: iso(a),
           to: iso(b),
-          done: doneBetween(a, Math.min(b, nowMs + 1)),
+          done: doneBetween(a, Math.min(b, nowMs + 1), inIteration),
           complete: b <= nowMs,
         });
       }

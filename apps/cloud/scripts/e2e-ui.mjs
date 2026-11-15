@@ -58,6 +58,28 @@ async function burndownJourney(vaultId, task) {
     body: { title: current.json.title, body: current.json.body, estimate: 3, relations: { part_of: ["auth-system", "sprint-1"] } },
   });
   step("assign the task to the iteration (PUT part_of) → 200", put.status === 200 && put.json?.estimate === 3, `status ${put.status}`);
+  // The board's picker: a second iteration, swapped server-side. The task's
+  // other part_of (auth-system) must survive even though the request names
+  // only the iteration.
+  await api("POST", `/api/vaults/${vaultId}/concepts`, {
+    body: { id: "sprint-0", title: "Sprint 0", type: "iteration", startDate: today, endDate: end, body: "" },
+  });
+  const swap = await api("POST", `/api/vaults/${vaultId}/concepts/${task.id}/membership`, {
+    body: { type: "iteration", target: "sprint-0" },
+  });
+  const back = await api("POST", `/api/vaults/${vaultId}/concepts/${task.id}/membership`, {
+    body: { type: "iteration", target: "sprint-1" },
+  });
+  const graphAfter = await api("GET", `/api/vaults/${vaultId}/graph`);
+  const partOf = (graphAfter.json?.edges ?? [])
+    .filter((e) => e.from === task.id && e.relation === "part_of")
+    .map((e) => e.to)
+    .sort();
+  step(
+    "membership swap keeps the task's other links (server-side, atomic)",
+    swap.status === 200 && back.status === 200 && JSON.stringify(partOf) === JSON.stringify(["auth-system", "sprint-1"]),
+    `${swap.status}/${back.status} ${JSON.stringify(partOf)}`,
+  );
   const take = await api("PATCH", `/api/vaults/${vaultId}/tasks/${task.id}`, { body: { action: "take", takenBy: "e2e-agent" } });
   const done = await api("PATCH", `/api/vaults/${vaultId}/tasks/${task.id}`, { body: { action: "complete", outcome: "Done in e2e." } });
   step("take + complete the task → 200", take.status === 200 && done.status === 200, `${take.status}/${done.status}`);

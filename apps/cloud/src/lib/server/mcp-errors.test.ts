@@ -74,6 +74,7 @@ function vaultWith(overrides: Partial<VaultClient>): VaultClient {
     dreamRevert: async (id) => notFound(id),
     dreamConfigure: async () => DREAM_STATUS,
     dreamApply: async (id) => notFound(id),
+    setMembership: async (args) => notFound(args.id),
     burndown: async () => notFound("burndown unsupported in this fake"),
   };
   return { ...base, ...overrides };

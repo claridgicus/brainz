@@ -293,3 +293,99 @@ describe("VaultDO schema v9 migration on a v8 vault that already has tasks", () 
     expect(b?.cycleHours.count).toBe(1);
   });
 });
+
+describe("review regressions (VaultDO)", () => {
+  it("setMembership swaps the iteration from stored relations, keeping links a stale client never saw", async () => {
+    const { vault } = await freshVault();
+    for (const [id, type] of [
+      ["auth", "domain"],
+      ["s1", "iteration"],
+      ["s2", "iteration"],
+      ["m1", "milestone"],
+      ["dep", "feature"],
+    ] as const) {
+      await vault.upsertConcept({ id, title: id, body: "", type });
+    }
+    await vault.upsertConcept({
+      id: "t",
+      title: "T",
+      body: "See [[dep]].",
+      type: "task",
+      taskStatus: "open",
+      relations: { part_of: ["auth", "s1"] },
+    });
+    // An agent adds links after the board's graph cache was taken.
+    await vault.link({ from: "t", to: "dep", relation: "depends_on" });
+    await vault.link({ from: "t", to: "m1", relation: "part_of" });
+
+    const { concept } = await vault.setMembership({ id: "t", type: "iteration", target: "s2" });
+    expect(concept.id).toBe("t");
+    const edges = await storedEdges(vault, "t");
+    expect(edges).toEqual(
+      expect.arrayContaining(["part_of:auth", "part_of:m1", "part_of:s2", "depends_on:dep", "references:dep"]),
+    );
+    expect(edges).not.toContain("part_of:s1");
+    expect(vault.taskEvents().filter((e) => e.task === "t").slice(-2).map((e) => `${e.kind}:${e.scope}`)).toEqual([
+      "scope_added:s2",
+      "scope_removed:s1",
+    ]);
+
+    // null clears just the iteration; a wrong type or unknown target is refused.
+    await vault.setMembership({ id: "t", type: "iteration", target: null });
+    expect((await storedEdges(vault, "t")).filter((e) => e.startsWith("part_of:"))).toEqual(["part_of:auth", "part_of:m1"]);
+    await expect(vault.setMembership({ id: "t", type: "iteration", target: "auth" })).rejects.toThrow(/not a iteration/);
+    const res = await vault.fetch(
+      new Request("https://vault-do/setMembership", {
+        method: "POST",
+        body: JSON.stringify({ id: "t", type: "iteration", target: "ghost" }),
+      }),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("deleting a task from before the history table keeps its rebuilt history", async () => {
+    const { vault, fake } = await freshVault();
+    await vault.upsertConcept({ id: "auth", title: "Auth", body: "", type: "domain" });
+    await vault.upsertConcept({ id: "t", title: "T", body: "", type: "task", relations: { part_of: ["auth"] } });
+    // Make it look pre-upgrade: an October task done in October, with no recorded history.
+    fake.db
+      .prepare(
+        `UPDATE concept SET task_status = 'done', taken_by = 'w', taken_at = ?, done_at = ?, created_at = ? WHERE id = 't'`,
+      )
+      .run("2026-10-02T00:00:00.000Z", "2026-10-03T00:00:00.000Z", "2026-10-01T00:00:00.000Z");
+    fake.db.exec(`DELETE FROM task_event`);
+    const now = new Date("2026-11-10T00:00:00.000Z");
+    const before = vault.burndown({ scope: "auth", from: "2026-10-01" }, now);
+    const oct5 = (r: typeof before) => r.series?.find((p) => p.at === "2026-10-05T00:00:00.000Z");
+    expect(oct5(before)).toMatchObject({ scope: 1, done: 1 });
+
+    vault.deleteConcept("t");
+    expect(vault.taskEvents().map((e) => e.kind)).toEqual(["created", "scope_added", "taken", "done", "deleted"]);
+    const after = vault.burndown({ scope: "auth", from: "2026-10-01" }, now);
+    expect(oct5(after)).toMatchObject({ scope: 1, done: 1 }); // October unchanged
+    // Gone from the moment it was deleted (the deleted event uses the real clock).
+    expect(vault.burndown({ scope: "auth" }, new Date(Date.now() + 60_000)).totals.scope).toBe(0);
+  });
+
+  it("a stale claim re-taken under the same label records a fresh take", async () => {
+    const { vault, fake } = await freshVault();
+    await vault.upsertConcept({ id: "t", title: "T", body: "", type: "task", taskStatus: "open" });
+    await vault.takeTask({ id: "t" }); // default label "an agent"
+    // Age the claim past the reclaim TTL, then reclaim with the same default label.
+    const old = new Date(Date.now() - 47 * 3_600_000).toISOString();
+    fake.db.prepare(`UPDATE concept SET taken_at = ? WHERE id = 't'`).run(old);
+    fake.db.prepare(`UPDATE task_event SET at = ? WHERE kind = 'taken'`).run(old);
+    await vault.takeTask({ id: "t" });
+    const taken = vault.taskEvents().filter((e) => e.kind === "taken");
+    expect(taken).toHaveLength(2);
+    expect(taken.map((e) => e.by)).toEqual(["an agent", "an agent"]);
+    const r = vault.burndown({ staleAfterHours: 24 });
+    expect(r.stale).toEqual([]);
+  });
+});
+
+/** The concept's outgoing edges as `relation:to`, as the DO stores them. */
+async function storedEdges(vault: VaultDO, id: string): Promise<string[]> {
+  const g = await vault.graph();
+  return g.edges.filter((e) => e.from === id).map((e) => `${e.relation}:${e.to}`).sort();
+}

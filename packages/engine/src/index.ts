@@ -67,6 +67,7 @@ export {
   backfillTaskEvents,
   computeBurndown,
   diffTaskEvents,
+  missingTaskHistory,
   scopeClosure,
   sortTaskEvents,
   taskSnapshot,

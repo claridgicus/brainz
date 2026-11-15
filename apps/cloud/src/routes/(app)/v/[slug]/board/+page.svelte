@@ -134,8 +134,9 @@
 
 	// ---------------------------------------------------- iteration assign
 	// Iterations are ordinary concepts (type "iteration"); a task is in one
-	// through a part_of edge. Assigning rewrites the task's part_of list via
-	// PUT /concepts/:id: iteration targets are replaced, others (domains) kept.
+	// through a part_of edge. The server swaps it atomically
+	// (POST /concepts/:id/membership) from the stored relations, so links an
+	// agent added since this page last refreshed its graph are kept.
 	const iterations = $derived(
 		graph.nodes
 			.filter((n) => n.type === "iteration" && !n.pending)
@@ -154,22 +155,11 @@
 		busyId = task.id;
 		error = null;
 		try {
-			const current = await api.getConcept(vault.id, task.id);
-			const relations: Record<string, string[]> = {};
-			for (const e of graph.edges) {
-				if (e.from !== task.id || e.relation === "references") continue;
-				(relations[e.relation] ??= []).push(e.to);
-			}
-			const partOf = (relations.part_of ?? []).filter((id) => !iterationIds.has(id));
-			if (iterationId) partOf.push(iterationId);
-			if (partOf.length > 0) relations.part_of = partOf;
-			else delete relations.part_of;
-			await api.upsertConcept(vault.id, {
-				id: task.id,
-				title: current.title,
-				body: current.body,
-				relations,
+			await api.setMembership(vault.id, task.id, {
+				type: "iteration",
+				target: iterationId || null,
 			});
+			// Reflect it locally; the next graph refresh brings the server's view.
 			graph = {
 				...graph,
 				edges: [

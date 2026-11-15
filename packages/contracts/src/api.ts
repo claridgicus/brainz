@@ -193,6 +193,22 @@ export const conceptListResponseSchema = listConceptsOutputSchema;
 /** POST .../concepts / PUT .../concepts/:id body — same shape as the upsert_concept tool input. */
 export const conceptUpsertRequestSchema = upsertConceptInputSchema;
 
+/**
+ * POST .../concepts/:id/membership — atomically replace the concept's
+ * container of one type (e.g. move a task to another iteration, set an
+ * iteration's milestone). The server drops the `relation` targets whose
+ * concept has `type`, adds `target` (null = none) and keeps every other
+ * relation as stored. Response: the updated concept (apiConceptSchema).
+ */
+export const conceptMembershipRequestSchema = z
+  .object({
+    relation: z.enum(["part_of", "realizes"]).optional(),
+    type: z.string().min(1),
+    target: z.string().min(1).nullable(),
+  })
+  .strict();
+export type ConceptMembershipRequest = z.infer<typeof conceptMembershipRequestSchema>;
+
 // -------------------------------------------------------------------- tasks
 
 /** GET .../tasks query params. `groupBy` is a board-layout hint; the server

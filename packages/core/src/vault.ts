@@ -4,6 +4,7 @@ import {
   assembleContext,
   computeBurndown,
   diffTaskEvents,
+  missingTaskHistory,
   taskSnapshot,
   TASK_EVENT_KINDS,
   bfsRelated,
@@ -598,11 +599,11 @@ export class Vault {
     if (input.relations !== undefined) data.relations = input.relations;
 
     const body = input.body.endsWith("\n") ? input.body : `${input.body}\n`;
-    const before = this.#taskSnap(id);
+    const before = this.#taskState(id);
     await fsp.mkdir(path.dirname(filePath), { recursive: true });
     await fsp.writeFile(filePath, serializeNote(data, body));
     await this.#reindexFile(filePath);
-    this.#recordTaskDiff(before, this.#taskSnap(id));
+    this.#recordTaskDiff(before, this.#taskState(id));
 
     const saved = this.getConcept(id);
     if (!saved) throw new Error(`failed to index upserted concept: ${id}`);
@@ -617,7 +618,7 @@ export class Vault {
   async deleteConcept(id: string): Promise<{ deleted: boolean }> {
     const existing = this.getConcept(id);
     if (!existing) return { deleted: false };
-    const before = this.#taskSnap(id);
+    const before = this.#taskState(id);
     await fsp.rm(existing.filePath, { force: true });
     // File is gone → #reindexFile drops the concept's rows (and its edges/FTS/
     // embedding via #removeConcept).
@@ -647,10 +648,10 @@ export class Vault {
     relations[relation] = list;
     data.relations = relations;
 
-    const before = this.#taskSnap(from);
+    const before = this.#taskState(from);
     await fsp.writeFile(source.filePath, serializeNote(data, parsed.content));
     await this.#reindexFile(source.filePath);
-    this.#recordTaskDiff(before, this.#taskSnap(from));
+    this.#recordTaskDiff(before, this.#taskState(from));
   }
 
   // ---------------------------------------------------------- task history
@@ -660,7 +661,8 @@ export class Vault {
     return path.join(this.dir, "history", "task-events.jsonl");
   }
 
-  #taskSnap(id: string): TaskSnapshot | null {
+  /** A task's burndown state (snapshot + the meta/edges it came from); snap is null for non-tasks. */
+  #taskState(id: string): { meta: ConceptMeta; edges: Edge[]; snap: TaskSnapshot | null } | null {
     const meta = this.#getMeta(id);
     if (!meta) return null;
     const edges = (
@@ -668,14 +670,44 @@ export class Vault {
         .prepare("SELECT from_id, to_id, relation FROM edges WHERE from_id = ?")
         .all(id) as { from_id: string; to_id: string; relation: string }[]
     ).map((r) => ({ from: r.from_id, to: r.to_id, relation: r.relation }));
-    return taskSnapshot(meta, edges);
+    return { meta: this.#datedMeta(meta), edges, snap: taskSnapshot(meta, edges) };
   }
 
-  #recordTaskDiff(before: TaskSnapshot | null, after: TaskSnapshot | null): void {
-    const events = diffTaskEvents(before, after, new Date().toISOString());
+  /** Task meta with `createdAt` filled from the note's file birth time when the frontmatter lacks it. */
+  #datedMeta(m: ConceptMeta): ConceptMeta {
+    if (m.type !== "task" || m.createdAt) return m;
+    try {
+      const st = fs.statSync(m.filePath);
+      const born = st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs;
+      return { ...m, createdAt: new Date(born).toISOString() };
+    } catch {
+      return m;
+    }
+  }
+
+  #recordTaskDiff(
+    before: { meta: ConceptMeta; edges: Edge[]; snap: TaskSnapshot | null } | null,
+    after: { snap: TaskSnapshot | null } | null,
+  ): void {
+    const events = diffTaskEvents(before?.snap ?? null, after?.snap ?? null, new Date().toISOString());
     if (events.length === 0) return;
+    // A task leaving (deleted, or no longer a task): first persist the history
+    // its frontmatter can still rebuild (a note from before the log has none
+    // recorded), so its past contribution survives the deletion. `before` was
+    // captured while the note still existed, so its file dates it too.
+    const missing =
+      before?.snap && events.some((e) => e.kind === "deleted")
+        ? missingTaskHistory(
+            before.meta,
+            before.edges,
+            this.taskEvents().filter((e) => e.task === before.meta.id),
+          )
+        : [];
     fs.mkdirSync(path.dirname(this.taskEventsPath), { recursive: true });
-    fs.appendFileSync(this.taskEventsPath, events.map((e) => `${JSON.stringify(e)}\n`).join(""));
+    fs.appendFileSync(
+      this.taskEventsPath,
+      [...missing, ...events].map((e) => `${JSON.stringify(e)}\n`).join(""),
+    );
   }
 
   /** The recorded task history (malformed lines are skipped), in file order. */
@@ -713,16 +745,7 @@ export class Vault {
    * `createdAt` frontmatter is dated by its file's birth time for backfill.
    */
   burndown(opts: BurndownOptions = {}, now: Date = new Date()): BurndownResult {
-    const concepts = this.listConcepts().map((m) => {
-      if (m.type !== "task" || m.createdAt) return m;
-      try {
-        const st = fs.statSync(m.filePath);
-        const born = st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs;
-        return { ...m, createdAt: new Date(born).toISOString() };
-      } catch {
-        return m;
-      }
-    });
+    const concepts = this.listConcepts().map((m) => this.#datedMeta(m));
     return computeBurndown({
       ...opts,
       concepts,
