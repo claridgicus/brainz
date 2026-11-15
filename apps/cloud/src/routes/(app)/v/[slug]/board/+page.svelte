@@ -85,7 +85,11 @@
 		tick++;
 		if (tick % GRAPH_EVERY === 0 || hasLaneMiss(tasks, graph)) void refreshGraph();
 	}
+	// The iteration picker needs JS: disabled until hydrated so an early
+	// change is never silently dropped.
+	let hydrated = $state(false);
 	onMount(() => {
+		hydrated = true;
 		const timer = setInterval(poll, POLL_MS);
 		return () => clearInterval(timer);
 	});
@@ -330,7 +334,7 @@
 										<span class="sr-only">Iteration for {task.title}</span>
 										<select
 											value={iterationOf(task.id)}
-											disabled={busyId === task.id}
+											disabled={!hydrated || busyId === task.id}
 											onchange={(e) => void assignIteration(task, e.currentTarget.value)}
 										>
 											<option value="">No iteration</option>

@@ -108,6 +108,10 @@ async function burndownJourney(vaultId, task) {
       panel.html.includes('role="img"'),
   );
   step("panel SSR: agents table lists the agent", panel.html.includes("e2e-agent"));
+  step(
+    "panel SSR: the unit chips are real links (work before hydration)",
+    /<a[^>]*data-unit="points"[^>]*href="\?scope=sprint-1&amp;unit=points"|<a[^>]*href="\?scope=sprint-1&amp;unit=points"[^>]*data-unit="points"/.test(panel.html),
+  );
   step("panel SSR: iterations & milestones list + editor", panel.html.includes("Iterations &amp; milestones") && panel.html.includes("New iteration"));
   const boardIt = await page("/v/ui-vault/board");
   step("board SSR: the iteration picker", boardIt.html.includes("No iteration") && boardIt.html.includes("Sprint 1"));
@@ -121,50 +125,77 @@ async function burndownJourney(vaultId, task) {
   try {
     const base = new URL(BASE);
     for (const [name, value] of jar) agentBrowser(["cookies", "set", name, value, "--url", `${base.origin}/`]);
+    // Everything below waits on a condition (hydration, the outcome) with a
+    // generous deadline, never a fixed sleep: on a loaded box hydration and
+    // client navigation can take far longer than any sleep we'd pick.
     agentBrowser(["open", `${BASE}/v/ui-vault/burndown?scope=sprint-1`]);
+    const hydrated = await browserUntil(`document.querySelector('.bd-page')?.dataset.hydrated === 'true'`);
+    step("browser: the burndown panel hydrates", hydrated !== null);
+    const chart = await browserUntil(`!!document.querySelector('.bd-root svg path.remaining')`);
+    step("browser: the chart renders", chart !== null);
     if (process.env.E2E_UI_SCREENSHOT) {
       agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-burndown-load.png")]);
     }
-    agentBrowser(["wait", ".bd-root svg path.remaining"]);
-    // Move the pointer across the plot (a real pointermove, not a synthetic event).
-    agentBrowser(["eval", `document.querySelector('.bd-root svg').scrollIntoView({ block: 'center' })`]);
-    const [bx, by] = agentBrowser([
-      "eval",
-      `(() => { const r = document.querySelector('.bd-root svg').getBoundingClientRect(); return Math.round(r.left + r.width * 0.3) + ',' + Math.round(r.top + r.height * 0.5); })()`,
-    ])
-      .replace(/"/g, "")
-      .split(",")
-      .map(Number);
-    const box = { x: bx, y: by };
-    agentBrowser(["mouse", "move", String(Math.round(box.x)), String(Math.round(box.y))]);
-    agentBrowser(["mouse", "move", String(Math.round(box.x) + 20), String(Math.round(box.y))]);
-    agentBrowser(["wait", ".bd-root .tip"]);
-    const tip = agentBrowser(["eval", `document.querySelector('.bd-root .tip')?.textContent ?? ''`]);
+
+    // Hover: a real pointer moving across the plot, retried until the
+    // tooltip shows (the handler only exists once hydrated).
+    let tip = "";
+    const tipDeadline = Date.now() + BROWSER_DEADLINE_MS;
+    while (Date.now() < tipDeadline && !tip.includes("Remaining")) {
+      agentBrowser(["eval", `document.querySelector('.bd-root svg')?.scrollIntoView({ block: 'center' })`]);
+      const [bx, by] = agentBrowser([
+        "eval",
+        `(() => { const r = document.querySelector('.bd-root svg').getBoundingClientRect(); return Math.round(r.left + r.width * 0.3) + ',' + Math.round(r.top + r.height * 0.5); })()`,
+      ])
+        .replace(/"/g, "")
+        .split(",")
+        .map(Number);
+      agentBrowser(["mouse", "move", String(bx), String(by)]);
+      agentBrowser(["mouse", "move", String(bx + 20), String(by)]);
+      tip = (await browserUntil(`document.querySelector('.bd-root .tip')?.textContent ?? ''`, { timeoutMs: 2000 })) ?? "";
+    }
     step("browser: hovering the chart shows the crosshair tooltip", tip.includes("Remaining") && tip.includes("Scope"), tip.slice(0, 80));
     if (process.env.E2E_UI_SCREENSHOT) {
       agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-burndown.png")]);
     }
-    agentBrowser(["click", "button.chip:nth-of-type(2)"]);
-    agentBrowser(["wait", "1500"]);
-    const url = agentBrowser(["eval", "location.search"]);
-    step("browser: the Points chip switches the unit in the URL", url.includes("unit=points"), url);
+
+    // The unit chips are real links (they work before hydration too).
+    agentBrowser(["click", 'a.chip[data-unit="points"]']);
+    const unitUrl = await browserUntil(
+      `location.search.includes('unit=points') && document.querySelector('a.chip[data-unit="points"]')?.getAttribute('aria-current') === 'true' ? location.search : ''`,
+    );
+    step("browser: the Points chip switches the unit in the URL", Boolean(unitUrl?.includes("unit=points")), unitUrl ?? "(timed out)");
+
+    // The editor needs JS: its button is disabled until hydrated, so wait for
+    // it to be enabled, then for the form, then for the saved concept.
+    const enabled = await browserUntil(
+      `(() => { const b = document.querySelector('[data-testid="new-iteration"]'); return !!b && !b.disabled; })()`,
+    );
+    step("browser: New iteration is enabled once hydrated", enabled !== null);
     agentBrowser(["click", '[data-testid="new-iteration"]']);
-    agentBrowser(["fill", "#bd-title", "Sprint 2"]);
-    // Native date inputs don't take typed text from agent-browser: set the
-    // value and fire the input event Svelte's bind:value listens to.
-    const setDate = (sel, day) =>
+    const formOpen = await browserUntil(`!!document.querySelector('#bd-title')`);
+    step("browser: the iteration form opens", formOpen !== null);
+    // Set values the way a user's typing lands for Svelte's bind:value (native
+    // date inputs don't take typed text from agent-browser).
+    const setValue = (sel, value) =>
       agentBrowser([
         "eval",
-        `(() => { const el = document.querySelector('${sel}'); el.value = '${day}'; el.dispatchEvent(new Event('input', { bubbles: true })); return el.value; })()`,
+        `(() => { const el = document.querySelector('${sel}'); el.value = '${value}'; el.dispatchEvent(new Event('input', { bubbles: true })); return el.value; })()`,
       ]);
-    setDate("#bd-start", new Date().toISOString().slice(0, 10));
-    setDate("#bd-end", new Date(Date.now() + 13 * 86_400_000).toISOString().slice(0, 10));
+    setValue("#bd-title", "Sprint 2");
+    setValue("#bd-start", new Date().toISOString().slice(0, 10));
+    setValue("#bd-end", new Date(Date.now() + 13 * 86_400_000).toISOString().slice(0, 10));
     agentBrowser(["click", ".draft button[type=submit]"]);
-    agentBrowser(["wait", "2500"]);
+    let created = { status: 0, json: null };
+    const savedDeadline = Date.now() + BROWSER_DEADLINE_MS;
+    while (Date.now() < savedDeadline) {
+      created = await api("GET", `/api/vaults/${vaultId}/concepts/sprint-2`);
+      if (created.status === 200) break;
+      await sleep(500);
+    }
     if (process.env.E2E_UI_SCREENSHOT) {
       agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-burndown-saved.png")]);
     }
-    const created = await api("GET", `/api/vaults/${vaultId}/concepts/sprint-2`);
     step(
       "browser: creating an iteration from the panel saves it with dates",
       created.status === 200 && created.json?.type === "iteration" && Boolean(created.json?.endDate),
@@ -327,6 +358,29 @@ function agentBrowser(args) {
   const res = spawnSync("agent-browser", ["--session", "brainz-e2e-ui", ...args], { encoding: "utf8" });
   if (res.status !== 0) throw new Error(`agent-browser ${args[0]} failed: ${res.stderr || res.stdout}`);
   return res.stdout.trim();
+}
+
+const BROWSER_DEADLINE_MS = Number(process.env.E2E_UI_BROWSER_DEADLINE_MS ?? 120_000);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Poll a page expression until it is truthy (not "", false, null, undefined)
+ * or the deadline passes. Returns its value as a string, or null on timeout.
+ * agent-browser's own waits cap at 25s; a loaded box needs more headroom.
+ */
+async function browserUntil(expr, { timeoutMs = BROWSER_DEADLINE_MS, everyMs = 300 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    try {
+      const raw = agentBrowser(["eval", expr]).trim();
+      const value = raw.replace(/^"|"$/g, "");
+      if (value && !["false", "null", "undefined", "0"].includes(value)) return value;
+    } catch {
+      /* page still loading or navigating — try again */
+    }
+    await sleep(everyMs);
+  } while (Date.now() < deadline);
+  return null;
 }
 
 function hasAgentBrowser() {

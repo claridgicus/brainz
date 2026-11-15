@@ -40,20 +40,31 @@
 	const taskTags = $derived(
 		[...new Set(concepts.filter((c) => c.type === "task").flatMap((c) => c.tags))].sort(),
 	);
-	function setQuery(next: { scope?: string; unit?: string }) {
-		const u = new URL(window.location.href);
+	/** `?scope=&unit=` for a scope/unit change — rendered into real hrefs so the
+	 * links work before hydration (and without JS); SvelteKit routes them
+	 * client-side once hydrated. */
+	function queryHref(next: { scope?: string; unit?: string }): string {
+		const params = new URLSearchParams();
 		const s = next.scope ?? scope;
 		const un = next.unit ?? unit;
-		if (s) u.searchParams.set("scope", s);
-		else u.searchParams.delete("scope");
-		if (un === "points") u.searchParams.set("unit", "points");
-		else u.searchParams.delete("unit");
-		void goto(u, { keepFocus: true, noScroll: true });
+		if (s) params.set("scope", s);
+		if (un === "points") params.set("unit", "points");
+		const qs = params.toString();
+		return qs ? `?${qs}` : "?";
 	}
+	function setQuery(next: { scope?: string; unit?: string }) {
+		void goto(queryHref(next), { keepFocus: true, noScroll: true });
+	}
+
+	// Controls that only work with JS (the chart hover, the iteration editor)
+	// stay disabled until the page has hydrated, so an early click is never
+	// silently dropped; `data-hydrated` on the root marks the moment.
+	let hydrated = $state(false);
 
 	// ------------------------------------------------------------ polling
 	const POLL_MS = 15000;
 	onMount(() => {
+		hydrated = true;
 		const timer = setInterval(async () => {
 			try {
 				const next = await api.burndown(vault.id, { scope: scope || undefined, unit });
@@ -168,7 +179,7 @@
 
 <svelte:head><title>Burndown — {vault.name} — Brainz</title></svelte:head>
 
-<div class="bd-page">
+<div class="bd-page" data-hydrated={hydrated ? "true" : "false"}>
 	<div class="toolbar">
 		<div class="left">
 			<h1>{vault.name} · Burndown</h1>
@@ -176,9 +187,18 @@
 			<a class="btn btn-ghost btn-sm" href="/v/{vault.slug}/board">Board</a>
 		</div>
 		<div class="controls">
-			<label class="scope-pick">
-				<span class="glabel">Scope</span>
-				<select class="select" value={scope} onchange={(e) => setQuery({ scope: e.currentTarget.value })}>
+			<!-- A GET form: before hydration the "Show" button submits it natively;
+			     once hydrated, changing the select navigates straight away. -->
+			<form class="scope-pick" method="get" data-sveltekit-keepfocus data-sveltekit-noscroll>
+				<label for="bd-scope" class="glabel">Scope</label>
+				{#if unit === "points"}<input type="hidden" name="unit" value="points" />{/if}
+				<select
+					id="bd-scope"
+					name="scope"
+					class="select"
+					value={scope}
+					onchange={(e) => setQuery({ scope: e.currentTarget.value })}
+				>
 					<option value="">All tasks</option>
 					{#each SCOPE_GROUPS as [type, label] (type)}
 						{@const items = concepts.filter((c) => c.type === type)}
@@ -194,10 +214,27 @@
 						</optgroup>
 					{/if}
 				</select>
-			</label>
+				{#if !hydrated}<button type="submit" class="btn btn-sm">Show</button>{/if}
+			</form>
 			<div class="unit" role="group" aria-label="Unit">
-				<button type="button" class="chip" class:on={unit === "tasks"} onclick={() => setQuery({ unit: "tasks" })}>Tasks</button>
-				<button type="button" class="chip" class:on={unit === "points"} onclick={() => setQuery({ unit: "points" })}>Points</button>
+				<a
+					class="chip"
+					class:on={unit === "tasks"}
+					data-unit="tasks"
+					aria-current={unit === "tasks" ? "true" : undefined}
+					href={queryHref({ unit: "tasks" })}
+					data-sveltekit-keepfocus
+					data-sveltekit-noscroll>Tasks</a
+				>
+				<a
+					class="chip"
+					class:on={unit === "points"}
+					data-unit="points"
+					aria-current={unit === "points" ? "true" : undefined}
+					href={queryHref({ unit: "points" })}
+					data-sveltekit-keepfocus
+					data-sveltekit-noscroll>Points</a
+				>
 			</div>
 		</div>
 	</div>
@@ -324,8 +361,8 @@
 			<h2>Iterations &amp; milestones</h2>
 			{#if canEdit && !draft}
 				<div class="actions">
-					<button type="button" class="btn btn-sm" data-testid="new-iteration" onclick={() => (draft = emptyDraft("iteration"))}>New iteration</button>
-					<button type="button" class="btn btn-sm" data-testid="new-milestone" onclick={() => (draft = emptyDraft("milestone"))}>New milestone</button>
+					<button type="button" class="btn btn-sm" data-testid="new-iteration" disabled={!hydrated} onclick={() => (draft = emptyDraft("iteration"))}>New iteration</button>
+					<button type="button" class="btn btn-sm" data-testid="new-milestone" disabled={!hydrated} onclick={() => (draft = emptyDraft("milestone"))}>New milestone</button>
 				</div>
 			{/if}
 		</div>
@@ -381,10 +418,10 @@
 				{#each containers as c (c.id)}
 					<li>
 						<span class="kind kind-{c.type}">{c.type}</span>
-						<button type="button" class="linkish" onclick={() => setQuery({ scope: c.id })}>{c.title}</button>
+						<a class="linkish" href={queryHref({ scope: c.id })} data-sveltekit-keepfocus data-sveltekit-noscroll>{c.title}</a>
 						<span class="muted dates">{c.startDate ?? "…"} → {c.endDate ?? "…"}</span>
 						{#if canEdit}
-							<button type="button" class="btn btn-ghost btn-sm" onclick={() => edit(c)}>Edit</button>
+							<button type="button" class="btn btn-ghost btn-sm" disabled={!hydrated} onclick={() => edit(c)}>Edit</button>
 						{/if}
 					</li>
 				{/each}
@@ -446,6 +483,10 @@
 		background: transparent;
 		color: var(--text-dim);
 		cursor: pointer;
+	}
+	a.chip {
+		text-decoration: none;
+		display: inline-block;
 	}
 	.chip.on {
 		color: var(--text);
@@ -625,6 +666,7 @@
 	.linkish {
 		background: none;
 		border: 0;
+		text-decoration: none;
 		color: var(--accent);
 		cursor: pointer;
 		padding: 0;
