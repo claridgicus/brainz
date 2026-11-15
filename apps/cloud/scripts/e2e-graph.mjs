@@ -234,6 +234,29 @@ try {
 	})()`);
 	step("spread-out layout: node circles don't overlap", overlaps === 0, `${overlaps} overlapping pairs`);
 
+	console.log("?focus= on a clustered vault (2000 concepts), the panel opening on mount");
+	await open("n=2000&mode=all");
+	const focusId = await page.evaluate(`window.__bench.graph().nodes.find((n, i) => i > 100 && n.type === "feature")?.id ?? ""`);
+	await open(`n=2000&mode=all&focus=${focusId}&panel=1`);
+	// The panel opens after the Graph's first centring and shrinks the canvas;
+	// the node must end up centred in the narrower canvas (poll, the view animates).
+	let centred = null;
+	for (let i = 0; i < 100 && !centred?.ok; i++) {
+		centred = await page.evaluate(`(() => {
+			const svg = ${SVG};
+			const g = svg?.querySelector('g.node.focused[data-id="${focusId}"]');
+			const panel = document.querySelector('.bench-panel');
+			if (!svg || !g || !panel) return { ok: false, why: "focused node or panel missing" };
+			const a = g.querySelector('circle.mark').getBoundingClientRect(), b = svg.getBoundingClientRect();
+			const off = Math.hypot(a.x + a.width / 2 - (b.x + b.width / 2), a.y + a.height / 2 - (b.y + b.height / 2));
+			return { ok: off < 30 && b.width < innerWidth - 300, why: "off " + Math.round(off) + "px, canvas " + Math.round(b.width) + "px" };
+		})()`);
+		if (!centred?.ok) await sleep(100);
+	}
+	const s2 = await stats();
+	step("the focus vault uses the clustered layout", s2.mode === "tree", `mode=${s2.mode}`);
+	step("?focus= centres the focused node in the canvas left beside the panel", centred?.ok === true, `${focusId}: ${centred?.why}`);
+
 	step("no uncaught page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
 } finally {
 	await page.close();

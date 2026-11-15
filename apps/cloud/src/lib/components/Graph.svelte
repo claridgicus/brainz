@@ -227,12 +227,19 @@
 	let focusReveal = focusRevealSet(startFocus, graph.edges);
 	/** Centre on this node in place of the first fit (consumed once). */
 	let pendingCenter: string | null = startFocus;
+	/**
+	 * After that centring, the node to keep centred while the canvas changes
+	 * size (the parent opening its concept panel right after mount, a window
+	 * resize) — until the user pans, zooms or clicks.
+	 */
+	let centerHold: string | null = null;
 	/** If a centre is pending, pan to it (in place of the first fit). */
 	function consumeCenter(): boolean {
 		const id = pendingCenter;
 		if (id === null) return false;
 		pendingCenter = null;
 		if (!posOf(id)) return false;
+		centerHold = id;
 		panTo(id);
 		return true;
 	}
@@ -1826,6 +1833,7 @@
 		for (const g of nodeEls.values()) g.classList.remove("pinned");
 		// Clear any sticky focus so the dim + off-type reveal don't survive a reset.
 		focused = null;
+		centerHold = null;
 		focusReveal = new Set();
 		manualOpen.clear();
 		setExpandPolicy("auto");
@@ -1854,12 +1862,16 @@
 	}
 
 	let animating = false;
+	/** Bumped per animation: a newer one (e.g. a re-centre) cancels the older. */
+	let animation = 0;
 	function animateView(tx: number, ty: number, tk: number): void {
 		animating = true;
+		const run = ++animation;
 		const from = { ...view };
 		const t0 = performance.now();
 		const dur = 380;
 		const step = (t: number): void => {
+			if (run !== animation) return;
 			const p = Math.min(1, (t - t0) / dur);
 			const e = 1 - (1 - p) ** 3; // ease-out cubic
 			view.x = from.x + (tx - from.x) * e;
@@ -1912,6 +1924,23 @@
 			resizeTimer = setTimeout(() => (mode === "flat" ? renderGraph() : scheduleLod()), 200);
 		};
 		window.addEventListener("resize", onResize);
+		// Keep an initially focused node centred while the canvas resizes (the
+		// workspace opens its panel just after mount). Any user pan/zoom/click
+		// releases it; capture so node handlers stopping propagation still count.
+		const release = (): void => {
+			centerHold = null;
+		};
+		svg.addEventListener("pointerdown", release, { capture: true });
+		svg.addEventListener("wheel", release, { capture: true, passive: true });
+		let size = { w: 0, h: 0 };
+		const resizeObserver = new ResizeObserver(() => {
+			const w = svg.clientWidth;
+			const h = svg.clientHeight;
+			if (w === size.w && h === size.h) return;
+			size = { w, h };
+			if (centerHold !== null) panTo(centerHold);
+		});
+		resizeObserver.observe(svg);
 		// Escape clears sticky focus (only when it's active — otherwise let other
 		// handlers, e.g. closing the concept panel, own the key).
 		const onKeyDown = (ev: KeyboardEvent): void => {
@@ -1921,6 +1950,9 @@
 		return () => {
 			window.removeEventListener("resize", onResize);
 			window.removeEventListener("keydown", onKeyDown);
+			resizeObserver.disconnect();
+			svg.removeEventListener("pointerdown", release, { capture: true });
+			svg.removeEventListener("wheel", release, { capture: true });
 			if (lodTimer) clearTimeout(lodTimer);
 			sim?.stop();
 			topSim?.stop();

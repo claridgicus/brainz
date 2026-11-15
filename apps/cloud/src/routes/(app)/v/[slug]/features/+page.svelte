@@ -186,7 +186,9 @@
 	 * Wheel zoom on the tree's SVG. An action, not onMount: an empty vault has
 	 * no SVG at mount, so the listener must attach whenever the SVG appears
 	 * (e.g. once polling brings in the first tasks). The SVG's first mount also
-	 * frames the tree (the empty start had nothing to fit).
+	 * frames the tree (the empty start had nothing to fit). It measures the
+	 * canvas itself: actions run before the size bindings first update, so
+	 * vw/vh would still be the server-render placeholder.
 	 */
 	function wheelZoom(node: SVGSVGElement) {
 		// Non-passive so preventDefault stops the page scrolling.
@@ -196,6 +198,11 @@
 			zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0015));
 		};
 		node.addEventListener("wheel", onWheel, { passive: false });
+		const canvas = node.parentElement;
+		if (canvas && canvas.clientWidth > 0 && canvas.clientHeight > 0) {
+			vw = canvas.clientWidth;
+			vh = canvas.clientHeight;
+		}
 		fit(true);
 		return { destroy: () => node.removeEventListener("wheel", onWheel) };
 	}

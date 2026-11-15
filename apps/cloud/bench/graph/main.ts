@@ -5,7 +5,9 @@
 // zoom LOD, all = every type shown), bundle=0 (straight edges), budget (node cap),
 // flatmax (flat-layout threshold override), dsize (concepts per domain, default 40;
 // ~14 mimics a real product vault with many small domains), keep=1 (keep localStorage),
-// orphans (share of concepts with no part_of parent, e.g. 0.5).
+// orphans (share of concepts with no part_of parent, e.g. 0.5), focus=<id> (the
+// workspace's ?focus=: initial focus + select on mount), panel=1 (a 380px side
+// panel opens while something is selected).
 import { mount } from "svelte";
 import "../../src/app.css";
 import Bench from "./Bench.svelte";
@@ -21,4 +23,6 @@ const graph = syntheticGraph(n, 42, params.has("dsize") ? Number(params.get("dsi
 const bundling = params.get("bundle") !== "0";
 const budget = params.has("budget") ? Number(params.get("budget")) : undefined;
 const flatMax = params.has("flatmax") ? Number(params.get("flatmax")) : undefined;
-mount(Bench, { target: document.getElementById("app")!, props: { graph, mode, bundling, budget, flatMax } });
+const focus = params.get("focus");
+const panel = params.get("panel") === "1";
+mount(Bench, { target: document.getElementById("app")!, props: { graph, mode, bundling, budget, flatMax, focus, panel } });

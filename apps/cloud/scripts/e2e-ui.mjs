@@ -497,6 +497,10 @@ async function featuresEmptyStartSteps() {
   if (created.status !== 201) return;
   const vaultId = created.json.id;
   try {
+    // Narrow (phone-width): the first fit must frame the tree in the real
+    // canvas, not the 1200px server-render placeholder. The session closes
+    // after this, so the viewport isn't restored.
+    agentBrowser(["set", "viewport", "420", "900"]);
     agentBrowser(["open", `${BASE}/v/empty-tree/features`]);
     const ready = await browserUntil(
       `document.querySelector('.ft-page')?.dataset.hydrated === 'true' && !!document.querySelector('.ft-page .empty') && !document.querySelector('svg.tree')`,
@@ -508,6 +512,19 @@ async function featuresEmptyStartSteps() {
     const appeared = await browserUntil(`!!document.querySelector('svg.tree [data-id]')`);
     step("browser: polling renders the tree once the first task exists", appeared !== null, appeared === null ? browserDiagnostics() : "");
     if (appeared === null) return;
+    const inside = await browserUntil(`(() => {
+      const svg = document.querySelector('svg.tree');
+      const nodes = [...document.querySelectorAll('svg.tree [data-id]')];
+      if (!svg || nodes.length === 0) return '';
+      const b = svg.getBoundingClientRect();
+      const out = nodes.filter((n) => { const r = n.getBoundingClientRect(); return r.left < b.left || r.right > b.right; });
+      return out.length === 0 ? 'inside' : '';
+    })()`);
+    step(
+      "browser: on a narrow screen the first fit frames the tree inside the canvas",
+      inside === "inside",
+      inside ?? agentBrowser(["eval", `JSON.stringify({ svg: document.querySelector('svg.tree')?.getBoundingClientRect(), nodes: [...document.querySelectorAll('svg.tree [data-id]')].map((n) => [n.dataset.id, Math.round(n.getBoundingClientRect().left), Math.round(n.getBoundingClientRect().right)]) })`]),
+    );
     const scaleExpr = `(document.querySelector('svg.tree > g[transform]')?.getAttribute('transform') ?? '').match(/scale\\(([^)]+)\\)/)?.[1] ?? ''`;
     const before = await browserUntil(scaleExpr);
     // Dispatch until the zoom lands: each wheel-in (deltaY < 0) zooms in.
