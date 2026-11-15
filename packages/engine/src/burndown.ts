@@ -419,10 +419,10 @@ export function backfillTaskEvents(
 
 /**
  * The events backfill would synthesize for one task that its recorded log
- * lacks. A store appends these just before it records the task's `deleted`
- * event: once the concept is gone, its frontmatter (createdAt, takenAt,
- * doneAt, memberships) can no longer be read, so a task that predates the
- * log would otherwise lose its whole historical contribution.
+ * lacks: once a write overwrites or deletes the concept's fields (createdAt,
+ * takenAt, doneAt, memberships), a task that predates the log would otherwise
+ * lose its historical contribution. Stores persist them through
+ * {@link taskHistoryRepair}, which also keeps their replay order.
  */
 export function missingTaskHistory(
   concept: BurndownConcept,
@@ -433,6 +433,46 @@ export function missingTaskHistory(
   const log = events.filter((e) => e.task === concept.id);
   const have = new Set(log);
   return backfillTaskEvents([concept], edges, log, fallbackAt).filter((e) => !have.has(e));
+}
+
+/**
+ * How a store persists, before a write, the history backfill can still
+ * rebuild for one task from the fields that write overwrites (SPEC.md "One
+ * diff, two stores").
+ *
+ * - `none`: the log already holds it all.
+ * - `append`: append `events` after the task's log; replay order is the
+ *   order backfill reads them in.
+ * - `replace`: some synthesized event must replay BEFORE a logged event with
+ *   the same timestamp (e.g. a pre-log claim stamped at the creation instant
+ *   of a task created already done). Appended, the stable time sort would
+ *   replay it after that event and invent state (a second completion). The
+ *   store replaces the task's whole log with `events`, which is exactly the
+ *   backfilled sequence in replay order. Order across tasks never matters.
+ *
+ * Idempotent: once persisted, the next call returns `none`.
+ */
+export type TaskHistoryRepair =
+  | { kind: "none" }
+  | { kind: "append"; events: TaskEvent[] }
+  | { kind: "replace"; events: TaskEvent[] };
+
+export function taskHistoryRepair(
+  concept: BurndownConcept,
+  edges: readonly Edge[],
+  events: readonly TaskEvent[],
+  fallbackAt?: string,
+): TaskHistoryRepair {
+  const log = events.filter((e) => e.task === concept.id);
+  const full = backfillTaskEvents([concept], edges, log, fallbackAt);
+  const have = new Set(log);
+  const missing = full.filter((e) => !have.has(e));
+  if (missing.length === 0) return { kind: "none" };
+  // backfillTaskEvents keeps event identity, so compare by reference.
+  const appended = sortTaskEvents([...log, ...missing]);
+  return appended.every((e, i) => e === full[i])
+    ? { kind: "append", events: missing }
+    : { kind: "replace", events: full };
 }
 
 // ------------------------------------------------------------------ metrics

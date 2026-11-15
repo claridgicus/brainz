@@ -7,6 +7,7 @@ import {
   missingTaskHistory,
   nearestContainer,
   scopeClosure,
+  taskHistoryRepair,
   taskSnapshot,
   type BurndownConcept,
   type TaskEvent,
@@ -574,5 +575,48 @@ describe("projection onTrack", () => {
       scope: "a",
     }).projection;
     expect(p).toMatchObject({ remaining: 0, likely: D("2026-11-03"), onTrack: true });
+  });
+});
+
+describe("persisted backfill keeps its causal order", () => {
+  // Created already done on Nov 1 (claim from Oct 30, before the log), estimate changed Nov 9.
+  const created: TaskEvent = { at: D("2026-11-01"), task: "t", kind: "created" };
+  const done: TaskEvent = { at: D("2026-11-01"), task: "t", kind: "done", by: "w" };
+  const before = task("t", {
+    createdAt: D("2026-11-01"),
+    updatedAt: D("2026-11-01"),
+    taskStatus: "done",
+    takenBy: "w",
+    takenAt: D("2026-10-30"),
+    doneAt: D("2026-11-01"),
+  });
+  const after = { ...before, estimate: 3, updatedAt: D("2026-11-09") };
+  const estimated: TaskEvent = { at: D("2026-11-09"), task: "t", kind: "estimated", points: 3 };
+  const completions = (events: TaskEvent[]) => {
+    const r = computeBurndown({ concepts: [after], edges: [], events, now: D("2026-11-12"), from: "2026-10-25", bucket: "day" });
+    return { done: r.totals.done, velocity: r.velocity?.periods.reduce((n, p) => n + p.done, 0) };
+  };
+
+  it("replaces the log when a synthesized claim must replay before a logged done", () => {
+    const repair = taskHistoryRepair(before, [], [created, done]);
+    expect(repair.kind).toBe("replace");
+    const persisted = repair.kind === "none" ? [] : repair.events;
+    expect(persisted.map((e) => e.kind)).toEqual(["taken", "created", "done"]);
+    expect(persisted[0]).toMatchObject({ at: D("2026-11-01"), by: "w" });
+    // No invented second completion on Nov 9.
+    expect(completions([...persisted, estimated])).toEqual({ done: 1, velocity: 1 });
+    // Appending (the old behaviour) replays taken after done and invents one.
+    expect(completions([created, done, ...persisted.slice(0, 1), estimated]).velocity).toBe(2);
+    // Idempotent: nothing more to persist once the log holds it.
+    expect(taskHistoryRepair(before, [], persisted)).toEqual({ kind: "none" });
+    expect(taskHistoryRepair(after, [], [...persisted, estimated])).toEqual({ kind: "none" });
+  });
+
+  it("appends when the synthesized history already sorts before the log", () => {
+    const legacy = task("t", { createdAt: D("2026-10-01"), taskStatus: "done", takenBy: "w", takenAt: D("2026-10-02"), doneAt: D("2026-10-03") });
+    const repair = taskHistoryRepair(legacy, [], []);
+    expect(repair.kind).toBe("append");
+    expect(repair.kind === "none" ? [] : repair.events.map((e) => e.kind)).toEqual(["created", "taken", "done"]);
+    expect(taskHistoryRepair(legacy, [], [{ at: D("2026-11-05"), task: "t", kind: "reopened" }]).kind).toBe("append");
   });
 });

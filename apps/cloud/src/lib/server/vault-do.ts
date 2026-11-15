@@ -30,7 +30,7 @@ import {
   computeBurndown,
   diffTaskEvents,
   MEMBERSHIP_RELATIONS,
-  missingTaskHistory,
+  taskHistoryRepair,
   nearestContainer,
   normalizeDay,
   normalizeEstimate,
@@ -2293,8 +2293,16 @@ export class VaultDO {
     // recorded), so its past contribution survives the edit. Once the log
     // agrees with the fields this adds nothing.
     if (before?.snap && events.length > 0) {
-      const logged = this.taskEvents(before.meta.id);
-      for (const e of missingTaskHistory(before.meta, before.edges, logged)) this.#insertTaskEvent(e);
+      const id = before.meta.id;
+      const repair = taskHistoryRepair(before.meta, before.edges, this.taskEvents(id));
+      if (repair.kind === "replace") {
+        // A synthesized event must replay before a logged one at the same
+        // instant, which appending can't express: re-insert this task's rows
+        // in replay order (order across tasks never matters). Synchronous SQL
+        // in one turn, so no other request sees the gap.
+        this.#sql.exec(`DELETE FROM task_event WHERE task = ?`, id);
+      }
+      if (repair.kind !== "none") for (const e of repair.events) this.#insertTaskEvent(e);
     }
     for (const e of events) this.#insertTaskEvent(e);
   }

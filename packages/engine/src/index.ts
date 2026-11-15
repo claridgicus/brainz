@@ -69,6 +69,7 @@ export {
   computeBurndown,
   diffTaskEvents,
   missingTaskHistory,
+  taskHistoryRepair,
   nearestContainer,
   scopeClosure,
   sortTaskEvents,
@@ -85,6 +86,7 @@ export type {
   BurndownUnit,
   TaskEvent,
   TaskEventKind,
+  TaskHistoryRepair,
   TaskSnapshot,
 } from "./burndown.js";
 

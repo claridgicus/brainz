@@ -4,7 +4,7 @@ import {
   assembleContext,
   computeBurndown,
   diffTaskEvents,
-  missingTaskHistory,
+  taskHistoryRepair,
   taskSnapshot,
   TASK_EVENT_KINDS,
   bfsRelated,
@@ -52,6 +52,7 @@ import type {
   SearchHit,
   SearchOptions,
   TaskEvent,
+  TaskHistoryRepair,
   TaskSnapshot,
   UpsertInput,
   VaultStats,
@@ -697,18 +698,45 @@ export class Vault {
     // its past contribution survives the edit. `before` was captured while the
     // note still had those fields, so its file dates it too. Once the log
     // agrees with the frontmatter this adds nothing.
-    const missing = before?.snap
-      ? missingTaskHistory(
+    const repair: TaskHistoryRepair = before?.snap
+      ? taskHistoryRepair(
           before.meta,
           before.edges,
           this.taskEvents().filter((e) => e.task === before.meta.id),
         )
-      : [];
+      : { kind: "none" };
+    const line = (e: TaskEvent): string => `${JSON.stringify(e)}\n`;
     fs.mkdirSync(path.dirname(this.taskEventsPath), { recursive: true });
-    fs.appendFileSync(
-      this.taskEventsPath,
-      [...missing, ...events].map((e) => `${JSON.stringify(e)}\n`).join(""),
-    );
+    if (repair.kind === "replace" && before) {
+      // A synthesized event must replay before a logged one at the same
+      // instant, which appending can't express: rewrite this task's lines in
+      // replay order (other tasks' lines, malformed ones included, stay put).
+      this.#rewriteTaskEvents(before.meta.id, [...repair.events, ...events].map(line).join(""));
+      return;
+    }
+    const missing = repair.kind === "append" ? repair.events : [];
+    fs.appendFileSync(this.taskEventsPath, [...missing, ...events].map(line).join(""));
+  }
+
+  /** Replace one task's lines in the history log with `tail` (appended), atomically. */
+  #rewriteTaskEvents(task: string, tail: string): void {
+    let raw = "";
+    try {
+      raw = fs.readFileSync(this.taskEventsPath, "utf8");
+    } catch {
+      /* no log yet */
+    }
+    const kept = raw.split("\n").filter((l) => {
+      if (!l.trim()) return false;
+      try {
+        return (JSON.parse(l) as Partial<TaskEvent>).task !== task;
+      } catch {
+        return true;
+      }
+    });
+    const tmp = `${this.taskEventsPath}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, kept.map((l) => `${l}\n`).join("") + tail);
+    fs.renameSync(tmp, this.taskEventsPath);
   }
 
   /** The recorded task history (malformed lines are skipped), in file order. */
