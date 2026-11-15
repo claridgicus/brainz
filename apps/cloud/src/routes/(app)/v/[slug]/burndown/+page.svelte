@@ -8,6 +8,7 @@
 	import { ApiError, createApi, roleOf, type Burndown } from "$lib/api";
 	import { fmtHours, shortDay, velocityKey } from "$lib/burndown-chart";
 	import BurndownChart from "$lib/components/BurndownChart.svelte";
+	import { vaultTabLinks } from "$lib/nav";
 	import { onMount } from "svelte";
 
 	let { data } = $props();
@@ -183,8 +184,9 @@
 	<div class="toolbar">
 		<div class="left">
 			<h1>{vault.name} · Burndown</h1>
-			<a class="btn btn-ghost btn-sm" href="/v/{vault.slug}">Graph</a>
-			<a class="btn btn-ghost btn-sm" href="/v/{vault.slug}/board">Board</a>
+			{#each vaultTabLinks(vault.slug, "burndown") as link (link.href)}
+				<a class="btn btn-ghost btn-sm" href={link.href}>{link.label}</a>
+			{/each}
 		</div>
 		<div class="controls">
 			<!-- A GET form: before hydration the "Show" button submits it natively;

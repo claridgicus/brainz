@@ -17,6 +17,7 @@
 	import Mark from "$lib/components/Mark.svelte";
 	import Modal from "$lib/components/Modal.svelte";
 	import SearchBox from "$lib/components/SearchBox.svelte";
+	import { onMount } from "svelte";
 
 	let { data } = $props();
 	const api = createApi(fetch);
@@ -226,6 +227,17 @@
 		concept = null;
 	}
 
+	// `?focus=<id>` (the feature tree's "Open in graph"): open with that concept
+	// selected. The Graph focuses and centres it itself (`initialFocusId`).
+	// svelte-ignore state_referenced_locally
+	const initialFocus = data.focus && nodeById(data.focus) ? data.focus : null;
+	/** The e2e journey's "clicks are live" marker. */
+	let mounted = $state(false);
+	onMount(() => {
+		mounted = true;
+		if (initialFocus) void select(initialFocus);
+	});
+
 	// --------------------------------------------------------------- editor
 	let editing = $state<"new" | "edit" | null>(null);
 
@@ -264,7 +276,7 @@
 
 <svelte:head><title>{vault.name} — Brainz</title></svelte:head>
 
-<div class="workspace">
+<div class="workspace" data-hydrated={mounted ? "true" : "false"}>
 	<div class="toolbar">
 		<div class="left">
 			<h1>{vault.name}</h1>
@@ -360,6 +372,7 @@
 					{filterMode}
 					{focusId}
 					{selectedId}
+					initialFocusId={initialFocus}
 					onselect={(id) => void select(id)}
 					onlodchange={(types) => (lodVisibleTypes = types)}
 				/>

@@ -178,20 +178,27 @@
 	let hydrated = $state(false);
 	onMount(() => {
 		hydrated = true;
-		fit(true);
-		// Wheel zoom needs a non-passive listener to stop the page scrolling.
+		const timer = setInterval(poll, POLL_MS);
+		return () => clearInterval(timer);
+	});
+
+	/**
+	 * Wheel zoom on the tree's SVG. An action, not onMount: an empty vault has
+	 * no SVG at mount, so the listener must attach whenever the SVG appears
+	 * (e.g. once polling brings in the first tasks). The SVG's first mount also
+	 * frames the tree (the empty start had nothing to fit).
+	 */
+	function wheelZoom(node: SVGSVGElement) {
+		// Non-passive so preventDefault stops the page scrolling.
 		const onWheel = (e: WheelEvent) => {
 			e.preventDefault();
-			const r = svgEl!.getBoundingClientRect();
+			const r = node.getBoundingClientRect();
 			zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0015));
 		};
-		svgEl?.addEventListener("wheel", onWheel, { passive: false });
-		const timer = setInterval(poll, POLL_MS);
-		return () => {
-			clearInterval(timer);
-			svgEl?.removeEventListener("wheel", onWheel);
-		};
-	});
+		node.addEventListener("wheel", onWheel, { passive: false });
+		fit(true);
+		return { destroy: () => node.removeEventListener("wheel", onWheel) };
+	}
 
 	// ------------------------------------------------------- side panel
 	let selectedId = $state<string | null>(null);
@@ -337,6 +344,7 @@
 		<div class="canvas" bind:clientWidth={vw} bind:clientHeight={vh}>
 			<svg
 				bind:this={svgEl}
+				use:wheelZoom
 				class="tree"
 				class:lod={k < LOD_K}
 				role="tree"

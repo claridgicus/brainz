@@ -395,56 +395,129 @@ async function featuresJourney() {
   try {
     const base = new URL(BASE);
     for (const [name, value] of jar) agentBrowser(["cookies", "set", name, value, "--url", `${base.origin}/`]);
-    const featuresUrl = `${BASE}/v/ui-vault/features`;
-    const hydratedExpr = `document.querySelector('.ft-page')?.dataset.hydrated === 'true'`;
-    agentBrowser(["open", featuresUrl]);
-    // Controls are disabled until hydrated: wait for the marker, never a sleep.
-    let ready = await browserUntil(hydratedExpr, { timeoutMs: Math.min(60_000, BROWSER_DEADLINE_MS) });
-    if (ready === null) {
-      // A gate run once fell back to SvelteKit's error page while loading the
-      // route's modules (not reproducible). Report what the browser saw, then
-      // load the page once more: a real client error fails again below.
-      console.log(`  [NOTE] the features tree did not hydrate on first load; reloading once — ${browserDiagnostics()}`);
-      agentBrowser(["open", featuresUrl]);
-      ready = await browserUntil(hydratedExpr);
-    }
-    step("browser: the features tree hydrates", ready !== null, ready === null ? browserDiagnostics() : "");
-    if (ready === null) return; // the clicks below need a hydrated tree
-    if (process.env.E2E_UI_SCREENSHOT) {
-      agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-features.png")]);
-    }
-    // Collapse to the roots and frame them, then open one epic.
-    const clickControl = (label) =>
-      browserUntil(
-        `(() => { const b = [...document.querySelectorAll('.ft-page .controls .chip')].find((x) => x.textContent.trim() === ${JSON.stringify(label)}); if (!b || b.disabled) return ''; b.click(); return 'clicked'; })()`,
-      );
-    const collapsed = (await clickControl("Collapse all")) !== null && (await clickControl("Fit")) !== null;
-    step("browser: the Collapse all and Fit controls respond", collapsed, collapsed ? "" : browserDiagnostics());
-    if (!collapsed) return;
-    const root = await browserUntil(
-      `!document.querySelector('[data-id="pay-button"]') && !!document.querySelector('[data-id="checkout-epic"]')`,
-    );
-    step("browser: Collapse all leaves the roots (the epic is one)", root !== null);
-    if (root === null) return; // the epic node is needed below
-    agentBrowser(["click", '[data-id="checkout-epic"] .toggle']);
-    const opened = await browserUntil(`!!document.querySelector('[data-id="pay-button"]')`);
-    step("browser: expanding the epic reveals its feature", opened !== null);
-    agentBrowser(["click", '[data-id="checkout-epic"]']);
-    const link = await browserUntil(`document.querySelector('.panel-actions a')?.getAttribute('href') ?? ''`);
-    step(
-      "browser: clicking a node opens the panel with Show on board",
-      Boolean(link?.includes("/v/ui-vault/board?group=epic&scope=checkout-epic")),
-      link ?? "(timed out)",
-    );
-    if (process.env.E2E_UI_SCREENSHOT) {
-      agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-features-panel.png")]);
-    }
-    if (!link) return; // no panel, so nothing to follow
-    agentBrowser(["eval", `document.querySelector('.panel-actions a')?.click()`]);
-    const chip = await browserUntil(`document.querySelector('.scope-chip')?.dataset.scope ?? ''`);
-    step("browser: Show on board opens the board scoped to the node", chip === "checkout-epic", chip ?? "(timed out)");
+    await featuresTreeBrowserSteps();
+    // Same browser session: closing and reopening back to back races the
+    // session's shutdown (the cookies landed in the closing one).
+    await featuresEmptyStartSteps();
   } finally {
     spawnSync("agent-browser", ["--session", "brainz-e2e-ui", "close"]);
+  }
+}
+
+/** The features tree in the browser (session open, cookies set). */
+async function featuresTreeBrowserSteps() {
+  const featuresUrl = `${BASE}/v/ui-vault/features`;
+  const hydratedExpr = `document.querySelector('.ft-page')?.dataset.hydrated === 'true'`;
+  agentBrowser(["open", featuresUrl]);
+  // Controls are disabled until hydrated: wait for the marker, never a sleep.
+  let ready = await browserUntil(hydratedExpr, { timeoutMs: Math.min(60_000, BROWSER_DEADLINE_MS) });
+  if (ready === null) {
+    // A gate run once fell back to SvelteKit's error page while loading the
+    // route's modules (not reproducible). Report what the browser saw, then
+    // load the page once more: a real client error fails again below.
+    console.log(`  [NOTE] the features tree did not hydrate on first load; reloading once — ${browserDiagnostics()}`);
+    agentBrowser(["open", featuresUrl]);
+    ready = await browserUntil(hydratedExpr);
+  }
+  step("browser: the features tree hydrates", ready !== null, ready === null ? browserDiagnostics() : "");
+  if (ready === null) return; // the clicks below need a hydrated tree
+  if (process.env.E2E_UI_SCREENSHOT) {
+    agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-features.png")]);
+  }
+  // Collapse to the roots and frame them, then open one epic.
+  const clickControl = (label) =>
+    browserUntil(
+      `(() => { const b = [...document.querySelectorAll('.ft-page .controls .chip')].find((x) => x.textContent.trim() === ${JSON.stringify(label)}); if (!b || b.disabled) return ''; b.click(); return 'clicked'; })()`,
+    );
+  const collapsed = (await clickControl("Collapse all")) !== null && (await clickControl("Fit")) !== null;
+  step("browser: the Collapse all and Fit controls respond", collapsed, collapsed ? "" : browserDiagnostics());
+  if (!collapsed) return;
+  const root = await browserUntil(
+    `!document.querySelector('[data-id="pay-button"]') && !!document.querySelector('[data-id="checkout-epic"]')`,
+  );
+  step("browser: Collapse all leaves the roots (the epic is one)", root !== null);
+  if (root === null) return; // the epic node is needed below
+  agentBrowser(["click", '[data-id="checkout-epic"] .toggle']);
+  const opened = await browserUntil(`!!document.querySelector('[data-id="pay-button"]')`);
+  step("browser: expanding the epic reveals its feature", opened !== null);
+  agentBrowser(["click", '[data-id="checkout-epic"]']);
+  const link = await browserUntil(`document.querySelector('.panel-actions a')?.getAttribute('href') ?? ''`);
+  step(
+    "browser: clicking a node opens the panel with Show on board",
+    Boolean(link?.includes("/v/ui-vault/board?group=epic&scope=checkout-epic")),
+    link ?? "(timed out)",
+  );
+  if (process.env.E2E_UI_SCREENSHOT) {
+    agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-features-panel.png")]);
+  }
+  if (!link) return; // no panel, so nothing to follow
+  agentBrowser(["eval", `document.querySelector('.panel-actions a')?.click()`]);
+  const chip = await browserUntil(`document.querySelector('.scope-chip')?.dataset.scope ?? ''`);
+  step("browser: Show on board opens the board scoped to the node", chip === "checkout-epic", chip ?? "(timed out)");
+
+  // "Open in graph" lands on the graph workspace with the node selected,
+  // sticky-focused and centred (the workspace reads ?focus=).
+  agentBrowser(["open", featuresUrl]);
+  const again = await browserUntil(hydratedExpr);
+  step("browser: the features tree hydrates again", again !== null, again === null ? browserDiagnostics() : "");
+  if (again === null) return;
+  const graphHref = await browserUntil(
+    `(() => { document.querySelector('[data-id="checkout-epic"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true })); return [...document.querySelectorAll('.panel-actions a')].find((a) => a.textContent.trim() === 'Open in graph')?.getAttribute('href') ?? ''; })()`,
+  );
+  step("browser: the panel links Open in graph with ?focus=", graphHref === "/v/ui-vault?focus=checkout-epic", graphHref ?? "(timed out)");
+  if (!graphHref) return;
+  agentBrowser(["eval", `[...document.querySelectorAll('.panel-actions a')].find((a) => a.textContent.trim() === 'Open in graph')?.click()`]);
+  const wsReady = await browserUntil(`document.querySelector('.workspace')?.dataset.hydrated === 'true'`);
+  step("browser: the graph workspace hydrates", wsReady !== null, wsReady === null ? browserDiagnostics() : "");
+  if (wsReady === null) return;
+  // Centred: the focused node's screen centre sits near the canvas centre
+  // (polled: the layout settles, then the view pans).
+  const focusedExpr = `(() => {
+    const title = document.querySelector('aside.panel h2')?.textContent?.trim();
+    const g = document.querySelector('svg g.node.focused');
+    const svg = g?.ownerSVGElement;
+    if (title !== 'Checkout v2' || g?.dataset.id !== 'checkout-epic' || !svg) return '';
+    const a = g.getBoundingClientRect(), b = svg.getBoundingClientRect();
+    const off = Math.hypot(a.x + a.width / 2 - (b.x + b.width / 2), a.y + a.height / 2 - (b.y + b.height / 2));
+    return off < 60 ? 'centred' : '';
+  })()`;
+  const focused = await browserUntil(focusedExpr);
+  step("browser: Open in graph selects, focuses and centres the node", focused === "centred", focused ?? browserDiagnostics());
+}
+
+/**
+ * The features tree on a vault that starts empty: wheel zoom must work once
+ * polling renders the first tasks (the SVG appears after mount). Uses a
+ * throwaway vault, deleted at the end so later vault counts are unchanged.
+ * Runs inside featuresJourney's browser session.
+ */
+async function featuresEmptyStartSteps() {
+  const created = await api("POST", "/api/vaults", { body: { name: "Empty Tree", slug: "empty-tree" } });
+  step("create an empty vault for the features tree → 201", created.status === 201, `status ${created.status}`);
+  if (created.status !== 201) return;
+  const vaultId = created.json.id;
+  try {
+    agentBrowser(["open", `${BASE}/v/empty-tree/features`]);
+    const ready = await browserUntil(
+      `document.querySelector('.ft-page')?.dataset.hydrated === 'true' && !!document.querySelector('.ft-page .empty') && !document.querySelector('svg.tree')`,
+    );
+    step("browser: an empty vault's features tab hydrates with the empty state", ready !== null, ready === null ? browserDiagnostics() : "");
+    if (ready === null) return;
+    const task = await api("POST", `/api/vaults/${vaultId}/tasks`, { body: { title: "First task", body: "x" } });
+    step("create the first task → 201", task.status === 201, `status ${task.status}`);
+    const appeared = await browserUntil(`!!document.querySelector('svg.tree [data-id]')`);
+    step("browser: polling renders the tree once the first task exists", appeared !== null, appeared === null ? browserDiagnostics() : "");
+    if (appeared === null) return;
+    const scaleExpr = `(document.querySelector('svg.tree > g[transform]')?.getAttribute('transform') ?? '').match(/scale\\(([^)]+)\\)/)?.[1] ?? ''`;
+    const before = await browserUntil(scaleExpr);
+    // Dispatch until the zoom lands: each wheel-in (deltaY < 0) zooms in.
+    const zoomed = await browserUntil(
+      `(() => { const s = document.querySelector('svg.tree'); const r = s.getBoundingClientRect(); s.dispatchEvent(new WheelEvent('wheel', { deltaY: -240, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2, bubbles: true, cancelable: true })); const k = (s.querySelector(':scope > g[transform]')?.getAttribute('transform') ?? '').match(/scale\\(([^)]+)\\)/)?.[1]; return k && Number(k) > Number(${JSON.stringify(before ?? "0")}) ? k : ''; })()`,
+    );
+    step("browser: wheel zoom works after an empty start", zoomed !== null, `scale ${before} → ${zoomed}`);
+  } finally {
+    const del = await api("DELETE", `/api/vaults/${vaultId}`);
+    step("delete the empty-start vault → 204", del.status === 204, `status ${del.status}`);
   }
 }
 

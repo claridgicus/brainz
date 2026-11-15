@@ -106,6 +106,7 @@
 		filterMode = "manual",
 		focusId = null,
 		selectedId = null,
+		initialFocusId = null,
 		nodeBudget = DEFAULT_NODE_BUDGET,
 		flatMaxNodes = FLAT_MAX_NODES,
 		bundling = true,
@@ -123,6 +124,10 @@
 		filterMode?: FilterMode;
 		focusId?: string | null;
 		selectedId?: string | null;
+		/** Read once at mount: open with this concept sticky-focused (its 1-hop
+		 * neighbours revealed across the type filter) and centred instead of
+		 * fitting the whole graph. Unknown ids are ignored. */
+		initialFocusId?: string | null;
 		/** Hard cap on individually rendered nodes in the clustered layout. */
 		nodeBudget?: number;
 		/** Vaults with more concepts than this use the clustered layout (bench override). */
@@ -215,8 +220,22 @@
 	// non-neighbors and reveals its 1-hop neighbors across the type filter. Cleared
 	// by clicking empty canvas, Escape, clicking the focused node again, or Reset.
 	// `focusReveal` caches the reveal set so LOD/dim passes don't recompute it.
-	let focused = $state<string | null>(null);
-	let focusReveal = new Set<string>();
+	// svelte-ignore state_referenced_locally
+	const startFocus = initialFocusId && graph.nodes.some((n) => n.id === initialFocusId) ? initialFocusId : null;
+	let focused = $state<string | null>(startFocus);
+	// svelte-ignore state_referenced_locally
+	let focusReveal = focusRevealSet(startFocus, graph.edges);
+	/** Centre on this node in place of the first fit (consumed once). */
+	let pendingCenter: string | null = startFocus;
+	/** If a centre is pending, pan to it (in place of the first fit). */
+	function consumeCenter(): boolean {
+		const id = pendingCenter;
+		if (id === null) return false;
+		pendingCenter = null;
+		if (!posOf(id)) return false;
+		panTo(id);
+		return true;
+	}
 
 	// ------------------------------------------------------------ render state
 	/** An edge endpoint: a rendered node, a cluster bubble, or a "ghost" — a
@@ -689,7 +708,10 @@
 			onSettled();
 		});
 		if (fresh > 0) saveLayout();
-		if (!fitted) fitView(unitList);
+		if (!fitted) {
+			fitView(unitList);
+			consumeCenter();
+		}
 	}
 
 	/** Fit the whole cluster map in the viewport (first open of a large vault). */
@@ -1496,6 +1518,7 @@
 	 * if the spread-out layout overflows the viewport. */
 	function fitFlat(): void {
 		fitted = true;
+		if (consumeCenter()) return;
 		if (simNodeList.length === 0) return;
 		let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
 		for (const sn of simNodeList) {
