@@ -385,20 +385,37 @@ async function featuresJourney() {
   try {
     const base = new URL(BASE);
     for (const [name, value] of jar) agentBrowser(["cookies", "set", name, value, "--url", `${base.origin}/`]);
-    agentBrowser(["open", `${BASE}/v/ui-vault/features`]);
+    const featuresUrl = `${BASE}/v/ui-vault/features`;
+    const hydratedExpr = `document.querySelector('.ft-page')?.dataset.hydrated === 'true'`;
+    agentBrowser(["open", featuresUrl]);
     // Controls are disabled until hydrated: wait for the marker, never a sleep.
-    const ready = await browserUntil(`document.querySelector('.ft-page')?.dataset.hydrated === 'true'`);
-    step("browser: the features tree hydrates", ready !== null);
+    let ready = await browserUntil(hydratedExpr, { timeoutMs: Math.min(60_000, BROWSER_DEADLINE_MS) });
+    if (ready === null) {
+      // A gate run once fell back to SvelteKit's error page while loading the
+      // route's modules (not reproducible). Report what the browser saw, then
+      // load the page once more: a real client error fails again below.
+      console.log(`  [NOTE] the features tree did not hydrate on first load; reloading once — ${browserDiagnostics()}`);
+      agentBrowser(["open", featuresUrl]);
+      ready = await browserUntil(hydratedExpr);
+    }
+    step("browser: the features tree hydrates", ready !== null, ready === null ? browserDiagnostics() : "");
+    if (ready === null) return; // the clicks below need a hydrated tree
     if (process.env.E2E_UI_SCREENSHOT) {
       agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-features.png")]);
     }
     // Collapse to the roots and frame them, then open one epic.
-    agentBrowser(["eval", `[...document.querySelectorAll('.controls .chip')].find((b) => b.textContent.trim() === 'Collapse all').click()`]);
-    agentBrowser(["eval", `[...document.querySelectorAll('.controls .chip')].find((b) => b.textContent.trim() === 'Fit').click()`]);
+    const clickControl = (label) =>
+      browserUntil(
+        `(() => { const b = [...document.querySelectorAll('.ft-page .controls .chip')].find((x) => x.textContent.trim() === ${JSON.stringify(label)}); if (!b || b.disabled) return ''; b.click(); return 'clicked'; })()`,
+      );
+    const collapsed = (await clickControl("Collapse all")) !== null && (await clickControl("Fit")) !== null;
+    step("browser: the Collapse all and Fit controls respond", collapsed, collapsed ? "" : browserDiagnostics());
+    if (!collapsed) return;
     const root = await browserUntil(
       `!document.querySelector('[data-id="pay-button"]') && !!document.querySelector('[data-id="checkout-epic"]')`,
     );
     step("browser: Collapse all leaves the roots (the epic is one)", root !== null);
+    if (root === null) return; // the epic node is needed below
     agentBrowser(["click", '[data-id="checkout-epic"] .toggle']);
     const opened = await browserUntil(`!!document.querySelector('[data-id="pay-button"]')`);
     step("browser: expanding the epic reveals its feature", opened !== null);
@@ -412,7 +429,8 @@ async function featuresJourney() {
     if (process.env.E2E_UI_SCREENSHOT) {
       agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-features-panel.png")]);
     }
-    agentBrowser(["eval", `document.querySelector('.panel-actions a').click()`]);
+    if (!link) return; // no panel, so nothing to follow
+    agentBrowser(["eval", `document.querySelector('.panel-actions a')?.click()`]);
     const chip = await browserUntil(`document.querySelector('.scope-chip')?.dataset.scope ?? ''`);
     step("browser: Show on board opens the board scoped to the node", chip === "checkout-epic", chip ?? "(timed out)");
   } finally {
@@ -606,6 +624,22 @@ async function browserUntil(expr, { timeoutMs = BROWSER_DEADLINE_MS, everyMs = 3
     await sleep(everyMs);
   } while (Date.now() < deadline);
   return null;
+}
+
+/** Where the browser is and what went wrong there, for a failed step's detail. */
+function browserDiagnostics() {
+  const run = (args) => {
+    try {
+      return agentBrowser(args).replace(/\s+/g, " ").slice(0, 600);
+    } catch (err) {
+      return `(${args[0]} failed: ${err instanceof Error ? err.message.slice(0, 200) : err})`;
+    }
+  };
+  return [
+    `at ${run(["eval", "location.href + ' | ' + document.title"])}`,
+    `page errors: ${run(["errors"]) || "(none)"}`,
+    `console: ${run(["console"]) || "(none)"}`,
+  ].join(" — ");
 }
 
 function hasAgentBrowser() {
