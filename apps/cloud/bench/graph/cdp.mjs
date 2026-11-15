@@ -1,6 +1,7 @@
-// Minimal headless-Chrome driver over the DevTools protocol (Node >= 22's
-// global WebSocket) plus a static server for the built bench harness — shared
-// by scripts/graph-perf.mjs and scripts/e2e-graph.mjs. No puppeteer needed.
+// Minimal headless-Chrome driver over the DevTools protocol (WebSocket: Node
+// >= 22's global, else the `ws` package, so it runs on the repo's Node >= 20)
+// plus a static server for the built bench harness — shared by
+// scripts/graph-perf.mjs and scripts/e2e-graph.mjs. No puppeteer needed.
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -15,6 +16,10 @@ const CHROME_CANDIDATES = [
 	"/usr/bin/chromium-browser",
 	"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 ].filter(Boolean);
+
+/** Node >= 22 has a global WebSocket; Node 20 doesn't, so fall back to `ws`
+ * (same onopen/onmessage API; text frames arrive as strings). */
+const WebSocketImpl = globalThis.WebSocket ?? (await import("ws")).WebSocket;
 
 export function findChrome() {
 	return CHROME_CANDIDATES.find((p) => existsSync(p)) ?? null;
@@ -72,7 +77,7 @@ export async function launch({ width = 1600, height = 1000, headless = true } = 
 	const port = new URL(wsUrl).port;
 	const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 	const pageTarget = targets.find((t) => t.type === "page");
-	const ws = new WebSocket(pageTarget.webSocketDebuggerUrl);
+	const ws = new WebSocketImpl(pageTarget.webSocketDebuggerUrl);
 	await new Promise((r, j) => {
 		ws.onopen = r;
 		ws.onerror = j;

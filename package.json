@@ -20,5 +20,8 @@
     "demos:record": "npm run record -w @brainz/demos --",
     "demos:check": "npm run check -w @brainz/demos --",
     "demos:stack": "npm run stack -w @brainz/demos --"
+  },
+  "devDependencies": {
+    "ws": "^8.21.0"
   }
 }
