@@ -156,7 +156,7 @@ Authenticated toolset:
     that governs the task; fix or file a new task for discrepancies.
   - `complete_task {id, outcome}` — mark it done; then index what changed via
     `upsert_concept`.
-  - `create_task {title, body, domain?, realizes?, governedBy?, codeAreas?, tags?}`
+  - `create_task {title, body, domain?, epic?, realizes?, governedBy?, codeAreas?, tags?}`
     — turn findings into first-class work items.
 
 More vaults (on `/mcp/agent` only):

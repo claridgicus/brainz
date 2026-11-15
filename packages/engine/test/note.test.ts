@@ -86,6 +86,9 @@ describe("parseNote", () => {
       "constraint",
       "pattern",
       "glossary",
+      "iteration",
+      "milestone",
+      "epic",
     ]) {
       const { meta } = parseNote(`---\ntype: ${type}\n---\nx`, { fallbackId: "t" });
       expect(meta.type).toBe(type);

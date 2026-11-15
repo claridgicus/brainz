@@ -20,7 +20,8 @@ export type ConceptType =
   | "pattern"
   | "glossary"
   | "iteration"
-  | "milestone";
+  | "milestone"
+  | "epic";
 
 /**
  * A concept type as it may appear at runtime: any of the built-in

@@ -55,7 +55,8 @@ export {
 } from "./sync.js";
 export type { SyncPlaybookOptions } from "./sync.js";
 
-export { TASK_COMPLETE_NOTICE, TASK_COMPLETE_REMINDER } from "./tasks.js";
+export { TASK_COMPLETE_NOTICE, TASK_COMPLETE_REMINDER, createTaskRelations } from "./tasks.js";
+export type { CreateTaskLinks } from "./tasks.js";
 
 export {
   BURNDOWN_DEFAULT_STALE_HOURS,

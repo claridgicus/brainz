@@ -31,6 +31,7 @@ const TYPES = new Set([
   "glossary",
   "iteration",
   "milestone",
+  "epic",
 ]);
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {

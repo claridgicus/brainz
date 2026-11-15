@@ -528,6 +528,18 @@ describe("task tools", () => {
     expect(payload.taskStatus).toBe("open");
     expect(getMcpTool("create_task").outputSchema.safeParse(payload).success).toBe(true);
   });
+
+  it("create_task with an epic makes it a second part_of target", async () => {
+    const vault = fakeVault();
+    const client = await connect(vault);
+    await client.callTool({
+      name: "create_task",
+      arguments: { title: "Epic work", body: "x", domain: "auth", epic: "checkout-v2" },
+    });
+    expect((vault.state.upserts.at(-1) as { relations?: unknown }).relations).toEqual({ part_of: ["auth", "checkout-v2"] });
+    await client.callTool({ name: "create_task", arguments: { title: "Epic only", body: "x", epic: "checkout-v2" } });
+    expect((vault.state.upserts.at(-1) as { relations?: unknown }).relations).toEqual({ part_of: ["checkout-v2"] });
+  });
 });
 
 describe("delete_concept tool", () => {

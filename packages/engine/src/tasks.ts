@@ -18,3 +18,25 @@ export const TASK_COMPLETE_REMINDER =
  */
 export const TASK_COMPLETE_NOTICE =
   "Task marked done, with the outcome appended to its body. Other concepts in the graph are not updated automatically.";
+
+/** The relation fields of a `create_task` request. */
+export interface CreateTaskLinks {
+  domain?: string;
+  epic?: string;
+  realizes?: string[];
+  governedBy?: string[];
+}
+
+/**
+ * The relations map a new task is created with (`create_task`, both MCP
+ * servers and the cloud REST POST .../tasks): `part_of` its domain then its
+ * epic, `realizes`, `governed_by`. Undefined when there are none.
+ */
+export function createTaskRelations(links: CreateTaskLinks): Record<string, string[]> | undefined {
+  const relations: Record<string, string[]> = {};
+  const partOf = [links.domain, links.epic].filter((x): x is string => !!x);
+  if (partOf.length > 0) relations.part_of = [...new Set(partOf)];
+  if (links.realizes && links.realizes.length > 0) relations.realizes = links.realizes;
+  if (links.governedBy && links.governedBy.length > 0) relations.governed_by = links.governedBy;
+  return Object.keys(relations).length > 0 ? relations : undefined;
+}

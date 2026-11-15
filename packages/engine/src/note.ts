@@ -16,6 +16,7 @@ const CONCEPT_TYPES: readonly ConceptType[] = [
   "glossary",
   "iteration",
   "milestone",
+  "epic",
 ];
 
 const CONCEPT_STATUSES: readonly ConceptStatus[] = ["active", "draft", "deprecated"];

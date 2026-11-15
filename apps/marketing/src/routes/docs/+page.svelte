@@ -242,7 +242,7 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 			title: "Create a task",
 			description:
 				"Turn a finding into first-class work: creates a `task`-type concept with taskStatus=open and " +
-				"the given relations — part_of a domain, `realizes` stories/features, `governed_by` specs — plus " +
+				"the given relations — part_of a domain and/or an epic, `realizes` stories/features, `governed_by` specs — plus " +
 				"codeAreas pointing at where the work lands. Use when you discover work that isn't reflected in " +
 				"the codebase yet (a gap, a needed fix, a follow-up). The task then shows up in list_tasks / " +
 				"take_task and on the Kanban board.",
@@ -441,14 +441,16 @@ npx brainz context --query "billing" --budget 800 --vault my-vault`;
 		<code>upsert_concept</code>.
 	</p>
 	<p>
-		The ontology is thirteen concept types, and five of them carry the structure: <code>domain</code>
+		The ontology is fourteen concept types, and five of them carry the structure: <code>domain</code>
 		(high-level product areas — the top of the graph), <code>feature</code> (concrete capabilities,
 		<code>part_of</code> a domain), <code>story</code> (user stories, <code>realized_by</code> the
 		features that deliver them), <code>spec</code> (the rules that <code>govern</code> features and
 		stories), and <code>workflow</code> (multi-step journeys across features) — plus <code>task</code>
 		(a unit of work not yet in the codebase, claimed off a real-time Kanban board via
 		<code>take_task</code>), <code>iteration</code> and <code>milestone</code> (a sprint and a
-		dated deliverable that tasks are <code>part_of</code>, which <code>burndown</code> reports on)
+		dated deliverable that tasks are <code>part_of</code>, which <code>burndown</code> reports on),
+		<code>epic</code> (an overarching body of work that features and tasks are <code>part_of</code>;
+		the board can group by epic)
 		and the classics: <code>concept</code>, <code>decision</code>,
 		<code>constraint</code>, <code>pattern</code>, <code>glossary</code>. Every concept can carry
 		<code>code_areas</code> — rough paths or globs

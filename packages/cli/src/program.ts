@@ -47,6 +47,7 @@ const CONCEPT_TYPES = [
   "glossary",
   "iteration",
   "milestone",
+  "epic",
 ];
 const DEFAULT_WEB_PORT = 4680;
 

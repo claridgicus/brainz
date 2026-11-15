@@ -49,6 +49,7 @@ const TYPE_COLORS: Record<string, string> = {
   glossary: "#22d3ee",
   iteration: "#818cf8",
   milestone: "#e879f9",
+  epic: "#fb7185",
   pending: "#6b7280",
 };
 const ALL_TYPES = Object.keys(TYPE_COLORS);

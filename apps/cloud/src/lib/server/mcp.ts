@@ -32,6 +32,7 @@ import {
   SYNC_STALENESS_NUDGE,
   TASK_COMPLETE_NOTICE,
   computeCoverage,
+  createTaskRelations,
   isSyncStale,
   onboardingPlaybook,
   serverInstructions,
@@ -648,12 +649,8 @@ function vaultToolHandlers(vault: VaultClient, hooks: McpServerHooks): ToolHandl
         }
       }),
 
-    create_task: async ({ title, body, domain, realizes, governedBy, codeAreas, tags }) =>
+    create_task: async ({ title, body, domain, epic, realizes, governedBy, codeAreas, tags }) =>
       guarded(async () => {
-        const relations: Record<string, string[]> = {};
-        if (domain) relations.part_of = [domain];
-        if (realizes && realizes.length > 0) relations.realizes = realizes;
-        if (governedBy && governedBy.length > 0) relations.governed_by = governedBy;
         const { concept } = await vault.upsertConcept({
           title,
           body,
@@ -661,7 +658,7 @@ function vaultToolHandlers(vault: VaultClient, hooks: McpServerHooks): ToolHandl
           taskStatus: "open",
           tags,
           codeAreas,
-          relations: Object.keys(relations).length > 0 ? relations : undefined,
+          relations: createTaskRelations({ domain, epic, realizes, governedBy }),
         });
         return ok({
           id: concept.id,

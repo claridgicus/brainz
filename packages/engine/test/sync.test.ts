@@ -29,6 +29,7 @@ describe("syncPlaybook", () => {
     // Step 4: index new / un-mapped work + file tasks for incomplete work.
     expect(playbook).toContain("Index new / un-mapped work as new concepts");
     expect(playbook).toContain("create_task");
+    expect(playbook).toContain("`epic`");
     // Fan out over CHANGED areas only, not a full re-survey.
     expect(playbook).toContain("CHANGED areas only");
     expect(playbook).toContain("Do NOT re-survey the whole tree");

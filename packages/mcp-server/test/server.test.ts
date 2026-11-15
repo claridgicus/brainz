@@ -633,6 +633,32 @@ describe("task tools", () => {
     expect(kinds).toEqual(["created", "scope_added", "estimated", "taken", "done"]);
   });
 
+  it("create_task's epic links the task part_of the epic, and the epic is a burndown scope", async () => {
+    await callJson("upsert_concept", { id: "checkout-v2", title: "Checkout v2", body: "An epic.", type: "epic" });
+    await callJson("upsert_concept", {
+      id: "pay-button",
+      title: "Pay button",
+      body: "A feature in the epic.",
+      type: "feature",
+      relations: { part_of: ["checkout-v2"] },
+    });
+    const direct = await callJson("create_task", { title: "Epic direct", body: "x", epic: "checkout-v2" });
+    const viaFeature = await callJson("create_task", {
+      title: "Epic via feature",
+      body: "x",
+      domain: "billing",
+      realizes: ["pay-button"],
+    });
+    const related = await callJson("get_related", { id: direct.id, relations: ["part_of"] });
+    expect(JSON.stringify(related)).toContain("checkout-v2");
+    // The closure rule makes an epic a burndown scope with no epic-specific code:
+    // the direct task and the one under its feature both count.
+    const r = await callJson("burndown", { scope: "checkout-v2" });
+    expect(r.scope).toMatchObject({ id: "checkout-v2", type: "epic" });
+    expect(r.totals).toMatchObject({ scope: 2, open: 2 });
+    expect(viaFeature.type).toBe("task");
+  });
+
   it("burndown on an unknown scope is an isError result", async () => {
     const result = await callTool("burndown", { scope: "no-such-scope" });
     expect(result.isError).toBe(true);

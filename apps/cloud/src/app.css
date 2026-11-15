@@ -45,7 +45,7 @@
 	--danger-soft: rgb(248 113 113 / 0.12);
 	--ok: #34d399;
 
-	/* ---- graph node palette: ELEVEN concept categories -----------------
+	/* ---- graph node palette: FOURTEEN concept categories -----------------
 	 * Full mapping (keep in sync with TYPE_COLORS in $lib/graph-data.ts):
 	 *   concept    → --node-concept    #a78bfa  violet (the signature hue)
 	 *   feature    → --node-feature    #34d399  emerald
@@ -60,6 +60,7 @@
 	 *   task       → --node-task       #f59e0b  amber-orange (work pile)
 	 *   iteration  → --node-iteration  #818cf8  indigo    (time-box / sprint)
 	 *   milestone  → --node-milestone  #e879f9  fuchsia   (scoped deliverable)
+	 *   epic       → --node-epic       #fb7185  rose      (overarching body of work)
 	 *   pending    → --node-pending    #6b7280  gray, rendered dashed
 	 * Keep in sync with TYPE_COLORS in $lib/graph-data.ts. */
 	--node-concept: #a78bfa;
@@ -75,6 +76,7 @@
 	--node-task: #f59e0b;
 	--node-iteration: #818cf8;
 	--node-milestone: #e879f9;
+	--node-epic: #fb7185;
 	--node-pending: #6b7280;
 
 	--font-sans:

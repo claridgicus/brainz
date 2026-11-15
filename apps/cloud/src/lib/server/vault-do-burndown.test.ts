@@ -137,7 +137,7 @@ describe("VaultDO schema v9 migration", () => {
     // Rewind to v8: drop what v9 added.
     fake.db.exec(`DROP TABLE task_event`);
     for (const col of ["start_date", "end_date", "estimate"]) fake.db.exec(`ALTER TABLE concept DROP COLUMN ${col}`);
-    fake.db.exec(`DELETE FROM concept_type WHERE key IN ('iteration', 'milestone')`);
+    fake.db.exec(`DELETE FROM concept_type WHERE key IN ('iteration', 'milestone', 'epic')`);
     // A custom type that already took one of the keys keeps its own colour.
     fake.db
       .prepare(`INSERT INTO concept_type (key, label, color, weight, sort_order, hidden, builtin) VALUES ('milestone', 'Goal', '#123456', 50, 3, 0, 0)`)
@@ -148,7 +148,7 @@ describe("VaultDO schema v9 migration", () => {
     await fake.ready();
     const cols = (fake.db.prepare(`PRAGMA table_info(concept)`).all() as { name: string }[]).map((c) => c.name);
     expect(cols).toEqual(expect.arrayContaining(["start_date", "end_date", "estimate"]));
-    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "9" });
+    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "10" });
     const types = vault.listTypes().types;
     const iteration = types.find((t) => t.key === "iteration");
     const builtinIteration = BUILTIN_CONCEPT_TYPES.find((t) => t.key === "iteration");
@@ -162,11 +162,11 @@ describe("VaultDO schema v9 migration", () => {
 });
 
 describe("VaultDO schema v9 migration on a v8 vault that already has tasks", () => {
-  /** Rewind a fresh DO to the exact v8 shape: no task_event, no burndown columns, 11 types. */
+  /** Rewind a fresh DO to the exact v8 shape: no task_event, no burndown columns, 11 types (no epic either). */
   function rewindToV8(fake: ReturnType<typeof fakeState>) {
     fake.db.exec(`DROP TABLE task_event`);
     for (const col of ["start_date", "end_date", "estimate"]) fake.db.exec(`ALTER TABLE concept DROP COLUMN ${col}`);
-    fake.db.exec(`DELETE FROM concept_type WHERE key IN ('iteration', 'milestone')`);
+    fake.db.exec(`DELETE FROM concept_type WHERE key IN ('iteration', 'milestone', 'epic')`);
     fake.db.prepare(`UPDATE meta SET value = '8' WHERE key = 'schema_version'`).run();
   }
 
@@ -248,7 +248,7 @@ describe("VaultDO schema v9 migration on a v8 vault that already has tasks", () 
     // Reopen: the constructor runs the v8 → v9 migration.
     const vault = new VaultDO(fake.state as never, {});
     await fake.ready();
-    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "9" });
+    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "10" });
 
     // Additive: every v8 column value is unchanged, the new columns are null,
     // edges are untouched, and the old registry rows are kept as they were.
@@ -261,8 +261,10 @@ describe("VaultDO schema v9 migration on a v8 vault that already has tasks", () 
     });
     expect(fake.db.prepare(`SELECT * FROM edge ORDER BY from_id, to_id`).all()).toEqual(edgesBefore);
     const typesAfter = fake.db.prepare(`SELECT * FROM concept_type ORDER BY key`).all() as { key: string }[];
-    expect(typesAfter.filter((t) => t.key !== "iteration" && t.key !== "milestone")).toEqual(typesBefore);
-    expect(typesAfter.map((t) => t.key)).toEqual(expect.arrayContaining(["iteration", "milestone"]));
+    // v10 (epics) runs in the same open, so `epic` is appended too.
+    const added = ["iteration", "milestone", "epic"];
+    expect(typesAfter.filter((t) => !added.includes(t.key))).toEqual(typesBefore);
+    expect(typesAfter.map((t) => t.key)).toEqual(expect.arrayContaining(added));
     // The history table starts empty: nothing is written for old tasks…
     expect(vault.taskEvents()).toEqual([]);
 

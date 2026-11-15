@@ -47,6 +47,7 @@ export const CONCEPT_TYPES = [
   "glossary",
   "iteration",
   "milestone",
+  "epic",
 ] as const satisfies readonly ConceptType[];
 
 export const TASK_STATUSES = [
@@ -107,14 +108,14 @@ export interface ConceptTypeSeed {
 }
 
 /**
- * The 13 built-in concept types, in canonical order, with their CURRENT graph
+ * The 14 built-in concept types, in canonical order, with their CURRENT graph
  * colors (mirror src/app.css `--node-*` + graph-data TYPE_COLORS) and weights
  * mirroring the semantic-zoom signal ranking. Seeded verbatim into every
  * vault's registry so a fresh/backfilled vault behaves identically to today.
  *
  * Weight tiers (higher = higher signal, revealed earlier):
  *   100  domain
- *    80  feature, spec, constraint, milestone
+ *    80  feature, spec, constraint, milestone, epic
  *    60  story, workflow, pattern, decision, iteration
  *    40  glossary, concept, task
  */
@@ -132,6 +133,7 @@ export const BUILTIN_CONCEPT_TYPES: readonly ConceptTypeSeed[] = [
   { key: "glossary", label: "Glossary", color: "#f472b6", weight: 40 },
   { key: "iteration", label: "Iteration", color: "#818cf8", weight: 60 },
   { key: "milestone", label: "Milestone", color: "#e879f9", weight: 80 },
+  { key: "epic", label: "Epic", color: "#fb7185", weight: 80 },
 ] as const;
 
 /** The `pending` pseudo-type color (edge targets with no concept yet). Not a

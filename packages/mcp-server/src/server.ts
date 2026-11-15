@@ -19,6 +19,7 @@ import {
   sessionInstructions,
   syncPlaybook,
   TASK_COMPLETE_REMINDER,
+  createTaskRelations,
   BurndownInputError,
   UnknownScopeError,
   type ConceptMeta,
@@ -663,12 +664,8 @@ export function createServer(vault: Vault, options: CreateServerOptions = {}): M
         });
       }),
 
-    create_task: async ({ title, body, domain, realizes, governedBy, codeAreas, tags }) =>
+    create_task: async ({ title, body, domain, epic, realizes, governedBy, codeAreas, tags }) =>
       guarded(async () => {
-        const relations: Record<string, string[]> = {};
-        if (domain) relations.part_of = [domain];
-        if (realizes && realizes.length > 0) relations.realizes = realizes;
-        if (governedBy && governedBy.length > 0) relations.governed_by = governedBy;
         const saved = await vault.upsertConcept({
           title,
           body,
@@ -676,7 +673,7 @@ export function createServer(vault: Vault, options: CreateServerOptions = {}): M
           taskStatus: "open",
           tags,
           codeAreas,
-          relations: Object.keys(relations).length > 0 ? relations : undefined,
+          relations: createTaskRelations({ domain, epic, realizes, governedBy }),
         });
         return ok({
           ...compactMeta(saved),

@@ -18,6 +18,13 @@ describe("onboardingPlaybook", () => {
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
   });
 
+  it("teaches epics: the type, attaching tasks via create_task's epic, and the board grouping", () => {
+    expect(playbook).toContain("`epic`");
+    expect(playbook).toContain('type: "epic"');
+    expect(playbook).toContain("`create_task`'s `epic` argument");
+    expect(playbook).toContain("group by epic");
+  });
+
   it("teaches the canonical relations and code areas", () => {
     for (const rel of ["part_of", "realized_by", "governs", "depends_on"]) {
       expect(playbook).toContain(rel);

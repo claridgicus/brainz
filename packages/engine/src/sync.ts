@@ -165,7 +165,7 @@ For each changed area, find the concepts whose \`code_areas\` point into it (\`l
 
 ## 4. Index new / un-mapped work as new concepts
 
-Where the diff added behavior no concept covers yet, INDEX it as new concepts (domains/features/stories/specs/workflows/decisions), each anchored with \`codeAreas\`, linked into the existing graph with typed relations. For incomplete work you find (a half-built feature, a gap, a follow-up), FILE a task with \`create_task\` so it lands on the board.
+Where the diff added behavior no concept covers yet, INDEX it as new concepts (domains/features/stories/specs/workflows/decisions), each anchored with \`codeAreas\`, linked into the existing graph with typed relations. For incomplete work you find (a half-built feature, a gap, a follow-up), FILE a task with \`create_task\` so it lands on the board. When the work belongs to a larger body of work, create or reuse an \`epic\` concept and pass its id as \`create_task\`'s \`epic\` so the task shows in that epic's lane on the board.
 
 ## 5. Report coverage gaps
 

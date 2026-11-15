@@ -100,7 +100,7 @@ export const upsertConceptInputSchema = z.object({
     .string()
     .optional()
     .describe(
-      "Concept type (default \"concept\"). The 13 built-in types are concept, domain, feature, story, spec, workflow, task, decision, constraint, pattern, glossary, iteration (a time-box such as a sprint) and milestone (a scoped deliverable with a target date); a vault may also define custom types. An unknown type falls back to \"concept\".",
+      "Concept type (default \"concept\"). The 14 built-in types are concept, domain, feature, story, spec, workflow, task, decision, constraint, pattern, glossary, iteration (a time-box such as a sprint) and milestone (a scoped deliverable with a target date) and epic (an overarching body of work that tasks and features are part_of); a vault may also define custom types. An unknown type falls back to \"concept\".",
     ),
   status: z.enum(CONCEPT_STATUSES).optional().describe("Lifecycle status (default \"active\")."),
   product: z.string().optional().describe("Product grouping key."),
@@ -421,6 +421,10 @@ export const createTaskInputSchema = z.object({
   title: z.string().describe("Human-readable task title (required, non-empty)."),
   body: z.string().describe("Markdown description of the work. [[wiki-links]] become edges."),
   domain: z.string().optional().describe("Domain concept id this task is part_of."),
+  epic: z
+    .string()
+    .optional()
+    .describe("Epic concept id this task is part_of (the overarching body of work it belongs to)."),
   realizes: z
     .array(z.string())
     .optional()
@@ -1145,7 +1149,7 @@ export const MCP_TOOLS = [
     title: "Create a task",
     description:
       "Turn a finding into first-class work: creates a `task`-type concept with taskStatus=open and the " +
-      "given relations — part_of a domain, `realizes` stories/features, `governed_by` specs — plus " +
+      "given relations — part_of a domain and/or an epic, `realizes` stories/features, `governed_by` specs — plus " +
       "codeAreas pointing at where the work lands. Use when you discover work that isn't reflected in the " +
       "codebase yet (a gap, a needed fix, a follow-up). The task then shows up in list_tasks / take_task " +
       "and on the Kanban board.",

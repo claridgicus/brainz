@@ -102,7 +102,7 @@ import {
   type KillSwitch,
 } from "./dream-budget";
 
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
 
 /**
@@ -381,24 +381,13 @@ export class VaultDO {
         if (!have.has("end_date")) this.#sql.exec(`ALTER TABLE concept ADD COLUMN end_date TEXT`);
         if (!have.has("estimate")) this.#sql.exec(`ALTER TABLE concept ADD COLUMN estimate REAL`);
         this.#createTaskEventTable();
-        const max = Number(
-          this.#sql
-            .exec<{ n: number | null }>(`SELECT MAX(sort_order) AS n FROM concept_type`)
-            .one().n ?? -1,
-        );
-        let order = max + 1;
-        for (const t of BUILTIN_CONCEPT_TYPES) {
-          if (t.key !== "iteration" && t.key !== "milestone") continue;
-          this.#sql.exec(
-            `INSERT OR IGNORE INTO concept_type (key, label, color, weight, sort_order, hidden, builtin)
-             VALUES (?, ?, ?, ?, ?, 0, 1)`,
-            t.key,
-            t.label,
-            t.color,
-            t.weight,
-            order++,
-          );
-        }
+        this.#appendBuiltinTypes(["iteration", "milestone"]);
+      }
+      if (version < 10) {
+        // v9 → v10: epics (SPEC-CLOUD.md "Epics"). The `epic` built-in type is
+        // appended to the registry (INSERT OR IGNORE keeps a same-keyed custom
+        // type). No DDL: an epic is an ordinary concept row.
+        this.#appendBuiltinTypes(["epic"]);
       }
     }
     // Idempotent seed: if the registry table exists but is empty (fresh vault or
@@ -487,7 +476,37 @@ export class VaultDO {
     )`);
   }
 
-  /** Seed the 11 built-in types iff the registry is empty (fresh/backfilled). */
+  /**
+   * Append the named built-in types to an existing registry, after its rows in
+   * sort order (a schema bump that adds built-ins). INSERT OR IGNORE keeps a
+   * custom type that already uses the key. A no-op on an empty registry.
+   */
+  #appendBuiltinTypes(keys: readonly string[]): void {
+    const { n, max } = this.#sql
+      .exec<{ n: number; max: number | null }>(
+        `SELECT COUNT(*) AS n, MAX(sort_order) AS max FROM concept_type`,
+      )
+      .one();
+    // An empty registry (a pre-v5 vault whose table was just created) gets
+    // every built-in from #seedBuiltinTypes, in canonical order; appending a
+    // few here first would make that seed skip the rest.
+    if (Number(n) === 0) return;
+    let order = Number(max ?? -1) + 1;
+    for (const t of BUILTIN_CONCEPT_TYPES) {
+      if (!keys.includes(t.key)) continue;
+      this.#sql.exec(
+        `INSERT OR IGNORE INTO concept_type (key, label, color, weight, sort_order, hidden, builtin)
+         VALUES (?, ?, ?, ?, ?, 0, 1)`,
+        t.key,
+        t.label,
+        t.color,
+        t.weight,
+        order++,
+      );
+    }
+  }
+
+  /** Seed the built-in types iff the registry is empty (fresh/backfilled). */
   #seedBuiltinTypes(): void {
     const count = Number(
       this.#sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM concept_type`).one().n,

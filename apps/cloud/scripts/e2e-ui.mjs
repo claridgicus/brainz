@@ -12,7 +12,10 @@
  * consent page with more than 5 vaults (search-and-select markup, "+ New
  * vault" above Allow, a duplicate approve getting the same code) → the
  * vault's "Dreaming for this vault" card (SSR, REST settings + bounds, and a
- * browser save of the mode select). When
+ * browser save of the mode select) → epics (create_task's epic, the
+ * epic-grouped board's lanes, columns and roll-up, a re-parent, an epic
+ * burndown scope; in a browser the card's epic picker and a remembered
+ * collapsed lane). When
  * `agent-browser` is on PATH (E2E_UI_BROWSER=0 skips it) a real browser also
  * drives the consent search, chips and a double-clicked Allow, which must
  * reach the client's callback exactly once.
@@ -201,6 +204,120 @@ async function burndownJourney(vaultId, task) {
       created.status === 200 && created.json?.type === "iteration" && Boolean(created.json?.endDate),
       `status ${created.status} ${created.json?.startDate} → ${created.json?.endDate}`,
     );
+  } finally {
+    spawnSync("agent-browser", ["--session", "brainz-e2e-ui", "close"]);
+  }
+}
+
+async function epicJourney(vaultId) {
+  const mk = (body) => api("POST", `/api/vaults/${vaultId}/concepts`, { body });
+  const e1 = await mk({ id: "checkout-epic", title: "Checkout v2", type: "epic", body: "An epic." });
+  await mk({ id: "platform-epic", title: "Platform", type: "epic", body: "Another epic." });
+  await mk({ id: "pay-button", title: "Pay button", type: "feature", body: "", relations: { part_of: ["checkout-epic"] } });
+  step("create an epic → 201 typed epic", e1.status === 201 && e1.json?.type === "epic", `status ${e1.status} ${e1.json?.type}`);
+  const direct = await api("POST", `/api/vaults/${vaultId}/tasks`, {
+    body: { title: "Epic direct task", body: "x", domain: "auth-system", epic: "checkout-epic" },
+  });
+  const inherited = await api("POST", `/api/vaults/${vaultId}/tasks`, {
+    body: { title: "Epic feature task", body: "x", realizes: ["pay-button"] },
+  });
+  const edgesOf = async (id) =>
+    ((await api("GET", `/api/vaults/${vaultId}/graph`)).json?.edges ?? [])
+      .filter((e) => e.from === id && e.relation === "part_of")
+      .map((e) => e.to)
+      .sort();
+  const directEdges = await edgesOf(direct.json?.id);
+  step(
+    "POST /tasks with an epic links it part_of the domain and the epic",
+    direct.status === 201 && inherited.status === 201 && JSON.stringify(directEdges) === JSON.stringify(["auth-system", "checkout-epic"]),
+    `${direct.status}/${inherited.status} ${JSON.stringify(directEdges)}`,
+  );
+  const types = await api("GET", `/api/vaults/${vaultId}/types`);
+  step(
+    "the type registry carries the epic built-in",
+    (types.json?.types ?? []).some((t) => t.key === "epic" && t.builtin),
+    `status ${types.status}`,
+  );
+
+  const board = await page("/v/ui-vault/board?group=epic");
+  const h = board.html;
+  step("/v/ui-vault/board?group=epic → 200", board.status === 200, `status ${board.status}`);
+  step(
+    "epic board SSR: one lane per epic plus No epic",
+    h.includes('aria-label="Epic: Checkout v2"') && h.includes('aria-label="Epic: Platform"') && h.includes('aria-label="Epic: No epic"'),
+  );
+  step(
+    "epic board SSR: each lane keeps its open/taken/done columns",
+    h.includes('aria-label="Checkout v2 · open"') && h.includes('aria-label="Checkout v2 · taken"') && h.includes('aria-label="Checkout v2 · done"'),
+  );
+  // Both the direct task and the one under the epic's feature count (closure).
+  step("epic board SSR: the lane roll-up counts inherited tasks (0/2 done)", /0\/2<\/strong>/.test(h));
+  step("epic board SSR: cards carry the epic picker", h.includes("No epic</option>"));
+
+  // Re-parent the direct task (what a drag to the Platform lane sends).
+  const move = await api("POST", `/api/vaults/${vaultId}/concepts/${direct.json?.id}/membership`, {
+    body: { type: "epic", target: "platform-epic" },
+  });
+  const moved = await edgesOf(direct.json?.id);
+  step(
+    "re-parent to another epic keeps the domain link (server-side, atomic)",
+    move.status === 200 && JSON.stringify(moved) === JSON.stringify(["auth-system", "platform-epic"]),
+    `${move.status} ${JSON.stringify(moved)}`,
+  );
+  const wrong = await api("POST", `/api/vaults/${vaultId}/concepts/${direct.json?.id}/membership`, {
+    body: { type: "epic", target: "pay-button" },
+  });
+  step("re-parent onto a non-epic → 400", wrong.status === 400, `status ${wrong.status}`);
+  const bd = await api("GET", `/api/vaults/${vaultId}/burndown?scope=checkout-epic`);
+  step(
+    "an epic is a burndown scope (closure counts the feature's task)",
+    bd.status === 200 && bd.json?.scope?.type === "epic" && bd.json?.totals?.scope === 1,
+    `status ${bd.status} ${JSON.stringify(bd.json?.totals)}`,
+  );
+
+  if (!hasAgentBrowser()) {
+    console.log("  [SKIP] browser epic board (agent-browser not on PATH, or E2E_UI_BROWSER=0)");
+    return;
+  }
+  try {
+    const base = new URL(BASE);
+    for (const [name, value] of jar) agentBrowser(["cookies", "set", name, value, "--url", `${base.origin}/`]);
+    agentBrowser(["open", `${BASE}/v/ui-vault/board?group=epic`]);
+    // The card pickers are disabled until hydrated: wait for them, never a sleep.
+    const ready = await browserUntil(
+      `(() => { const s = document.querySelector('.epic-pick select'); return !!s && !s.disabled; })()`,
+    );
+    step("browser: the epic board hydrates (pickers enabled)", ready !== null);
+    if (process.env.E2E_UI_SCREENSHOT) {
+      agentBrowser(["screenshot", "--full", process.env.E2E_UI_SCREENSHOT.replace(/(\.png)?$/, "-board-epics.png")]);
+    }
+    // Move the inherited task to Platform with its card's epic picker.
+    agentBrowser([
+      "eval",
+      `(() => { const card = [...document.querySelectorAll('.task-card')].find((c) => c.textContent.includes('Epic feature task')); if (!card) return 'no card'; const s = card.querySelector('.epic-pick select'); s.value = 'platform-epic'; s.dispatchEvent(new Event('change', { bubbles: true })); return 'ok'; })()`,
+    ]);
+    const lane = await browserUntil(
+      `[...document.querySelectorAll('[aria-label="Epic: Platform"] .task-card')].some((c) => c.textContent.includes('Epic feature task'))`,
+    );
+    step("browser: the epic picker moves a card into the other epic's lane", lane !== null);
+    let after = [];
+    const storedDeadline = Date.now() + BROWSER_DEADLINE_MS;
+    while (Date.now() < storedDeadline) {
+      after = await edgesOf(inherited.json?.id);
+      if (after.includes("platform-epic")) break;
+      await sleep(500);
+    }
+    step("browser: the move is stored server-side", after.includes("platform-epic"), JSON.stringify(after));
+    // Collapse the Checkout lane; the choice survives a reload.
+    agentBrowser(["click", '[aria-label="Epic: Checkout v2"] .epic-toggle']);
+    const stored = await browserUntil(`(localStorage.getItem('brainz:board:epic-collapsed:' + '${vaultId}') ?? '').includes('checkout-epic')`);
+    step("browser: collapsing a lane stores it", stored !== null);
+    agentBrowser(["open", `${BASE}/v/ui-vault/board?group=epic`]);
+    // Collapse state is restored on mount, so wait for the toggle to report it.
+    const collapsed = await browserUntil(
+      `document.querySelector('[aria-label="Epic: Checkout v2"] .epic-toggle')?.getAttribute('aria-expanded') === 'false'`,
+    );
+    step("browser: a collapsed epic lane stays collapsed after reload", collapsed !== null);
   } finally {
     spawnSync("agent-browser", ["--session", "brainz-e2e-ui", "close"]);
   }
@@ -742,6 +859,10 @@ async function main() {
     // the concept PUT (what the board's iteration picker sends), a take +
     // complete, then the REST burndown and the SSR panel.
     await burndownJourney(vault.id, linkedTask.json);
+
+    // 6d. Epics: the epic type, create_task's epic, the epic-grouped board
+    // (lanes with status columns + roll-up), re-parenting, burndown scope.
+    await epicJourney(vault.id);
 
     // Dashboard shows the open-task chip now that a task exists.
     const dash2 = await page("/dashboard");

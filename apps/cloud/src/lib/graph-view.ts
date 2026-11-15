@@ -155,6 +155,7 @@ export const TYPE_SIGNAL_RANK: Record<string, number> = {
 	spec: 1,
 	constraint: 1,
 	milestone: 1,
+	epic: 1,
 	story: 2,
 	workflow: 2,
 	pattern: 2,
@@ -290,6 +291,7 @@ export const TYPE_SIZE_SCALE: Record<string, number> = {
 	pattern: 0.95,
 	glossary: 0.9,
 	milestone: 1.2,
+	epic: 1.4,
 	iteration: 1.0,
 	pending: 0.8,
 };

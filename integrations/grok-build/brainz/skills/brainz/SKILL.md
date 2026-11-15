@@ -65,7 +65,7 @@ user has authenticated. If a Brainz tool call fails with `Auth required` or a
 | See open, taken or done work | `list_tasks {taskStatus?, domain?}` |
 | Claim a task and get its briefing | `take_task {id?, takenBy?}` |
 | Finish a task | `complete_task {id, outcome}`, then `upsert_concept` for what changed |
-| Turn a finding into work | `create_task {title, body, domain?, realizes?, governedBy?, codeAreas?}` |
+| Turn a finding into work | `create_task {title, body, domain?, epic?, realizes?, governedBy?, codeAreas?}` |
 
 After implementing a taken task, check the result against every spec the task is
 `governed_by`. Fix or file a task for any gap before completing it.

@@ -80,7 +80,7 @@ describe("default node-type loading (graph-view)", () => {
 
   it("allEnabledTypes covers every known type", () => {
     expect(allEnabledTypes()).toEqual(new Set(ALL_NODE_TYPES));
-    expect(allEnabledTypes().size).toBe(14); // 13 concept types + "pending"
+    expect(allEnabledTypes().size).toBe(15); // 14 concept types + "pending"
   });
 });
 

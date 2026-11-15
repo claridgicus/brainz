@@ -52,7 +52,9 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "24"', () => {
+  it('is "25"', () => {
+    // 25: epics — built-in type `epic` (the 14th); create_task gains an
+    //     optional `epic` id (another part_of edge). Additive.
     // 24: burndown — new `burndown` MCP tool (burndownInputSchema +
     //     burndownResultSchema; GET .../burndown via burndownQuerySchema),
     //     taskEventSchema; built-in types gain `iteration` and `milestone`;
@@ -107,7 +109,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("24");
+    expect(CONTRACTS_VERSION).toBe("25");
   });
 });
 
@@ -326,12 +328,12 @@ describe("output schemas encode the shipped shapes", () => {
 });
 
 describe("product ontology (v3)", () => {
-  it("has the 13 concept types, additive over the original 6", () => {
-    expect(CONCEPT_TYPES).toHaveLength(13);
+  it("has the 14 concept types, additive over the original 6", () => {
+    expect(CONCEPT_TYPES).toHaveLength(14);
     for (const t of ["concept", "feature", "decision", "constraint", "pattern", "glossary"]) {
       expect(CONCEPT_TYPES).toContain(t);
     }
-    for (const t of ["domain", "story", "spec", "workflow", "task", "iteration", "milestone"]) {
+    for (const t of ["domain", "story", "spec", "workflow", "task", "iteration", "milestone", "epic"]) {
       expect(CONCEPT_TYPES).toContain(t);
     }
   });
@@ -379,6 +381,14 @@ describe("product ontology (v3)", () => {
     const { filePath: _fp, ...tool } = meta;
     expect(toolConceptMetaSchema.safeParse(tool).success).toBe(true);
     expect(toolConceptMetaSchema.safeParse({ ...tool, codeAreas: undefined }).success).toBe(true);
+  });
+
+  it("create_task takes an optional epic id", () => {
+    const createTask = MCP_TOOLS.find((t) => t.name === "create_task")!;
+    expect(createTask.inputSchema.safeParse({ title: "T", body: "", epic: "checkout-v2" }).success).toBe(true);
+    expect(createTask.inputSchema.safeParse({ title: "T", body: "" }).success).toBe(true);
+    expect(createTask.inputSchema.safeParse({ title: "T", body: "", epic: 7 }).success).toBe(false);
+    expect(createTask.description).toContain("epic");
   });
 
   it("upsert_concept input accepts the built-in types and codeAreas", () => {
@@ -657,13 +667,20 @@ describe("cli --json schemas", () => {
 });
 
 describe("concept-type registry (Wave TR)", () => {
-  it("seeds exactly the 13 built-ins in canonical order with today's colors", () => {
+  it("seeds exactly the 14 built-ins in canonical order with today's colors", () => {
     expect(BUILTIN_CONCEPT_TYPES.map((t) => t.key)).toEqual([...CONCEPT_TYPES]);
     const byKey = Object.fromEntries(BUILTIN_CONCEPT_TYPES.map((t) => [t.key, t]));
     // Colors mirror graph-data TYPE_COLORS / app.css --node-* tokens.
     expect(byKey.domain.color).toBe("#60a5fa");
     expect(byKey.concept.color).toBe("#a78bfa");
     expect(byKey.glossary.color).toBe("#f472b6");
+    expect(byKey.epic.color).toBe("#fb7185");
+  });
+
+  it("epic shares the feature tier (no new LOD tier: the seed still reproduces the ranks)", () => {
+    const w = Object.fromEntries(BUILTIN_CONCEPT_TYPES.map((t) => [t.key, t.weight]));
+    expect(w.epic).toBe(w.feature);
+    expect(new Set(BUILTIN_CONCEPT_TYPES.map((t) => t.weight))).toEqual(new Set([100, 80, 60, 40]));
   });
 
   it("weights mirror the signal ranking: domain highest, glossary/concept/task lowest", () => {

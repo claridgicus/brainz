@@ -68,7 +68,8 @@ A concept earns its place by answering a question a future agent will ask ("how 
 4. \`spec\` — technical specifications: the RULES under which a function must be performed. A spec \`governs\` the features/stories/domains it constrains ("Session tokens rotate every 15 minutes" governs Session Refresh).
 5. \`workflow\` — multi-step user/system journeys across features (\`part_of\` its domain, \`depends_on\` the features it crosses, in order).
 6. \`task\` — a unit of work NOT yet reflected in the codebase (a gap, fix, or follow-up). A task is \`part_of\` a domain, \`realizes\` the stories/features it will deliver, and is \`governed_by\` the specs it must satisfy; \`code_areas\` say where the work lands. Prefer the \`create_task\` tool. Tasks show up on the Kanban board and are claimed via \`take_task\`.
-7. And wherever they surface: \`decision\` (choices made and why), \`constraint\` (hard limits), \`pattern\` (recurring implementation approaches), \`glossary\` (terms of art), \`concept\` (anything else worth keeping).
+7. \`epic\` — an overarching body of work that spans several features or tasks: a project, a feature group, an orchestration lane ("Checkout v2"). Features and tasks are \`part_of\` (or \`realize\`) the epic, and a task under a feature of an epic counts toward it. Create the epic with \`upsert_concept\` (\`type: "epic"\`, \`part_of\` its domain), then attach work with \`create_task\`'s \`epic\` argument. The Kanban board can group by epic, and an epic is a \`burndown\` scope.
+8. And wherever they surface: \`decision\` (choices made and why), \`constraint\` (hard limits), \`pattern\` (recurring implementation approaches), \`glossary\` (terms of art), \`concept\` (anything else worth keeping).
 
 ## 3. Anchor every concept to the code
 

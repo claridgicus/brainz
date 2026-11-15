@@ -1,7 +1,8 @@
 <script lang="ts">
 	// Real-time Kanban board over the vault's task-type concepts.
 	// Columns Open · Taken · Done (or swimlanes when grouped by concept /
-	// priority / owner). Polls GET /tasks every 4s and diff-animates; card
+	// priority / owner; grouped by epic, each epic swimlane keeps the three
+	// status columns). Polls GET /tasks every 4s and diff-animates; card
 	// moves issue take/complete/reopen mutations with an optimistic update.
 	import type { ApiConcept, GraphNode, GraphPayload, TaskMeta } from "@brainz/contracts";
 	import { ApiError, createApi, roleOf } from "$lib/api";
@@ -10,13 +11,26 @@
 	import Mark from "$lib/components/Mark.svelte";
 	import { onMount } from "svelte";
 	import {
+		type EpicLane,
 		type GroupBy,
 		type Lane,
 		type Status,
+		NO_EPIC,
+		STATUSES,
+		collapsedStorageKey,
+		computeEpicLanes,
 		computeLanes,
+		epicIdsIn,
 		hasLaneMiss,
+		hasTaskMiss,
+		nearestEpicOf,
+		parseCollapsed,
+		planEpicReparent,
+		serializeCollapsed,
 		statusOf as laneStatusOf,
 		titleForIn,
+		toggleCollapsed,
+		withEpicReparent,
 	} from "./board-lanes";
 
 	let { data } = $props();
@@ -39,8 +53,34 @@
 
 	// ------------------------------------------------------------- grouping
 	// Grouping/lane derivation is pure (./board-lanes) so it can be unit-tested.
-	let groupBy = $state<GroupBy>("status");
+	const GROUPS: [GroupBy, string][] = [
+		["status", "Status"],
+		["epic", "Epic"],
+		["concept", "Concept"],
+		["priority", "Priority"],
+		["takenBy", "Owner"],
+	];
+	// `?group=epic` (etc.) opens the board pre-grouped, so other views can link here.
+	// svelte-ignore state_referenced_locally
+	let groupBy = $state<GroupBy>(
+		GROUPS.find(([g]) => g === data.group)?.[0] ?? "status",
+	);
 	const lanes = $derived.by((): Lane[] => computeLanes(tasks, graph, groupBy));
+	const epicLanes = $derived.by((): EpicLane[] =>
+		groupBy === "epic" ? computeEpicLanes(tasks, graph) : [],
+	);
+
+	// Collapsed epic lanes, remembered per vault in this browser (a per-viewer
+	// convenience: storage can be unavailable, so every access is guarded).
+	let collapsed = $state<Set<string>>(new Set());
+	function toggleLane(id: string) {
+		collapsed = toggleCollapsed(collapsed, id);
+		try {
+			localStorage.setItem(collapsedStorageKey(vault.id), serializeCollapsed(collapsed));
+		} catch {
+			/* not persisted; still collapsed for this page */
+		}
+	}
 
 	// ------------------------------------------------------------ real-time
 	// Tasks poll fast (4s) for a live pile; the concept graph — the source of
@@ -83,13 +123,25 @@
 		// already loaded the graph, so count first — the first periodic refresh
 		// lands at GRAPH_EVERY ticks, not on the very next poll.
 		tick++;
-		if (tick % GRAPH_EVERY === 0 || hasLaneMiss(tasks, graph)) void refreshGraph();
+		// The epic lanes need each task's edges, so a task the graph hasn't seen
+		// yet (just created) is a miss there too.
+		if (
+			tick % GRAPH_EVERY === 0 ||
+			hasLaneMiss(tasks, graph) ||
+			(groupBy === "epic" && hasTaskMiss(tasks, graph))
+		)
+			void refreshGraph();
 	}
-	// The iteration picker needs JS: disabled until hydrated so an early
-	// change is never silently dropped.
+	// The iteration and epic pickers need JS: disabled until hydrated so an
+	// early change is never silently dropped.
 	let hydrated = $state(false);
 	onMount(() => {
 		hydrated = true;
+		try {
+			collapsed = parseCollapsed(localStorage.getItem(collapsedStorageKey(vault.id)));
+		} catch {
+			/* storage unavailable: every lane starts expanded */
+		}
 		const timer = setInterval(poll, POLL_MS);
 		return () => clearInterval(timer);
 	});
@@ -180,6 +232,50 @@
 		}
 	}
 
+	// ------------------------------------------------------------ epic move
+	const epicOptions = $derived(
+		graph.nodes
+			.filter((n) => n.type === "epic" && !n.pending)
+			.sort((a, b) => a.title.localeCompare(b.title)),
+	);
+	// Dropping a card on another epic's lane re-parents it. Each swap is one
+	// atomic server-side membership change (POST /concepts/:id/membership,
+	// type "epic") computed from the STORED relations, never rebuilt from this
+	// page's cached graph; planEpicReparent only picks which swaps to ask for.
+	/** Resolves true when the task is now in the target epic lane. */
+	async function moveToEpic(task: TaskMeta, target: string | null): Promise<boolean> {
+		if (!canEdit) return false;
+		const epics = epicIdsIn(graph);
+		const plan = planEpicReparent(graph, task.id, target, epics);
+		if (!plan.ok) {
+			error = plan.reason;
+			return false;
+		}
+		if (plan.calls.length === 0) return true;
+		busyId = task.id;
+		error = null;
+		const snapshot = graph;
+		graph = withEpicReparent(graph, task.id, target, epics);
+		try {
+			for (const call of plan.calls) {
+				await api.setMembership(vault.id, task.id, {
+					relation: call.relation,
+					type: "epic",
+					target: call.target,
+				});
+			}
+			void refreshGraph();
+			return true;
+		} catch (err) {
+			graph = snapshot; // roll back
+			error = err instanceof ApiError ? err.message : "Could not move the task to that epic.";
+			void refreshGraph(); // the first swap may have landed
+			return false;
+		} finally {
+			busyId = null;
+		}
+	}
+
 	// ------------------------------------------------------- drag and drop
 	let dragId = $state<string | null>(null);
 	function onDrop(target: Status) {
@@ -188,6 +284,17 @@
 		if (!id) return;
 		const task = tasks.find((t) => t.id === id);
 		if (task) void moveTo(task, target);
+	}
+	/** A drop on one status cell of an epic lane: re-parent, then move status. */
+	async function onEpicDrop(laneId: string, target: Status) {
+		const id = dragId;
+		dragId = null;
+		if (!id) return;
+		const task = tasks.find((t) => t.id === id);
+		if (!task) return;
+		const epic = laneId === NO_EPIC ? null : laneId;
+		if ((nearestEpicOf(graph, task.id) ?? null) !== epic && !(await moveToEpic(task, epic))) return;
+		await moveTo(task, target);
 	}
 
 	// --------------------------------------------------------- card detail
@@ -236,6 +343,116 @@
 	const prevStatus: Record<Status, Status | null> = { open: null, taken: "open", done: "taken" };
 </script>
 
+{#snippet taskCard(task: TaskMeta)}
+	{@const st = statusOf(task)}
+	<div
+		class="card task-card status-{st}"
+		class:busy={busyId === task.id}
+		draggable={canEdit}
+		ondragstart={() => canEdit && (dragId = task.id)}
+		ondragend={() => (dragId = null)}
+		role="button"
+		tabindex="0"
+		onclick={() => openCard(task.id)}
+		onkeydown={(e) => (e.key === "Enter" ? openCard(task.id) : null)}
+	>
+		<div class="card-top">
+			<span class="dot" style="background:{TYPE_COLORS.task}"></span>
+			<h3>{task.title}</h3>
+		</div>
+		<div class="card-tags">
+			{#each task.tags as tag (tag)}<span class="tag">#{tag}</span>{/each}
+		</div>
+		<div class="card-foot">
+			{#if st === "taken" && task.takenBy}
+				<span class="owner">{task.takenBy}</span>
+			{/if}
+			{#if task.codeAreas && task.codeAreas.length > 0}
+				<span class="areas" title={task.codeAreas.join('\n')}>
+					{task.codeAreas.length} code {task.codeAreas.length === 1 ? "area" : "areas"}
+				</span>
+			{/if}
+			{#if task.estimate !== undefined}
+				<span class="areas" title="Estimate">{task.estimate} pts</span>
+			{/if}
+		</div>
+		{#if canEdit && iterations.length > 0}
+			<!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events -->
+			<label
+				class="iter-pick"
+				onclick={(e) => e.stopPropagation()}
+				onkeydown={(e) => e.stopPropagation()}
+			>
+				<span class="sr-only">Iteration for {task.title}</span>
+				<select
+					value={iterationOf(task.id)}
+					disabled={!hydrated || busyId === task.id}
+					onchange={(e) => void assignIteration(task, e.currentTarget.value)}
+				>
+					<option value="">No iteration</option>
+					{#each iterations as it (it.id)}
+						<option value={it.id}>{it.title}</option>
+					{/each}
+				</select>
+			</label>
+		{/if}
+		{#if canEdit && groupBy === "epic" && epicOptions.length > 0}
+			<!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events -->
+			<label
+				class="iter-pick epic-pick"
+				onclick={(e) => e.stopPropagation()}
+				onkeydown={(e) => e.stopPropagation()}
+			>
+				<span class="sr-only">Epic for {task.title}</span>
+				<select
+					value={nearestEpicOf(graph, task.id) ?? ""}
+					disabled={!hydrated || busyId === task.id}
+					onchange={async (e) => {
+						const sel = e.currentTarget;
+						const ok = await moveToEpic(task, sel.value || null);
+						if (!ok) sel.value = nearestEpicOf(graph, task.id) ?? "";
+					}}
+				>
+					<option value="">No epic</option>
+					{#each epicOptions as ep (ep.id)}
+						<option value={ep.id}>{ep.title}</option>
+					{/each}
+				</select>
+			</label>
+		{/if}
+		{#if canEdit}
+		<div class="card-moves">
+			{#if prevStatus[st]}
+				<button
+					type="button"
+					class="move-btn"
+					onclick={(e) => {
+						e.stopPropagation();
+						void moveTo(task, prevStatus[st]!);
+					}}
+					title="Move to {prevStatus[st]}"
+				>
+					← {prevStatus[st]}
+				</button>
+			{/if}
+			{#if nextStatus[st]}
+				<button
+					type="button"
+					class="move-btn"
+					onclick={(e) => {
+						e.stopPropagation();
+						void moveTo(task, nextStatus[st]!);
+					}}
+					title="Move to {nextStatus[st]}"
+				>
+					{nextStatus[st]} →
+				</button>
+			{/if}
+		</div>
+		{/if}
+	</div>
+{/snippet}
+
 <svelte:head><title>Board — {vault.name} — Brainz</title></svelte:head>
 
 <div class="board-page">
@@ -247,12 +464,13 @@
 		</div>
 		<div class="group-control" role="group" aria-label="Group by">
 			<span class="glabel">Group by</span>
-			{#each [["status", "Status"], ["concept", "Concept"], ["priority", "Priority"], ["takenBy", "Owner"]] as [val, label] (val)}
+			{#each GROUPS as [val, label] (val)}
 				<button
 					type="button"
 					class="chip"
 					class:on={groupBy === val}
-					onclick={() => (groupBy = val as GroupBy)}
+					aria-pressed={groupBy === val}
+					onclick={() => (groupBy = val)}
 				>
 					{label}
 				</button>
@@ -275,6 +493,74 @@
 				Give your fleet the vault's MCP key and watch the board fill up.
 			</p>
 		</div>
+	{:else if groupBy === "epic"}
+		<div class="epic-lanes">
+			{#each epicLanes as lane (lane.id)}
+				{@const open = !collapsed.has(lane.id)}
+				<section class="epic-lane" class:none={lane.id === NO_EPIC} aria-label="Epic: {lane.label}">
+					<header class="epic-head">
+						<button
+							type="button"
+							class="epic-toggle"
+							aria-expanded={open}
+							aria-controls="epic-body-{lane.id}"
+							onclick={() => toggleLane(lane.id)}
+						>
+							<span class="chev" aria-hidden="true">{open ? "▾" : "▸"}</span>
+							{#if lane.id !== NO_EPIC}
+								<span class="dot" style="background:{TYPE_COLORS.epic}"></span>
+							{/if}
+							<span class="epic-title">{lane.label}</span>
+						</button>
+						<div
+							class="epic-progress"
+							role="progressbar"
+							aria-label="{lane.label} progress"
+							aria-valuemin={0}
+							aria-valuemax={lane.rollup.total}
+							aria-valuenow={lane.rollup.done}
+						>
+							<span class="bar done" style="width:{lane.rollup.total ? (lane.rollup.done / lane.rollup.total) * 100 : 0}%"></span>
+							<span class="bar taken" style="width:{lane.rollup.total ? (lane.rollup.taken / lane.rollup.total) * 100 : 0}%"></span>
+						</div>
+						<span class="epic-rollup">
+							<strong>{lane.rollup.done}/{lane.rollup.total}</strong> done
+							{#if lane.rollup.taken > 0}· <span class="status-taken">{lane.rollup.taken} taken</span>{/if}
+							· {lane.rollup.pct}%
+						</span>
+					</header>
+					{#if open}
+						<div class="columns epic-columns" id="epic-body-{lane.id}">
+							{#each STATUSES as st (st)}
+								<div
+									class="column epic-cell"
+									role="group"
+									aria-label="{lane.label} · {st}"
+									data-epic={lane.id}
+									data-status={st}
+									ondragover={(e) => dragId !== null && e.preventDefault()}
+									ondrop={() => void onEpicDrop(lane.id, st)}
+									class:drop-target={dragId !== null}
+								>
+									<header class="col-head">
+										<span class="col-title status-{st}">{st}</span>
+										<span class="col-count">{lane.columns[st].length}</span>
+									</header>
+									<div class="cards">
+										{#each lane.columns[st] as task (task.id)}
+											{@render taskCard(task)}
+										{/each}
+										{#if lane.columns[st].length === 0}
+											<p class="lane-empty muted">—</p>
+										{/if}
+									</div>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				</section>
+			{/each}
+		</div>
 	{:else}
 		<div class="columns" class:swimlanes={groupBy !== "status"}>
 			{#each lanes as lane (lane.id)}
@@ -292,89 +578,7 @@
 					</header>
 					<div class="cards">
 						{#each lane.tasks as task (task.id)}
-							{@const st = statusOf(task)}
-							<div
-								class="card task-card status-{st}"
-								class:busy={busyId === task.id}
-								draggable={canEdit}
-								ondragstart={() => canEdit && (dragId = task.id)}
-								ondragend={() => (dragId = null)}
-								role="button"
-								tabindex="0"
-								onclick={() => openCard(task.id)}
-								onkeydown={(e) => (e.key === "Enter" ? openCard(task.id) : null)}
-							>
-								<div class="card-top">
-									<span class="dot" style="background:{TYPE_COLORS.task}"></span>
-									<h3>{task.title}</h3>
-								</div>
-								<div class="card-tags">
-									{#each task.tags as tag (tag)}<span class="tag">#{tag}</span>{/each}
-								</div>
-								<div class="card-foot">
-									{#if st === "taken" && task.takenBy}
-										<span class="owner">{task.takenBy}</span>
-									{/if}
-									{#if task.codeAreas && task.codeAreas.length > 0}
-										<span class="areas" title={task.codeAreas.join('\n')}>
-											{task.codeAreas.length} code {task.codeAreas.length === 1 ? "area" : "areas"}
-										</span>
-									{/if}
-									{#if task.estimate !== undefined}
-										<span class="areas" title="Estimate">{task.estimate} pts</span>
-									{/if}
-								</div>
-								{#if canEdit && iterations.length > 0}
-									<!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events -->
-									<label
-										class="iter-pick"
-										onclick={(e) => e.stopPropagation()}
-										onkeydown={(e) => e.stopPropagation()}
-									>
-										<span class="sr-only">Iteration for {task.title}</span>
-										<select
-											value={iterationOf(task.id)}
-											disabled={!hydrated || busyId === task.id}
-											onchange={(e) => void assignIteration(task, e.currentTarget.value)}
-										>
-											<option value="">No iteration</option>
-											{#each iterations as it (it.id)}
-												<option value={it.id}>{it.title}</option>
-											{/each}
-										</select>
-									</label>
-								{/if}
-								{#if canEdit}
-								<div class="card-moves">
-									{#if prevStatus[st]}
-										<button
-											type="button"
-											class="move-btn"
-											onclick={(e) => {
-												e.stopPropagation();
-												void moveTo(task, prevStatus[st]!);
-											}}
-											title="Move to {prevStatus[st]}"
-										>
-											← {prevStatus[st]}
-										</button>
-									{/if}
-									{#if nextStatus[st]}
-										<button
-											type="button"
-											class="move-btn"
-											onclick={(e) => {
-												e.stopPropagation();
-												void moveTo(task, nextStatus[st]!);
-											}}
-											title="Move to {nextStatus[st]}"
-										>
-											{nextStatus[st]} →
-										</button>
-									{/if}
-								</div>
-								{/if}
-							</div>
+							{@render taskCard(task)}
 						{/each}
 						{#if lane.tasks.length === 0}
 							<p class="lane-empty muted">—</p>
@@ -677,6 +881,79 @@
 		color: var(--text);
 		border: 1px solid var(--border);
 		border-radius: 6px;
+	}
+	.epic-lanes {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+	}
+	.epic-lane {
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		padding: 8px 10px 10px;
+		background: color-mix(in srgb, var(--bg-raised) 55%, transparent);
+	}
+	.epic-lane.none {
+		border-style: dashed;
+	}
+	.epic-head {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		flex-wrap: wrap;
+	}
+	.epic-toggle {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		background: none;
+		border: none;
+		color: var(--text);
+		font: inherit;
+		font-size: 14px;
+		font-weight: 650;
+		cursor: pointer;
+		padding: 2px 0;
+	}
+	.chev {
+		width: 12px;
+		color: var(--text-dim);
+	}
+	.epic-progress {
+		display: flex;
+		width: 140px;
+		height: 6px;
+		border-radius: 999px;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		overflow: hidden;
+	}
+	.epic-progress .bar.done {
+		background: #34d399;
+	}
+	.epic-progress .bar.taken {
+		background: #60a5fa;
+	}
+	.epic-rollup {
+		font-size: 12px;
+		color: var(--text-dim);
+	}
+	.epic-columns {
+		margin-top: 8px;
+		flex: none;
+		overflow: visible;
+	}
+	.epic-cell {
+		min-height: 80px;
+		background: var(--bg-raised);
+	}
+	@media (max-width: 720px) {
+		.epic-columns {
+			grid-template-columns: 1fr;
+		}
 	}
 	.sr-only {
 		position: absolute;

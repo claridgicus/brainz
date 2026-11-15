@@ -327,3 +327,14 @@ A transition is a `TaskEvent`: `{at: ISO, task: id, kind, by?, scope?, points?}`
 - **MCP `burndown`** (`MCP_TOOLS`, so both stdio and cloud vault connections; like `list_tasks` it is not in the public/viewer read allow-list `PUBLIC_VAULT_READ_TOOL_NAMES`): input `{scope?, from?, to?, bucket?, unit?, staleAfterHours?, metrics?}`, output `burndownResultSchema`. Annotations readOnly ✓, destructive —, openWorld — (pure read of this vault's tasks and history). Its description states what it returns, with no advice on when to call it (directory policy).
 - **CLI** `brainz burndown [scope] [--from --to --bucket day|week --unit tasks|points --stale-hours N --metrics a,b] [--json]`: human output is a summary (scope, remaining, done, velocity average, projection, stale list, per-agent table); `--json` prints the `burndownResultSchema` object.
 - An orchestrator reads `burndown` with a milestone/iteration scope to report progress, and `stale`/`agents` to spot stuck workers.
+
+## Epics
+
+Per the decision `decision-epic-type-and-feature-tree-tab` (James, 2026-11-15).
+
+- **New built-in concept type `epic`** (14 in all, after burndown's `iteration` and `milestone`): an overarching body of work, such as a project, a feature group or an orchestration lane. It is a type of its own rather than a reused `feature` so the board and tree views can find epics without guessing. An epic is an ordinary concept: any relation, body, tags; usually `part_of` a domain.
+- **Membership is edges**, as for burndown containers: features and tasks are `part_of` (or `realize`) an epic. A task under a feature that is `part_of` an epic belongs to that epic too: an epic's members are its burndown **closure**, so an epic is a burndown scope with no epic-specific code.
+- **A task's nearest epic** is the epic reachable in the fewest `part_of`/`realizes` hops out from the task (the same edges and 6-hop cap as the closure, walked outward; at each hop `part_of` targets come before `realizes`, then edge order). Views that put each task under ONE epic (the cloud board's epic lanes) use it.
+- **`create_task` gains `epic?: string`**: the epic id becomes another `part_of` target, after `domain` (`{part_of: [domain, epic]}`). Both MCP servers.
+- Everywhere the built-in types are listed gains `epic`: engine `ConceptType` and the note parser, contracts `CONCEPT_TYPES` / `BUILTIN_CONCEPT_TYPES` (`"#fb7185"` rose, weight 80: the feature tier, so it reveals with the features it groups and adds no new zoom tier), the CLI `--type` list, the `packages/web` viewer and both graph palettes, the `upsert_concept` / `search_concepts` type lists. `CONTRACTS_VERSION` 25.
+- The onboard and sync playbooks teach agents to create epics and attach tasks to them with `create_task`'s `epic`.
