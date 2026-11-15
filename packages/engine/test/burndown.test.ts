@@ -7,7 +7,7 @@ import {
   missingTaskHistory,
   nearestContainer,
   scopeClosure,
-  taskHistoryRepair,
+  sortTaskEvents,
   taskSnapshot,
   type BurndownConcept,
   type TaskEvent,
@@ -527,7 +527,7 @@ describe("a re-created task id starts a fresh lifecycle", () => {
       events,
     );
     const added = merged.filter((e) => e.kind === "scope_added" && e.scope === "s");
-    expect(added).toEqual([{ at: D("2026-11-08"), task: "t", kind: "scope_added", scope: "s" }]);
+    expect(added).toEqual([{ at: D("2026-11-08"), task: "t", kind: "scope_added", scope: "s", backfilled: true }]);
     const createdIdx = merged.map((e) => e.kind).lastIndexOf("created");
     expect(merged.indexOf(added[0])).toBeGreaterThan(createdIdx);
   });
@@ -597,26 +597,39 @@ describe("persisted backfill keeps its causal order", () => {
     return { done: r.totals.done, velocity: r.velocity?.periods.reduce((n, p) => n + p.done, 0) };
   };
 
-  it("replaces the log when a synthesized claim must replay before a logged done", () => {
-    const repair = taskHistoryRepair(before, [], [created, done]);
-    expect(repair.kind).toBe("replace");
-    const persisted = repair.kind === "none" ? [] : repair.events;
-    expect(persisted.map((e) => e.kind)).toEqual(["taken", "created", "done"]);
-    expect(persisted[0]).toMatchObject({ at: D("2026-11-01"), by: "w" });
+  it("an appended synthesized claim replays before the logged done at its instant", () => {
+    const missing = missingTaskHistory(before, [], [created, done]);
+    expect(missing).toEqual([{ at: D("2026-11-01"), task: "t", kind: "taken", by: "w", backfilled: true }]);
+    // Appended after the log (an append-only store), the flag keeps the order.
+    const log = [created, done, ...missing, estimated];
+    expect(sortTaskEvents(log).map((e) => e.kind)).toEqual(["created", "taken", "done", "estimated"]);
     // No invented second completion on Nov 9.
-    expect(completions([...persisted, estimated])).toEqual({ done: 1, velocity: 1 });
-    // Appending (the old behaviour) replays taken after done and invents one.
-    expect(completions([created, done, ...persisted.slice(0, 1), estimated]).velocity).toBe(2);
+    expect(completions(log)).toEqual({ done: 1, velocity: 1 });
+    // Without the flag (position alone) it would replay taken after done and invent one.
+    const { backfilled: _, ...unflagged } = missing[0]!;
+    expect(completions([created, done, unflagged, estimated]).velocity).toBe(2);
     // Idempotent: nothing more to persist once the log holds it.
-    expect(taskHistoryRepair(before, [], persisted)).toEqual({ kind: "none" });
-    expect(taskHistoryRepair(after, [], [...persisted, estimated])).toEqual({ kind: "none" });
+    expect(missingTaskHistory(before, [], [created, done, ...missing])).toEqual([]);
+    expect(missingTaskHistory(after, [], log)).toEqual([]);
   });
 
-  it("appends when the synthesized history already sorts before the log", () => {
-    const legacy = task("t", { createdAt: D("2026-10-01"), taskStatus: "done", takenBy: "w", takenAt: D("2026-10-02"), doneAt: D("2026-10-03") });
-    const repair = taskHistoryRepair(legacy, [], []);
-    expect(repair.kind).toBe("append");
-    expect(repair.kind === "none" ? [] : repair.events.map((e) => e.kind)).toEqual(["created", "taken", "done"]);
-    expect(taskHistoryRepair(legacy, [], [{ at: D("2026-11-05"), task: "t", kind: "reopened" }]).kind).toBe("append");
+  it("a backfilled event stays after the re-creation it belongs to", () => {
+    const at = D("2026-11-03");
+    const events: TaskEvent[] = [
+      { at: D("2026-11-01"), task: "t", kind: "created" },
+      { at, task: "t", kind: "deleted" },
+      { at, task: "t", kind: "created" },
+      { at, task: "t", kind: "done" },
+      { at, task: "u", kind: "created" },
+      { at, task: "t", kind: "scope_added", scope: "m", backfilled: true },
+    ];
+    expect(sortTaskEvents(events).map((e) => `${e.task}:${e.kind}`)).toEqual([
+      "t:created",
+      "t:deleted",
+      "t:created",
+      "t:scope_added",
+      "u:created", // another task's events keep their slots
+      "t:done",
+    ]);
   });
 });

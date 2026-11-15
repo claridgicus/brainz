@@ -30,7 +30,7 @@ import {
   computeBurndown,
   diffTaskEvents,
   MEMBERSHIP_RELATIONS,
-  taskHistoryRepair,
+  missingTaskHistory,
   nearestContainer,
   normalizeDay,
   normalizeEstimate,
@@ -104,7 +104,7 @@ import {
   type KillSwitch,
 } from "./dream-budget";
 
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
 
 /**
@@ -393,6 +393,16 @@ export class VaultDO {
         // type). No DDL: an epic is an ordinary concept row.
         this.#appendBuiltinTypes(["epic"]);
       }
+      if (version < 11) {
+        // v10 → v11: task_event.backfilled (SPEC.md "Ordering"): a persisted
+        // synthesized pre-log event replays before the logged events at its
+        // instant. Additive nullable column; a table created by v9+ code since
+        // this change already has it.
+        const cols = this.#sql.exec<{ name: string }>(`PRAGMA table_info(task_event)`).toArray();
+        if (!cols.some((c) => c.name === "backfilled")) {
+          this.#sql.exec(`ALTER TABLE task_event ADD COLUMN backfilled INTEGER`);
+        }
+      }
     }
     // Idempotent seed: if the registry table exists but is empty (fresh vault or
     // just-backfilled), populate the built-ins. Safe to run every init.
@@ -426,7 +436,8 @@ export class VaultDO {
       kind TEXT NOT NULL,
       by TEXT,
       scope TEXT,
-      points REAL
+      points REAL,
+      backfilled INTEGER
     )`);
     this.#sql.exec(`CREATE INDEX IF NOT EXISTS task_event_at ON task_event (at)`);
   }
@@ -2275,13 +2286,14 @@ export class VaultDO {
 
   #insertTaskEvent(e: TaskEvent): void {
     this.#sql.exec(
-      `INSERT INTO task_event (at, task, kind, by, scope, points) VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO task_event (at, task, kind, by, scope, points, backfilled) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       e.at,
       e.task,
       e.kind,
       e.by ?? null,
       e.scope ?? null,
       e.points ?? null,
+      e.backfilled ? 1 : null,
     );
   }
 
@@ -2292,17 +2304,12 @@ export class VaultDO {
     // fields can still rebuild (a task from before the history table has none
     // recorded), so its past contribution survives the edit. Once the log
     // agrees with the fields this adds nothing.
+    // Plain appends: the synthesized pre-log events carry `backfilled`
+    // (column `backfilled`), which keeps their replay order (engine
+    // sortTaskEvents) though they are inserted after older rows.
     if (before?.snap && events.length > 0) {
-      const id = before.meta.id;
-      const repair = taskHistoryRepair(before.meta, before.edges, this.taskEvents(id));
-      if (repair.kind === "replace") {
-        // A synthesized event must replay before a logged one at the same
-        // instant, which appending can't express: re-insert this task's rows
-        // in replay order (order across tasks never matters). Synchronous SQL
-        // in one turn, so no other request sees the gap.
-        this.#sql.exec(`DELETE FROM task_event WHERE task = ?`, id);
-      }
-      if (repair.kind !== "none") for (const e of repair.events) this.#insertTaskEvent(e);
+      const logged = this.taskEvents(before.meta.id);
+      for (const e of missingTaskHistory(before.meta, before.edges, logged)) this.#insertTaskEvent(e);
     }
     for (const e of events) this.#insertTaskEvent(e);
   }
@@ -2317,8 +2324,9 @@ export class VaultDO {
       by: string | null;
       scope: string | null;
       points: number | null;
+      backfilled: number | null;
     };
-    const cols = `SELECT at, task, kind, by, scope, points FROM task_event`;
+    const cols = `SELECT at, task, kind, by, scope, points, backfilled FROM task_event`;
     const cursor =
       task === undefined
         ? this.#sql.exec<Row>(`${cols} ORDER BY seq`)
@@ -2331,6 +2339,7 @@ export class VaultDO {
         if (r.by !== null) e.by = r.by;
         if (r.scope !== null) e.scope = r.scope;
         if (r.kind === "estimated") e.points = r.points === null ? null : Number(r.points);
+        if (r.backfilled) e.backfilled = true;
         return e;
       });
   }

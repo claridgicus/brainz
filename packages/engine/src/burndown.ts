@@ -36,6 +36,12 @@ export interface TaskEvent {
   scope?: string;
   /** `estimated`: story points (null = cleared). */
   points?: number | null;
+  /**
+   * Synthesized by backfill from the task's fields: what happened before the
+   * log recorded it. Among its task's events at the same instant it replays
+   * right after the latest `created` (else first), wherever it was stored.
+   */
+  backfilled?: true;
 }
 
 /** Relations that put a task (or a container) inside a container. */
@@ -174,12 +180,53 @@ function iso(t: number): string {
  * Sort events by time. Ties keep their input order: separate writes inside
  * one millisecond (remove then re-add a scope, release then retake) must
  * replay in the order they were recorded, never be regrouped by kind.
+ *
+ * One exception, carried by the data rather than by storage position: a
+ * `backfilled` event describes what preceded the log, so among its task's
+ * events at the same instant it replays right after the latest `created`
+ * there (a re-creation it belongs to), else before all of them. A store can
+ * then append it after events that were logged earlier (an append-only log,
+ * written by several processes) without changing what replay sees.
  */
 export function sortTaskEvents(events: readonly TaskEvent[]): TaskEvent[] {
-  return events
+  const sorted = events
     .map((e, i) => ({ e, i, t: ms(e.at) ?? 0 }))
     .sort((a, b) => a.t - b.t || a.i - b.i)
-    .map((x) => x.e);
+    .map((x) => ({ e: x.e, t: x.t }));
+  for (let i = 0; i < sorted.length; ) {
+    let j = i + 1;
+    while (j < sorted.length && sorted[j]!.t === sorted[i]!.t) j++;
+    if (j - i > 1) placeBackfilled(sorted, i, j);
+    i = j;
+  }
+  return sorted.map((x) => x.e);
+}
+
+/** Reorder the backfilled events in one equal-time run, per task, in that task's own slots. */
+function placeBackfilled(run: { e: TaskEvent }[], from: number, to: number): void {
+  const slots = new Map<string, number[]>();
+  let any = false;
+  for (let k = from; k < to; k++) {
+    const e = run[k]!.e;
+    if (e.backfilled) any = true;
+    const list = slots.get(e.task);
+    if (list) list.push(k);
+    else slots.set(e.task, [k]);
+  }
+  if (!any) return;
+  for (const idx of slots.values()) {
+    const evs = idx.map((k) => run[k]!.e);
+    if (!evs.some((e) => e.backfilled)) continue;
+    const rest = evs.filter((e) => !e.backfilled);
+    let cut = 0;
+    rest.forEach((e, n) => {
+      if (e.kind === "created") cut = n + 1;
+    });
+    const placed = [...rest.slice(0, cut), ...evs.filter((e) => e.backfilled), ...rest.slice(cut)];
+    idx.forEach((k, n) => {
+      run[k]!.e = placed[n]!;
+    });
+  }
 }
 
 interface ReplayState {
@@ -278,8 +325,9 @@ export function backfillTaskEvents(
   }
 
   // Per task: synthesized events first (they describe what happened before
-  // the log started), then the log in recorded order, then reconciliation.
-  // The final sort is stable, so equal timestamps keep exactly this order.
+  // the log started, and are marked `backfilled` so they keep that place once
+  // a store persists them), then the log in recorded order, then
+  // reconciliation (closing events, appended in their natural place).
   const out: TaskEvent[] = [];
   const current = new Set<string>();
   for (const c of concepts) {
@@ -311,17 +359,19 @@ export function backfillTaskEvents(
         (t): t is number => t !== undefined,
       );
       createdAt = candidates.length > 0 ? Math.min(...candidates) : (ms(fallbackAt) ?? 0);
-      add.push({ at: iso(createdAt), task, kind: "created" });
+      add.push({ at: iso(createdAt), task, kind: "created", backfilled: true });
     }
     const createdIso = iso(createdAt);
 
     // memberships / estimate the log never mentioned: present since creation
     const mentioned = new Set(log.filter((e) => e.scope).map((e) => e.scope as string));
     for (const scope of snap.scopes) {
-      if (!mentioned.has(scope)) add.push({ at: createdIso, task, kind: "scope_added", scope });
+      if (!mentioned.has(scope)) {
+        add.push({ at: createdIso, task, kind: "scope_added", scope, backfilled: true });
+      }
     }
     if (snap.estimate !== undefined && !log.some((e) => e.kind === "estimated")) {
-      add.push({ at: createdIso, task, kind: "estimated", points: snap.estimate });
+      add.push({ at: createdIso, task, kind: "estimated", points: snap.estimate, backfilled: true });
     }
     // A claim the log never saw (taken before history was recorded, e.g. a
     // task claimed before an upgrade and finished after it): record it at
@@ -337,6 +387,7 @@ export function backfillTaskEvents(
         task,
         kind: "taken",
         ...(c.takenBy !== undefined ? { by: c.takenBy } : {}),
+        backfilled: true,
       });
     }
 
@@ -419,10 +470,12 @@ export function backfillTaskEvents(
 
 /**
  * The events backfill would synthesize for one task that its recorded log
- * lacks: once a write overwrites or deletes the concept's fields (createdAt,
- * takenAt, doneAt, memberships), a task that predates the log would otherwise
- * lose its historical contribution. Stores persist them through
- * {@link taskHistoryRepair}, which also keeps their replay order.
+ * lacks. A store appends these before any write that overwrites or deletes
+ * the concept's fields (createdAt, takenAt, doneAt, memberships): a task that
+ * predates the log would otherwise lose its historical contribution. The
+ * synthesized pre-log events carry `backfilled: true`, so appended after
+ * logged events at the same instant they still replay first
+ * ({@link sortTaskEvents}).
  */
 export function missingTaskHistory(
   concept: BurndownConcept,
@@ -433,46 +486,6 @@ export function missingTaskHistory(
   const log = events.filter((e) => e.task === concept.id);
   const have = new Set(log);
   return backfillTaskEvents([concept], edges, log, fallbackAt).filter((e) => !have.has(e));
-}
-
-/**
- * How a store persists, before a write, the history backfill can still
- * rebuild for one task from the fields that write overwrites (SPEC.md "One
- * diff, two stores").
- *
- * - `none`: the log already holds it all.
- * - `append`: append `events` after the task's log; replay order is the
- *   order backfill reads them in.
- * - `replace`: some synthesized event must replay BEFORE a logged event with
- *   the same timestamp (e.g. a pre-log claim stamped at the creation instant
- *   of a task created already done). Appended, the stable time sort would
- *   replay it after that event and invent state (a second completion). The
- *   store replaces the task's whole log with `events`, which is exactly the
- *   backfilled sequence in replay order. Order across tasks never matters.
- *
- * Idempotent: once persisted, the next call returns `none`.
- */
-export type TaskHistoryRepair =
-  | { kind: "none" }
-  | { kind: "append"; events: TaskEvent[] }
-  | { kind: "replace"; events: TaskEvent[] };
-
-export function taskHistoryRepair(
-  concept: BurndownConcept,
-  edges: readonly Edge[],
-  events: readonly TaskEvent[],
-  fallbackAt?: string,
-): TaskHistoryRepair {
-  const log = events.filter((e) => e.task === concept.id);
-  const full = backfillTaskEvents([concept], edges, log, fallbackAt);
-  const have = new Set(log);
-  const missing = full.filter((e) => !have.has(e));
-  if (missing.length === 0) return { kind: "none" };
-  // backfillTaskEvents keeps event identity, so compare by reference.
-  const appended = sortTaskEvents([...log, ...missing]);
-  return appended.every((e, i) => e === full[i])
-    ? { kind: "append", events: missing }
-    : { kind: "replace", events: full };
 }
 
 // ------------------------------------------------------------------ metrics

@@ -148,7 +148,7 @@ describe("VaultDO schema v9 migration", () => {
     await fake.ready();
     const cols = (fake.db.prepare(`PRAGMA table_info(concept)`).all() as { name: string }[]).map((c) => c.name);
     expect(cols).toEqual(expect.arrayContaining(["start_date", "end_date", "estimate"]));
-    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "10" });
+    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "11" });
     const types = vault.listTypes().types;
     const iteration = types.find((t) => t.key === "iteration");
     const builtinIteration = BUILTIN_CONCEPT_TYPES.find((t) => t.key === "iteration");
@@ -158,6 +158,25 @@ describe("VaultDO schema v9 migration", () => {
     expect(types.find((t) => t.key === "milestone")).toMatchObject({ label: "Goal", color: "#123456", builtin: false });
     await vault.upsertConcept({ id: "t", title: "T", body: "", type: "task", estimate: 1 });
     expect(vault.taskEvents().map((e) => e.kind)).toEqual(["created", "estimated"]);
+  });
+});
+
+describe("VaultDO schema v11 migration", () => {
+  it("adds task_event.backfilled to a v10 vault, keeping its rows", async () => {
+    const fake = fakeState();
+    const old = new VaultDO(fake.state as never, {});
+    await fake.ready();
+    await old.upsertConcept({ id: "t", title: "T", body: "", type: "task" });
+    fake.db.exec(`ALTER TABLE task_event DROP COLUMN backfilled`);
+    fake.db.prepare(`UPDATE meta SET value = '10' WHERE key = 'schema_version'`).run();
+
+    const vault = new VaultDO(fake.state as never, {});
+    await fake.ready();
+    const cols = (fake.db.prepare(`PRAGMA table_info(task_event)`).all() as { name: string }[]).map((c) => c.name);
+    expect(cols).toContain("backfilled");
+    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "11" });
+    expect(vault.taskEvents("t")).toEqual([expect.objectContaining({ kind: "created" })]);
+    expect(vault.taskEvents("t")[0]).not.toHaveProperty("backfilled");
   });
 });
 
@@ -248,7 +267,7 @@ describe("VaultDO schema v9 migration on a v8 vault that already has tasks", () 
     // Reopen: the constructor runs the v8 → v9 migration.
     const vault = new VaultDO(fake.state as never, {});
     await fake.ready();
-    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "10" });
+    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "11" });
 
     // Additive: every v8 column value is unchanged, the new columns are null,
     // edges are untouched, and the old registry rows are kept as they were.
@@ -501,16 +520,17 @@ describe("persisted backfill keeps its causal order (VaultDO)", () => {
       takenAt: "2026-10-30T12:00:00.000Z",
     });
     expect(vault.taskEvents("t").map((e) => e.kind)).toEqual(["created", "done"]);
-    // A later edit persists the rebuilt claim, which must replay before the logged done.
+    // A later edit appends the rebuilt claim, flagged so it replays before the logged done.
     await vault.upsertConcept({ id: "t", title: "T", body: "", estimate: 3 });
-    expect(vault.taskEvents("t").map((e) => e.kind)).toEqual(["taken", "created", "done", "estimated"]);
+    expect(vault.taskEvents("t").map((e) => e.kind)).toEqual(["created", "done", "taken", "estimated"]);
+    expect(vault.taskEvents("t")[2]).toMatchObject({ kind: "taken", by: "w", backfilled: true });
     const later = new Date(Date.now() + 60_000);
     const r = vault.burndown({}, later);
     expect(r.totals).toMatchObject({ scope: 1, done: 1, open: 0 });
     expect(r.velocity?.periods.reduce((n, p) => n + p.done, 0)).toBe(1);
     // Idempotent: a further edit appends only its own event.
     await vault.upsertConcept({ id: "t", title: "T", body: "", estimate: 5 });
-    expect(vault.taskEvents("t").map((e) => e.kind)).toEqual(["taken", "created", "done", "estimated", "estimated"]);
+    expect(vault.taskEvents("t").map((e) => e.kind)).toEqual(["created", "done", "taken", "estimated", "estimated"]);
     expect(vault.burndown({}, later).velocity?.periods.reduce((n, p) => n + p.done, 0)).toBe(1);
   });
 });

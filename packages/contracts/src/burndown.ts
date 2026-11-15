@@ -36,6 +36,8 @@ export const taskEventSchema = z
     by: z.string().optional(),
     scope: z.string().optional(),
     points: z.number().nullable().optional(),
+    /** Synthesized from the task's fields (pre-log history); replays first at its instant. */
+    backfilled: z.literal(true).optional(),
   })
   .strict();
 

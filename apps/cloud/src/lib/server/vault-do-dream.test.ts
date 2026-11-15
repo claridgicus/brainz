@@ -450,7 +450,7 @@ describe("VaultDO schema v8 migration", () => {
     const cols = fake.db.prepare(`PRAGMA table_info(dream)`).all() as { name: string }[];
     expect(cols.map((c) => c.name)).toContain("pending_json");
     // Migrations run to the latest schema (v10 since epics).
-    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "10" });
+    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "11" });
     expect((await vault.dreamStatus()).settings.mode).toBe("apply");
   });
 });

@@ -58,7 +58,7 @@ describe("VaultDO schema v10 migration", () => {
 
     const vault = new VaultDO(fake.state as never, {});
     await fake.ready();
-    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "10" });
+    expect(fake.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get()).toEqual({ value: "11" });
     const types = vault.listTypes().types;
     const builtin = BUILTIN_CONCEPT_TYPES.find((t) => t.key === "epic");
     // After the 13 older built-ins (0..12).

@@ -52,7 +52,9 @@ import {
 } from "../src/index.js";
 
 describe("CONTRACTS_VERSION", () => {
-  it('is "26"', () => {
+  it('is "27"', () => {
+    // 27: taskEventSchema gains optional `backfilled: true` (a persisted
+    //     synthesized pre-log event; replays first at its instant). Additive.
     // 26: conceptMembershipRequestSchema `relation` gains "any" (replace the
     //     containers of a type across part_of AND realizes; "No epic" refused
     //     while an inherited one remains). Additive.
@@ -112,7 +114,7 @@ describe("CONTRACTS_VERSION", () => {
     //     MCP tool (remove a concept + its edges; idempotent no-op on missing id).
     // 8: Wave M — vault membership & email invites (role on vault shapes,
     //    member/invite schemas + endpoints).
-    expect(CONTRACTS_VERSION).toBe("26");
+    expect(CONTRACTS_VERSION).toBe("27");
   });
 });
 

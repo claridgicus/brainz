@@ -821,17 +821,17 @@ describe("task history: persisted backfill keeps its causal order", () => {
     await vault.upsertConcept({ id: "t", title: "T", body: "", type: "task", taskStatus: "done", takenBy: "w", takenAt: "2026-10-30T12:00:00.000Z" });
     const kinds = (id: string) => vault.taskEvents().filter((e) => e.task === id).map((e) => e.kind);
     expect(kinds("t")).toEqual(["created", "done"]);
-    // A later edit persists the rebuilt claim, which must replay before the logged done.
+    // A later edit appends the rebuilt claim, flagged so it replays before the logged done.
     await vault.upsertConcept({ id: "t", title: "T", body: "", estimate: 3 });
-    expect(kinds("t")).toEqual(["taken", "created", "done", "estimated"]);
-    expect(kinds("other")).toEqual(["created"]); // other tasks' lines untouched
+    expect(kinds("t")).toEqual(["created", "done", "taken", "estimated"]);
+    expect(vault.taskEvents().find((e) => e.task === "t" && e.kind === "taken")).toMatchObject({ by: "w", backfilled: true });
     const later = new Date(Date.now() + 60_000);
     const r = vault.burndown({}, later);
     expect(r.totals).toMatchObject({ scope: 2, done: 1, open: 1 });
     expect(r.velocity?.periods.reduce((n, p) => n + p.done, 0)).toBe(1);
     // Idempotent: a further edit appends only its own event.
     await vault.upsertConcept({ id: "t", title: "T", body: "", estimate: 5 });
-    expect(kinds("t")).toEqual(["taken", "created", "done", "estimated", "estimated"]);
+    expect(kinds("t")).toEqual(["created", "done", "taken", "estimated", "estimated"]);
     expect(vault.burndown({}, later).velocity?.periods.reduce((n, p) => n + p.done, 0)).toBe(1);
   });
 });
