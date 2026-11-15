@@ -6,7 +6,7 @@
 	import type { ToolConceptMeta } from "@brainz/contracts";
 	import { goto } from "$app/navigation";
 	import { ApiError, createApi, roleOf, type Burndown } from "$lib/api";
-	import { fmtHours, shortDay } from "$lib/burndown-chart";
+	import { fmtHours, shortDay, velocityKey } from "$lib/burndown-chart";
 	import BurndownChart from "$lib/components/BurndownChart.svelte";
 	import { onMount } from "svelte";
 
@@ -291,7 +291,7 @@
 				<h2>Velocity <span class="muted dates">per {result.velocity?.by ?? "week"}</span></h2>
 				{#if result.velocity && result.velocity.periods.length > 0}
 					<ul class="bars">
-						{#each result.velocity.periods as p (p.from)}
+						{#each result.velocity.periods as p (velocityKey(p))}
 							<li title="{p.label}: {p.done} {unitLabel}{p.complete ? '' : ' (in progress)'}">
 								<span class="bar-label">{p.label}</span>
 								<span class="bar-track">

@@ -691,18 +691,19 @@ export class Vault {
   ): void {
     const events = diffTaskEvents(before?.snap ?? null, after?.snap ?? null, new Date().toISOString());
     if (events.length === 0) return;
-    // A task leaving (deleted, or no longer a task): first persist the history
-    // its frontmatter can still rebuild (a note from before the log has none
-    // recorded), so its past contribution survives the deletion. `before` was
-    // captured while the note still existed, so its file dates it too.
-    const missing =
-      before?.snap && events.some((e) => e.kind === "deleted")
-        ? missingTaskHistory(
-            before.meta,
-            before.edges,
-            this.taskEvents().filter((e) => e.task === before.meta.id),
-          )
-        : [];
+    // Any recorded change overwrites (or deletes) the frontmatter backfill
+    // reads: status, claim, memberships, estimate. First persist the history
+    // it can still rebuild (a note from before the log has none recorded), so
+    // its past contribution survives the edit. `before` was captured while the
+    // note still had those fields, so its file dates it too. Once the log
+    // agrees with the frontmatter this adds nothing.
+    const missing = before?.snap
+      ? missingTaskHistory(
+          before.meta,
+          before.edges,
+          this.taskEvents().filter((e) => e.task === before.meta.id),
+        )
+      : [];
     fs.mkdirSync(path.dirname(this.taskEventsPath), { recursive: true });
     fs.appendFileSync(
       this.taskEventsPath,

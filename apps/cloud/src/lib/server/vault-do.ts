@@ -2254,28 +2254,35 @@ export class VaultDO {
 
   #recordTaskDiff(before: TaskState | null, after: TaskState | null, at: string): void {
     const events = diffTaskEvents(before?.snap ?? null, after?.snap ?? null, at);
-    // A task leaving (deleted, or no longer a task): first persist the history
-    // its fields can still rebuild (a task from before the history table has
-    // none recorded), so its past contribution survives the deletion.
-    if (before?.snap && events.some((e) => e.kind === "deleted")) {
-      const logged = this.taskEvents().filter((e) => e.task === before.meta.id);
+    // Any recorded change overwrites (or deletes) the fields backfill reads:
+    // status, claim, memberships, estimate. First persist the history those
+    // fields can still rebuild (a task from before the history table has none
+    // recorded), so its past contribution survives the edit. Once the log
+    // agrees with the fields this adds nothing.
+    if (before?.snap && events.length > 0) {
+      const logged = this.taskEvents(before.meta.id);
       for (const e of missingTaskHistory(before.meta, before.edges, logged)) this.#insertTaskEvent(e);
     }
     for (const e of events) this.#insertTaskEvent(e);
   }
 
-  /** The recorded task history, in append order. */
-  taskEvents(): TaskEvent[] {
+  /** The recorded task history (of one task when `task` is given), in append order. */
+  taskEvents(task?: string): TaskEvent[] {
     const kinds = new Set<string>(TASK_EVENT_KINDS);
-    return this.#sql
-      .exec<{
-        at: string;
-        task: string;
-        kind: string;
-        by: string | null;
-        scope: string | null;
-        points: number | null;
-      }>(`SELECT at, task, kind, by, scope, points FROM task_event ORDER BY seq`)
+    type Row = {
+      at: string;
+      task: string;
+      kind: string;
+      by: string | null;
+      scope: string | null;
+      points: number | null;
+    };
+    const cols = `SELECT at, task, kind, by, scope, points FROM task_event`;
+    const cursor =
+      task === undefined
+        ? this.#sql.exec<Row>(`${cols} ORDER BY seq`)
+        : this.#sql.exec<Row>(`${cols} WHERE task = ? ORDER BY seq`, task);
+    return cursor
       .toArray()
       .filter((r) => kinds.has(r.kind))
       .map((r) => {

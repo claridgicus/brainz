@@ -451,3 +451,88 @@ describe("review regressions", () => {
     expect(missingTaskHistory(c, edges, missing)).toEqual([]);
   });
 });
+
+describe("a re-created task id starts a fresh lifecycle", () => {
+  // Done Nov 3, deleted Nov 4, re-created open Nov 8, done again Nov 10.
+  const edges: Edge[] = [{ from: "t", to: "m", relation: "part_of" }];
+  const events: TaskEvent[] = [
+    { at: D("2026-11-01"), task: "t", kind: "created" },
+    { at: D("2026-11-01"), task: "t", kind: "scope_added", scope: "m" },
+    { at: D("2026-11-01"), task: "t", kind: "estimated", points: 5 },
+    { at: D("2026-11-03"), task: "t", kind: "done", by: "a" },
+    { at: D("2026-11-04"), task: "t", kind: "deleted" },
+    { at: D("2026-11-08"), task: "t", kind: "created" },
+    { at: D("2026-11-08"), task: "t", kind: "scope_added", scope: "m" },
+    { at: D("2026-11-10"), task: "t", kind: "done", by: "b" },
+  ];
+  const concepts = [
+    { id: "m", title: "M", type: "milestone", tags: [] },
+    task("t", { taskStatus: "done", takenBy: "b", createdAt: D("2026-11-08"), doneAt: D("2026-11-10") }),
+  ];
+  const r = computeBurndown({
+    concepts,
+    edges,
+    events,
+    now: D("2026-11-12"),
+    scope: "m",
+    from: "2026-11-01",
+    to: "2026-11-12",
+  });
+  const at = (day: string) => r.series?.find((p) => p.at === `${day}T00:00:00.000Z`);
+
+  it("is open (not done) between re-creation and its second completion", () => {
+    expect(at("2026-11-09")).toMatchObject({ scope: 1, done: 0, open: 1 });
+    expect(at("2026-11-11")).toMatchObject({ scope: 1, done: 1, open: 0 });
+  });
+
+  it("counts the second completion as velocity", () => {
+    // Weeks start Monday: Oct 26 (window start), Nov 2 (first completion), Nov 9 (the second).
+    expect(r.velocity?.periods.map((p) => [p.from.slice(0, 10), p.done])).toEqual([
+      ["2026-10-26", 0],
+      ["2026-11-02", 1],
+      ["2026-11-09", 1],
+    ]);
+  });
+
+  it("times the new life from its own creation and drops the old estimate", () => {
+    // 48h for the first life (Nov 1 → Nov 3), 48h for the second (Nov 8 → Nov 10).
+    expect(r.cycle?.leadHours).toMatchObject({ count: 2, median: 48 });
+    const points = computeBurndown({ concepts, edges, events, now: D("2026-11-12"), scope: "m", unit: "points" });
+    expect(points.totals).toMatchObject({ scope: 0, unestimated: 1 });
+  });
+
+  it("backfill keeps the current note's memberships after the latest creation", () => {
+    // A hand-added membership the log never mentioned is present since the re-creation.
+    const merged = backfillTaskEvents(
+      concepts,
+      [...edges, { from: "t", to: "s", relation: "part_of" }],
+      events,
+    );
+    const added = merged.filter((e) => e.kind === "scope_added" && e.scope === "s");
+    expect(added).toEqual([{ at: D("2026-11-08"), task: "t", kind: "scope_added", scope: "s" }]);
+    const createdIdx = merged.map((e) => e.kind).lastIndexOf("created");
+    expect(merged.indexOf(added[0])).toBeGreaterThan(createdIdx);
+  });
+});
+
+describe("projection onTrack", () => {
+  const edges: Edge[] = [{ from: "t", to: "m", relation: "part_of" }];
+  const run = (doneDay: string) =>
+    computeBurndown({
+      concepts: [
+        { id: "m", title: "M", type: "milestone", tags: [], endDate: "2026-11-05" },
+        task("t", { taskStatus: "done", createdAt: D("2026-11-01"), doneAt: D(doneDay) }),
+      ],
+      edges,
+      events: [],
+      now: D("2026-11-12"),
+      scope: "m",
+    }).projection;
+
+  it("is false when the scope finished after its end date", () => {
+    expect(run("2026-11-10")).toMatchObject({ remaining: 0, likely: D("2026-11-10"), onTrack: false });
+  });
+  it("is true when it finished by its end date", () => {
+    expect(run("2026-11-05")).toMatchObject({ remaining: 0, onTrack: true });
+  });
+});

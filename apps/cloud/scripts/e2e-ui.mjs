@@ -100,6 +100,29 @@ async function burndownJourney(vaultId, task) {
   const unknown = await api("GET", `/api/vaults/${vaultId}/burndown?scope=no-such-thing`);
   step("burndown on an unknown scope → 404", unknown.status === 404, `status ${unknown.status}`);
 
+  // Parallel iterations: Sprint 0 and Sprint 1 both start today. Under one
+  // milestone their velocity rows share a start date, which once crashed the
+  // panel with a duplicate {#each} key.
+  await api("POST", `/api/vaults/${vaultId}/concepts`, {
+    body: { id: "release-1", title: "Release 1", type: "milestone", endDate: end, body: "" },
+  });
+  const parents = await Promise.all(
+    ["sprint-0", "sprint-1"].map((id) =>
+      api("POST", `/api/vaults/${vaultId}/concepts/${id}/membership`, { body: { type: "milestone", target: "release-1" } }),
+    ),
+  );
+  const rel = await api("GET", `/api/vaults/${vaultId}/burndown?scope=release-1`);
+  const periods = rel.json?.velocity?.periods ?? [];
+  step(
+    "parallel iterations under a milestone: one velocity row each, same start day",
+    parents.every((r) => r.status === 200) &&
+      rel.status === 200 &&
+      rel.json?.velocity?.by === "iteration" &&
+      periods.length === 2 &&
+      periods[0].from === periods[1].from,
+    `status ${rel.status} ${JSON.stringify(periods.map((p) => [p.id, p.from]))}`,
+  );
+
   const panel = await page("/v/ui-vault/burndown?scope=sprint-1");
   step("/v/ui-vault/burndown → 200", panel.status === 200, `status ${panel.status}`);
   step(
@@ -204,6 +227,15 @@ async function burndownJourney(vaultId, task) {
       created.status === 200 && created.json?.type === "iteration" && Boolean(created.json?.endDate),
       `status ${created.status} ${created.json?.startDate} → ${created.json?.endDate}`,
     );
+
+    // The milestone with two same-day iterations renders both velocity rows
+    // after hydration (a duplicate key would throw and leave the page broken).
+    agentBrowser(["open", `${BASE}/v/ui-vault/burndown?scope=release-1`]);
+    const relHydrated = await browserUntil(`document.querySelector('.bd-page')?.dataset.hydrated === 'true'`);
+    const rows = await browserUntil(
+      `(() => { const s = [...document.querySelectorAll('section.card')].find((c) => c.querySelector('h2')?.textContent?.startsWith('Velocity')); const labels = [...(s?.querySelectorAll('.bars li .bar-label') ?? [])].map((l) => l.textContent.trim()); return labels.includes('Sprint 0') && labels.includes('Sprint 1') ? labels.join('|') : ''; })()`,
+    );
+    step("browser: parallel iterations each get a velocity row", relHydrated !== null && rows !== null, rows ?? "(timed out)");
   } finally {
     spawnSync("agent-browser", ["--session", "brainz-e2e-ui", "close"]);
   }

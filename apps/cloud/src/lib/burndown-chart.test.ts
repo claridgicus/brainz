@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BurndownResultWire } from "@brainz/contracts";
-import { DEFAULT_BOX, chartModel, fmtHours, nearestPoint, niceStep, shortDay } from "./burndown-chart";
+import { DEFAULT_BOX, chartModel, fmtHours, nearestPoint, niceStep, shortDay, velocityKey } from "./burndown-chart";
 
 const base: BurndownResultWire = {
   scope: { id: "s1", kind: "concept", title: "Sprint 1", type: "iteration", startDate: "2026-11-02", endDate: "2026-11-05" },
@@ -56,5 +56,18 @@ describe("burndown chart model", () => {
     expect(shortDay(null)).toBe("—");
     expect(fmtHours(5)).toBe("5.0h");
     expect(fmtHours(72)).toBe("3.0d");
+  });
+});
+
+describe("velocityKey", () => {
+  it("keeps parallel iterations that start on the same day apart", () => {
+    const row = { from: "2026-11-02T00:00:00.000Z", to: "2026-11-13T00:00:00.000Z", done: 1, complete: true };
+    const keys = [
+      velocityKey({ ...row, label: "Sprint A", id: "sprint-a" }),
+      velocityKey({ ...row, label: "Sprint B", id: "sprint-b" }),
+      velocityKey({ ...row, label: "Week of Nov 2" }),
+    ];
+    expect(new Set(keys).size).toBe(3);
+    expect(keys[2]).toBe("week:2026-11-02T00:00:00.000Z");
   });
 });

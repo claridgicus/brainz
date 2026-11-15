@@ -203,7 +203,14 @@ function applyEvent(st: ReplayState, e: TaskEvent): void {
   st.lastAt = Math.max(st.lastAt, t);
   switch (e.kind) {
     case "created":
+      // A (re-)created id starts a fresh lifecycle: nothing of a deleted
+      // predecessor's status, claim, estimate or memberships carries over.
       st.alive = true;
+      st.status = "open";
+      st.by = undefined;
+      st.takenAt = undefined;
+      st.estimate = undefined;
+      st.scopes.clear();
       break;
     case "taken":
       st.alive = true;
@@ -271,13 +278,19 @@ export function backfillTaskEvents(
     const snap = taskSnapshot(c, outgoing.get(c.id) ?? []);
     if (!snap) continue;
     current.add(c.id);
-    const log = byTask.get(c.id) ?? [];
+    const fullLog = byTask.get(c.id) ?? [];
+    // Only the current incarnation counts: a `created` resets the replay, so
+    // a deleted predecessor of the same id says nothing about this note. The
+    // synthesized events go right after the latest logged `created`.
+    const createdIdx = fullLog.map((e) => e.kind).lastIndexOf("created");
+    const earlier = createdIdx >= 0 ? fullLog.slice(0, createdIdx + 1) : [];
+    const log = createdIdx >= 0 ? fullLog.slice(createdIdx + 1) : fullLog;
     const add: TaskEvent[] = [];
     const task = c.id;
 
     // created
     let createdAt: number;
-    const loggedCreated = log.find((e) => e.kind === "created");
+    const loggedCreated = createdIdx >= 0 ? fullLog[createdIdx] : undefined;
     if (loggedCreated) {
       createdAt = ms(loggedCreated.at) ?? 0;
     } else {
@@ -315,7 +328,7 @@ export function backfillTaskEvents(
     }
 
     // Replay what we have so far and reconcile with the frontmatter.
-    const merged = sortTaskEvents([...add, ...log]);
+    const merged = sortTaskEvents([...earlier, ...add, ...log]);
     const st = replayOne(merged);
     const updated = ms(c.updatedAt);
     const after = (t: number | undefined): number => {
@@ -378,7 +391,7 @@ export function backfillTaskEvents(
         });
       }
     }
-    out.push(...add, ...log, ...reconcile);
+    out.push(...earlier, ...add, ...log, ...reconcile);
   }
 
   // Tasks the log knows that are gone now (deleted by hand): close them.
@@ -929,12 +942,16 @@ export function computeBurndown(input: BurndownInput): BurndownResult {
       likely,
       optimistic,
       pessimistic,
+      // With nothing remaining `likely` is the last completion, so a scope
+      // finished after its end date is late, not on track.
       onTrack:
-        scopeEnd !== undefined && likely !== null && remaining > 0
-          ? Date.parse(likely) <= scopeEnd
-          : scopeEnd !== undefined && remaining <= 0 && relevant.length > 0
-            ? true
-            : null,
+        scopeEnd === undefined || relevant.length === 0
+          ? null
+          : likely !== null
+            ? Date.parse(likely) <= scopeEnd
+            : remaining <= 0
+              ? true
+              : null,
       ...(reason ? { reason } : {}),
     };
   }
@@ -953,7 +970,14 @@ export function computeBurndown(input: BurndownInput): BurndownResult {
         const t = tl.times[i];
         if (t > end) break;
         applyEvent(st, e);
-        if (e.kind === "created" && created === undefined) created = t;
+        if (e.kind === "created") {
+          // A re-created id is a new task: keep the predecessor's finish (it
+          // was real work) and time the new one from its own creation.
+          if (hit) finished.push(hit);
+          hit = undefined;
+          created = t;
+          lastTaken = undefined;
+        }
         if (e.kind === "taken") lastTaken = t;
         if (e.kind === "reopened" || e.kind === "released") lastTaken = undefined;
         if (e.kind === "done" && t >= fromMs && inScope(st) && created !== undefined) {

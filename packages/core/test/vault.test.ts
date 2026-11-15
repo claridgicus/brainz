@@ -770,6 +770,49 @@ describe("task history + burndown", () => {
   });
 });
 
+describe("task history: editing a note from before the log", () => {
+  const legacy = (fm: Record<string, unknown>) =>
+    makeVault({
+      "t.md": note(
+        { id: "t", title: "T", type: "task", createdAt: "2026-10-01T00:00:00Z", relations: { part_of: ["m", "s"] }, ...fm },
+        "",
+      ),
+      "m.md": note({ id: "m", title: "M", type: "milestone" }, ""),
+      "s.md": note({ id: "s", title: "S", type: "iteration" }, ""),
+    });
+  const now = new Date("2026-11-10T00:00:00Z");
+  const oct5 = (vault: Awaited<ReturnType<typeof makeVault>>, scope: string) =>
+    vault.burndown({ scope, from: "2026-10-01" }, now).series?.find((p) => p.at === "2026-10-05T00:00:00.000Z");
+
+  it("reopening a task completed before the log keeps its past completion", async () => {
+    const vault = await legacy({ task_status: "done", taken_by: "w", taken_at: "2026-10-02T00:00:00Z", done_at: "2026-10-03T00:00:00Z" });
+    expect(oct5(vault, "m")).toMatchObject({ scope: 1, done: 1 });
+    await vault.upsertConcept({ id: "t", title: "T", body: "", taskStatus: "open" });
+    expect(vault.taskEvents().map((e) => e.kind)).toEqual([
+      "created",
+      "scope_added",
+      "scope_added",
+      "taken",
+      "done",
+      "reopened",
+    ]);
+    expect(oct5(vault, "m")).toMatchObject({ scope: 1, done: 1 });
+  });
+
+  it("removing a task from a sprint keeps its past membership", async () => {
+    const vault = await legacy({ task_status: "open" });
+    expect(oct5(vault, "s")).toMatchObject({ scope: 1 });
+    await vault.upsertConcept({ id: "t", title: "T", body: "", relations: { part_of: ["m"] } });
+    expect(oct5(vault, "s")).toMatchObject({ scope: 1 });
+    // Out of the sprint from the moment it was removed (the real clock).
+    expect(vault.burndown({ scope: "s" }, new Date(Date.now() + 60_000)).totals.scope).toBe(0);
+    // A second edit adds nothing more from the frontmatter.
+    const n = vault.taskEvents().length;
+    await vault.upsertConcept({ id: "t", title: "T", body: "", estimate: 3 });
+    expect(vault.taskEvents().map((e) => e.kind).slice(n)).toEqual(["estimated"]);
+  });
+});
+
 describe("task history: deleting a note from before the log", () => {
   it("persists the rebuildable history before the deleted event", async () => {
     const vault = await makeVault({

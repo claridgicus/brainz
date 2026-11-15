@@ -191,3 +191,13 @@ export function fmtHours(h: number | null | undefined): string {
   if (h === null || h === undefined) return "—";
   return h >= 48 ? `${(h / 24).toFixed(1)}d` : `${h.toFixed(1)}h`;
 }
+
+export type VelocityPeriod = NonNullable<BurndownResultWire["velocity"]>["periods"][number];
+
+/**
+ * The `{#each}` key of a velocity row: the iteration id (parallel iterations
+ * can start on the same day), else the period start (weekly periods).
+ */
+export function velocityKey(p: VelocityPeriod): string {
+  return p.id !== undefined ? `iteration:${p.id}` : `week:${p.from}`;
+}

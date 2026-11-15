@@ -404,6 +404,61 @@ describe("review regressions (VaultDO)", () => {
     expect(vault.burndown({ scope: "auth" }, new Date(Date.now() + 60_000)).totals.scope).toBe(0);
   });
 
+  it("editing a task from before the history table keeps its rebuilt history", async () => {
+    const { vault, fake } = await freshVault();
+    await vault.upsertConcept({ id: "m", title: "M", body: "", type: "milestone" });
+    await vault.upsertConcept({ id: "s", title: "S", body: "", type: "iteration" });
+    for (const id of ["done-t", "open-t"]) {
+      await vault.upsertConcept({ id, title: id, body: "", type: "task", relations: { part_of: ["m", "s"] } });
+    }
+    // Make them look pre-upgrade: October tasks with no recorded history.
+    fake.db
+      .prepare(
+        `UPDATE concept SET task_status = 'done', taken_by = 'w', taken_at = ?, done_at = ?, created_at = ? WHERE id = 'done-t'`,
+      )
+      .run("2026-10-02T00:00:00.000Z", "2026-10-03T00:00:00.000Z", "2026-10-01T00:00:00.000Z");
+    fake.db.prepare(`UPDATE concept SET created_at = ? WHERE id = 'open-t'`).run("2026-10-01T00:00:00.000Z");
+    fake.db.exec(`DELETE FROM task_event`);
+    const now = new Date("2026-11-10T00:00:00.000Z");
+    const oct5 = (scope: string) =>
+      vault.burndown({ scope, from: "2026-10-01" }, now).series?.find((p) => p.at === "2026-10-05T00:00:00.000Z");
+    expect(oct5("m")).toMatchObject({ scope: 2, done: 1 });
+    expect(oct5("s")).toMatchObject({ scope: 2, done: 1 });
+
+    // Reopening the completed one keeps its October completion.
+    vault.reopenTask({ id: "done-t" });
+    expect(vault.taskEvents("done-t").map((e) => e.kind)).toEqual([
+      "created",
+      "scope_added",
+      "scope_added",
+      "taken",
+      "done",
+      "reopened",
+    ]);
+    expect(oct5("m")).toMatchObject({ scope: 2, done: 1 });
+
+    // Taking the open one out of the sprint keeps its October membership.
+    await vault.upsertConcept({ id: "open-t", title: "open-t", body: "", relations: { part_of: ["m"] } });
+    expect(oct5("s")).toMatchObject({ scope: 2, done: 1 });
+    expect(vault.burndown({ scope: "s" }, new Date(Date.now() + 60_000)).totals.scope).toBe(1);
+  });
+
+  it("a re-created task id starts a fresh lifecycle", async () => {
+    const { vault } = await freshVault();
+    await vault.upsertConcept({ id: "t", title: "T", body: "", type: "task", taskStatus: "open" });
+    await vault.takeTask({ id: "t", takenBy: "a" });
+    await vault.completeTask({ id: "t", outcome: "first" });
+    vault.deleteConcept("t");
+    await vault.upsertConcept({ id: "t", title: "T", body: "", type: "task", taskStatus: "open" });
+    const later = () => new Date(Date.now() + 60_000);
+    expect(vault.burndown({}, later()).totals).toMatchObject({ scope: 1, done: 0, open: 1 });
+    // Its own completion is fresh work: both lives count as velocity.
+    await vault.completeTask({ id: "t", outcome: "second" });
+    const r = vault.burndown({}, later());
+    expect(r.totals).toMatchObject({ scope: 1, done: 1, open: 0 });
+    expect(r.velocity?.periods.reduce((n, p) => n + p.done, 0)).toBe(2);
+  });
+
   it("a stale claim re-taken under the same label records a fresh take", async () => {
     const { vault, fake } = await freshVault();
     await vault.upsertConcept({ id: "t", title: "T", body: "", type: "task", taskStatus: "open" });
